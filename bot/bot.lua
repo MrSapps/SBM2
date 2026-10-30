@@ -113,6 +113,12 @@ local function walkable(g, c, r)
 end
 
 local DIRS = { { 0, -1, "up" }, { 0, 1, "down" }, { -1, 0, "left" }, { 1, 0, "right" } }
+local function shuffleDirs()
+  for i = #DIRS, 2, -1 do
+    local j = math.random(i)
+    DIRS[i], DIRS[j] = DIRS[j], DIRS[i]
+  end
+end
 
 -- Timing model. Fuse counts down every 2 frames; FPT is a conservative
 -- walking speed at base speed (~1.2 px/frame -> ~13 frames per 16 px tile).
@@ -312,9 +318,29 @@ local step = nil  -- committed move: from (c,r) toward (tc,tr); false while lock
 local recent = {}  -- last few plan lines, dumped on death
 local lastPlan = ""
 
+-- Rollback search: in-memory savestates every SNAP_EVERY frames; a death
+-- reloads an older one and replays with shuffled tie-breaks, going further
+-- back the more often a snapshot has failed. After MAX_TRIES the death is
+-- accepted (it still covers the death code).
+local SNAP_EVERY, MAX_TRIES = 120, 12
+local snaps = {}          -- { frame, data }
+local triesAt = {}        -- rollbacks per snapshot frame (survives re-snapshots)
+local function timeLeft() return r16(0x5E10) * 60 + r16(0x5E12) end  -- stage timer
+local playing = false     -- unlocked in a stage since the last lock
+local rollback = false    -- set by think() on a death
+local deaths, rollbacks = 0, 0
+
 local function think()
   input = {}
   if (r16(P1 + P_LOCK) & 1) ~= 0 then
+    if playing then
+      playing = false
+      if r16(P1 + 0xA8) ~= r16(0x5D72) then
+        deaths = deaths + 1
+        -- A time-up can't be fixed by replaying the last few seconds.
+        rollback = timeLeft() > 1
+      end
+    end
     if step ~= false then
       local es = {}
       for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
@@ -332,6 +358,7 @@ local function think()
     return
   end
   if step == false then step = nil end
+  playing = true
   -- The border is always hard wall during play; anything else means the
   -- stage is loading or a cutscene is up.
   if not HARD[emu.read(MAP, WRAM, false)] then return end
@@ -509,6 +536,37 @@ local function onFrame()
     onNextInstruction(function() emu.loadSavestate(data) end)
     loaded = true
     return
+  end
+  if rollback then
+    rollback = false
+    -- Newest snapshot at least 60 frames before the death, then further
+    -- back by one per 3 failures there.
+    local i = #snaps
+    while i > 1 and snaps[i][1] > frame - 60 do i = i - 1 end
+    if i >= 1 then
+      i = math.max(1, i - (triesAt[snaps[i][1]] or 0) // 3)
+      local snap = snaps[i]
+      local tries = (triesAt[snap[1]] or 0) + 1
+      if tries <= MAX_TRIES then
+        triesAt[snap[1]] = tries
+        for k = #snaps, i + 1, -1 do snaps[k] = nil end
+        rollbacks = rollbacks + 1
+        log(string.format("%6d rollback to %d (try %d, deaths %d)", frame, snap[1], tries, deaths))
+        math.randomseed(rollbacks * 7919 + snap[1])
+        shuffleDirs()
+        onNextInstruction(function() emu.loadSavestate(snap[2]) end)
+        frame, step, playing, fuseSeen = snap[1], nil, false, {}
+        return
+      end
+    end
+  end
+  if frame % SNAP_EVERY == 0 and (r16(P1 + P_LOCK) & 1) == 0
+      and (#snaps == 0 or snaps[#snaps][1] < frame) then
+    local f = frame
+    onNextInstruction(function()
+      snaps[#snaps + 1] = { f, emu.createSavestate() }
+      if #snaps > 40 then table.remove(snaps, 1) end
+    end)
   end
   local t0 = os.clock()
   local ok, err = pcall(think)

@@ -37,3 +37,29 @@ unresolved indirect jumps, and width conflicts.
 - HiROM + FastROM, 8 Mbit, no SRAM. RESET $00:FA00, NMI $00:FD84.
 - Main loop: `$CC:003C`. It waits for the NMI counter at `$0036`, then dispatches the
   current scene through a 24-bit pointer at `$7F0000` → `$6A`, via `jml [$006A]` at `$CC:03E1`.
+
+## RAM map (so far)
+
+| Address | Meaning |
+|---|---|
+| `$0036` | NMI frame counter (main loop waits on it) |
+| `$C3/$C4` | pad 1 raw (`$4218/$4219`); `$C5..$C8` pads 2-4 |
+| `$7E8000`+`$100*n` | player structs, n=0..3 (`+$00` = `$9xxx` when live) |
+| `$7E8400`-`$7E8FFF` | enemy structs, same layout |
+| struct `+$10` / `+$18` | X / Y in pixels (fractions at `+$12` / `+$1A`) |
+| struct `+$52` bit 0 | no control (dying, warping in) |
+| struct `+$6E` | filtered input word (Up `$0800`, Down `$0400`, Left `$0200`, Right `$0100`) |
+| struct `+$E1` | fire range (guess) · `+$F1` bombs left to place |
+| `$7FC000` | tile map: 16 cols × 14 rows, 2 bytes/cell, rows `$80` apart |
+
+Tile codes: `$00` empty, `$01-$3F` flame, `$40-$4F` bomb, `$C2` soft block,
+`$C5/$C6` hard wall; `$66 $69 $C9 $D2` unknown so far.
+Tile (c,r) is centred at pixel (c·16, r·16+8).
+
+## Bot
+
+    SBM2_LOAD=state.mss bot/run.sh <outdir> <inputs> <shot frames>   # scripted input
+    cd tools/mesen2 && SBM2_OUT=... SBM2_FRAMES=... SBM2_LOAD=... \
+        ./Mesen --testrunner ../../baserom.sfc ../../bot/bot.lua    # bot v0
+
+Each run writes `run.cdl`; copy it into `coverage/` and run `make disasm`.

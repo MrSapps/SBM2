@@ -1,0 +1,10 @@
+*.sfc
+!/.gitkeep
+__pycache__/
+build/
+/tools/asar-src/
+/tools/mesen2/
+/tools/asar
+# Generated asm still embeds raw ROM data; keep out of git until data is
+# extracted from baserom.sfc at build time.
+/src/

@@ -33,8 +33,10 @@ def format_insn(ins, label_for=None):
         name = label_for(tgt) if label_for else None
         return f'{mn} {name or f"${tgt & 0xFFFF:04X}"}'
     if mode == 'move':
-        # Machine order is dest,src; asar syntax is "mvn src,dest".
-        return f'{mn} ${ins.operand >> 8:02X},${ins.operand & 0xFF:02X}'
+        # asar 1.91 emits the operands in written order, so write them in
+        # machine order (dest bank, then source bank).
+        dst, src = ins.operand & 0xFF, ins.operand >> 8
+        return f'{mn} ${dst:02X},${src:02X} ; dest=${dst:02X} src=${src:02X}'
     if mode in ('imm_m', 'imm_x'):
         n = ins.size - 1
         return f'{mn}.{"b" if n == 1 else "w"} #${ins.operand:0{2 * n}X}'

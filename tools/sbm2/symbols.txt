@@ -1,0 +1,34 @@
+# Names applied by disasm.py. Code: "BB:AAAA Name". Data: "XXXXXX Name"
+# (long operand) or "XXXX Name" (absolute / direct page operand).
+# Only names and our own notes live here, never ROM bytes.
+
+# --- code ---
+CC:003C MainLoop            ; waits on NmiCount, dispatches the scene
+C0:1797 ReadJoypads
+C0:BFE2 MapTileAtXY         ; $4A/$4C = x/y (+ stage origin) -> A = tile, $4E = index
+C1:4031 PlayerTileHandler   ; dispatches on (tile & $3F) under P1 via table C1:58DE
+C1:41A8 PlayerOnExitTile    ; tile $49 (open gate): clear if Exit_PanelState bit 15
+C1:2558 FindGoldPanels      ; lists tile $69 cells into GoldPanels (or $74 -> mode 1)
+C1:2335 CheckGoldPanels     ; mode 0: all panels became $70 -> Exit_PanelState |= $8000
+C1:2A9C FindExitGate        ; tile $C9 cell -> ExitGateCell
+C1:2ABF SpawnExitGateObject ; object slot $7E8400
+C1:44F6 MagnetUpdate        ; rotating magnets ($7E5828 list, tiles D2/D5/E0/E1)
+C1:476A InitMagnets
+C1:47E6 BuildMagnetList
+
+# --- direct page ---
+0036 NmiCount
+00C3 Joy1Raw
+
+# --- WRAM ---
+7E5828 Magnets              ; 4 x $40: +2 cell, +6 tile, +8 dir (0/2/4/6)
+7E5B56 GoldPanels           ; list of 8-byte entries: +0 state, +2 cell, +4; $FFFF end
+7E5D70 Exit_Blocked         ; negative = exit can't be used
+7E5D72 ExitGateCell
+7E5D94 Exit_PanelState      ; $FFFF none, bit 0 mode, bit 15 all panels done
+7E5EFB StageOriginY
+7E5F01 StageOriginX
+7E8000 Player1              ; $100-byte objects: +10 x, +18 y, +52 lock, +A8 cell
+7E80A8 Player1_Cell
+7F2000 Bombs                ; 40 x $100
+7FC000 TileMap              ; 32 x 32 cells, 2 bytes, rows $80 apart

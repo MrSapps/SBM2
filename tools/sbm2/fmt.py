@@ -25,8 +25,24 @@ def branch_target(ins):
     return (ins.addr & 0xFF0000) | (nxt + v) & 0xFFFF
 
 
-def format_insn(ins, label_for=None):
-    """label_for(addr24) -> label name or None."""
+DATA_MODES = {'dp', 'dpx', 'dpy', 'dpind', 'dpindx', 'dpindy', 'dpindl', 'dpindly',
+              'abs', 'absx', 'absy', 'long', 'longx'}
+
+
+def format_insn(ins, label_for=None, sym_for=None):
+    """label_for(addr24) -> label name or None.
+    sym_for(value, nbytes) -> data symbol name for an operand, or None."""
+    text = _format(ins, label_for)
+    mode = OPS[ins.op][1]
+    if sym_for and mode in DATA_MODES:
+        n = ins.size - 1
+        name = sym_for(ins.operand, n)
+        if name:
+            text = text.replace(f'${ins.operand:0{2 * n}X}', name, 1)
+    return text
+
+
+def _format(ins, label_for):
     mn, mode = OPS[ins.op]
     if mode in (REL, RELL):
         tgt = branch_target(ins)

@@ -2,6 +2,7 @@
 
 Traced code becomes instructions; everything else is emitted as db bytes.
 Usage: disasm.py baserom.sfc hints.txt outdir [coverage.cdl ...]
+Names come from symbols.txt next to hints.txt.
 """
 import os
 import sys
@@ -17,7 +18,27 @@ def label_name(addr, kind):
     return f'{kind}_{addr:06X}'
 
 
-def emit(rom, t, outdir):
+def load_symbols(path):
+    """symbols.txt: 'BB:AAAA Name' names code; 'XXXXXX Name' (long) or
+    'XXXX Name' (direct page / absolute) names data. '#' or ';' comments."""
+    code, data = {}, {}
+    if not path or not os.path.exists(path):
+        return code, data
+    for line in open(path):
+        line = line.split('#')[0].split(';')[0].strip()
+        if not line:
+            continue
+        addr, name = line.split()[:2]
+        if ':' in addr:
+            b, a = addr.split(':')
+            code[int(b, 16) << 16 | int(a, 16)] = name
+        else:
+            data[(int(addr, 16), len(addr) // 2)] = name
+    return code, data
+
+
+def emit(rom, t, outdir, symbols=({}, {})):
+    code_syms, data_syms = symbols
     starts = set(t.insns)
     # An instruction is emitted only if no other instruction starts inside it.
     good = {o for o, i in t.insns.items()
@@ -26,7 +47,13 @@ def emit(rom, t, outdir):
     for a, kind in t.labels.items():
         off = rom.offset(a)
         if off in good:
-            named[a] = label_name(a, kind)
+            named[a] = code_syms.get(a) or label_name(a, kind)
+
+    # Data symbols: a 3-byte name matches long operands; a 2-byte name
+    # matches absolute operands, and its low byte direct-page ones when the
+    # high byte is 0.
+    def sym_for(value, n):
+        return data_syms.get((value, 3 if n == 3 else 2))
 
     # Branches and jsr/jmp only encode the low 16 bits, so any mirror works.
     def label_for(addr):
@@ -40,6 +67,9 @@ def emit(rom, t, outdir):
     banks = len(rom.data) // 0x10000
     with open(os.path.join(outdir, 'main.asm'), 'w') as f:
         f.write('hirom\n\n')
+        for (value, n), name in sorted(data_syms.items(), key=lambda kv: kv[0]):
+            f.write(f'{name} = ${value:0{2 * n}X}\n')
+        f.write('\n')
         for b in range(banks):
             f.write(f'incsrc "bank_{0xC0 + b:02X}.asm"\n')
 
@@ -64,7 +94,7 @@ def emit(rom, t, outdir):
                 ins = t.insns[off]
                 mn = format_insn(ins, None).split()[0]
                 lf = long_label_for if mn in ('jsl', 'jml') else label_for
-                lines.append(f'  {format_insn(ins, lf)}')
+                lines.append(f'  {format_insn(ins, lf, sym_for)}')
                 off += ins.size
                 continue
             pending.append(rom.data[off])
@@ -88,7 +118,8 @@ if __name__ == '__main__':
     if t.cdl:
         extra += cdl_entries(rom, t.cdl)
     t.run(entries + extra)
-    emit(rom, t, sys.argv[3])
+    emit(rom, t, sys.argv[3], load_symbols(
+        os.path.join(os.path.dirname(os.path.abspath(sys.argv[2])), 'symbols.txt')))
     code = sum(i.size for i in t.insns.values())
     print(f'{code} code bytes ({100 * code / len(rom.data):.2f}%), '
           f'{len(t.problems)} problems')

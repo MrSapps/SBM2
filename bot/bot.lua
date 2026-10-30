@@ -1,18 +1,25 @@
+local WATCH_LUA = os.getenv("SBM2_WATCH_LUA")
+if WATCH_LUA and WATCH_LUA ~= "" then dofile(WATCH_LUA) end
 -- SBM2 bot v0: single-player normal game.
 --
 -- Reads the tile map and player 1 from WRAM, flees bomb blasts with BFS, and
 -- otherwise walks next to soft blocks and bombs them when an escape exists.
 -- Logs tile codes it has not classified yet so the tables below can grow.
 --
--- Env (same harness conventions as harness.lua):
---   SBM2_OUT     output dir; writes bot.log, run.cdl and shots
---   SBM2_FRAMES  frames to run (default 3600)
---   SBM2_SHOTS   frames to screenshot
+-- Normally launched by bot/drive.py, which restarts it from the last
+-- checkpoint if Mesen dies. Env:
+--   SBM2_OUT     output dir (bot_<frame0>.log, seg_<frame0>.cdl, ckpt.*, shots)
+--   SBM2_FRAMES  stop at this frame (default 3600)
+--   SBM2_FRAME0  frame number of the loaded state (default 0)
+--   SBM2_CKPT    checkpoint interval in frames (default 1000)
+--   SBM2_SHOTS   frames to screenshot (the tile map is logged too)
 --   SBM2_LOAD    savestate to start from
 
 local OUT = os.getenv("SBM2_OUT") or "build/bot"
 local FRAMES = tonumber(os.getenv("SBM2_FRAMES") or "3600")
 local LOAD = os.getenv("SBM2_LOAD"); if LOAD == "" then LOAD = nil end
+local FRAME0 = tonumber(os.getenv("SBM2_FRAME0") or "0")
+local CKPT = tonumber(os.getenv("SBM2_CKPT") or "1000")
 local shots = {}
 for f in (os.getenv("SBM2_SHOTS") or ""):gmatch("%d+") do shots[tonumber(f)] = true end
 
@@ -28,11 +35,12 @@ local P_LOCK = 0x52          -- bit 0 set: no control (dying/warping)
 local P_BOMBS_LEFT = 0xF1    -- bombs that can still be placed (byte)
 local ENEMY_FIRST, ENEMY_LAST = 0x8400, 0x8F00  -- enemy structs, same layout
 
--- Tiles of live enemies; a slot is live when +$00 is $9xxx (as for players).
+-- Tiles of live enemies: +$00 is $9xxx (as for players) and +$04 bit 15
+-- (set when killed) is clear.
 local function enemyTiles()
   local t = {}
   for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
-    if (r16(base) & 0xF000) == 0x9000 then
+    if (r16(base) & 0xF000) == 0x9000 and (r16(base + 4) & 0x8000) == 0 then
       local x, y = r16(base + P_X), r16(base + P_Y)
       t[#t + 1] = { (x + 8) // 16, y // 16 }
     end
@@ -41,10 +49,22 @@ local function enemyTiles()
 end
 
 -- Tile classification (grows as the log reveals more codes)
-local EMPTY = { [0x00] = true }
+local ITEM, PANEL = 0x44, 0x69
+local GATE_OPEN = 0x100  -- pseudo tile for an open exit gate
+local EMPTY = { [0x00] = true, [0x66] = true, [ITEM] = true, [PANEL] = true, [0x70] = true, [GATE_OPEN] = true }  -- $66 stairs
 local SOFT = { [0xC2] = true }
-local HARD = { [0xC5] = true, [0xC6] = true }
-local function isBomb(t) return t >= 0x40 and t <= 0x4F end
+local HARD = { [0xC5] = true, [0xC6] = true, [0xC9] = true }
+-- Hard tiles a blast still reaches (and stops at): the castle gate, which
+-- has an enemy-like object parked in it.
+local BLAST_STOP = { [0xC9] = true }
+-- Switches: a stage clears once every switch is flipped on by a blast and
+-- every enemy is dead. Seen: $D2/$D5 off (animating), $E0 on.
+-- $69 is a gold floor panel ($7E5B56 list); the exit needs all of them to
+-- turn into $70 ($7E5D94 bit 15, checked by C1:41xx). Test: step on them.
+local SWITCH_ON = 0xE0
+local function isSwitchOff(t) return (t >= 0xD0 and t < SWITCH_ON) or t == PANEL end
+for t = 0xD0, 0xEF do HARD[t] = true; BLAST_STOP[t] = true end
+local function isBomb(t) return t >= 0x40 and t <= 0x43 end
 local function isFlame(t) return t >= 0x01 and t <= 0x3F end
 
 local logLines, seenUnknown = {}, {}
@@ -78,47 +98,127 @@ end
 
 local DIRS = { { 0, -1, "up" }, { 0, 1, "down" }, { -1, 0, "left" }, { 1, 0, "right" } }
 
--- Cells reached by blasts. Per-bomb power isn't known yet, so use the
--- player's fire stat (guess: +$E1; confirm with a fire power-up).
-local P_FIRE = 0xE1
+-- Timing model. Fuse counts down every 2 frames; FPT is a conservative
+-- walking speed at base speed (~1.2 px/frame -> ~13 frames per 16 px tile).
+local P_FIRE = 0xE1           -- fire range (guess; confirm with a fire power-up)
 local RANGE = 1
-local function dangerMap(g, extraBomb)
-  local d = {}
-  local function mark(c, r) d[r * 16 + c] = true end
-  local function blast(c, r)
-    mark(c, r)
-    for _, dir in ipairs(DIRS) do
-      for k = 1, RANGE do
-        local cc, rr = c + dir[1] * k, r + dir[2] * k
-        if rr < 0 or rr >= MAP_H or cc < 0 or cc >= MAP_W then break end
-        local t = g[rr][cc]
-        if HARD[t] then break end
-        mark(cc, rr)
-        if SOFT[t] then break end
+local BOMBS, BOMB_SLOTS, BOMB_STRIDE = 0x12000, 40, 0x100  -- $7F2000 bomb table
+local FLAME_FRAMES = 40       -- how long a blast stays lethal (estimate)
+local NEW_FUSE = 150          -- fuse of a freshly placed bomb, in frames
+local FPT = 16                -- frames per tile walked
+
+-- Live bombs from the bomb table: {c, r, t (frames to explosion), power}.
+local function readBombs(g)
+  local list, byCell = {}, {}
+  for i = 0, BOMB_SLOTS - 1 do
+    local base = BOMBS + i * BOMB_STRIDE
+    local flags = emu.read(base + 1, WRAM, false)
+    if (flags & 0x80) ~= 0 then
+      local cell = r16(base + 2)
+      local c, r = (cell & 0x3F) // 2, cell >> 6
+      local t = (flags & 0x40) ~= 0 and 0 or emu.read(base + 4, WRAM, false) * 2
+      local b = { c, r, t, math.max(1, emu.read(base + 5, WRAM, false)) }
+      list[#list + 1] = b
+      byCell[r * 16 + c] = b
+    end
+  end
+  -- Bombs drawn on the map but missing from the table: assume they're close.
+  for r = 0, MAP_H - 1 do
+    for c = 0, MAP_W - 1 do
+      if isBomb(g[r][c]) and not byCell[r * 16 + c] then
+        local b = { c, r, 30, RANGE }
+        list[#list + 1] = b
+        byCell[r * 16 + c] = b
       end
+    end
+  end
+  return list, byCell
+end
+
+-- Cells a bomb at (c,r) with power p reaches.
+local function blastCells(g, c, r, p)
+  local cells = { { c, r } }
+  for _, dir in ipairs(DIRS) do
+    for k = 1, p do
+      local cc, rr = c + dir[1] * k, r + dir[2] * k
+      if rr < 0 or rr >= MAP_H or cc < 0 or cc >= MAP_W then break end
+      local t = g[rr][cc]
+      if HARD[t] and not BLAST_STOP[t] then break end
+      cells[#cells + 1] = { cc, rr }
+      if SOFT[t] or BLAST_STOP[t] then break end
+    end
+  end
+  return cells
+end
+
+-- Blast windows per cell: windows[cell] = list of {t0, t1} frames from now.
+-- extra = {c, r, t, power} adds a hypothetical bomb. Chain reactions: a bomb
+-- caught in an earlier blast goes off at that blast's time.
+local function blastWindows(g, extra)
+  local bombs, byCell = readBombs(g)
+  if extra then
+    bombs[#bombs + 1] = extra
+    byCell[extra[2] * 16 + extra[1]] = extra
+  end
+  local times = {}
+  for i, b in ipairs(bombs) do times[i] = b[3] end
+  local changed = true
+  while changed do
+    changed = false
+    for i, b in ipairs(bombs) do
+      for _, cell in ipairs(blastCells(g, b[1], b[2], b[4])) do
+        local other = byCell[cell[2] * 16 + cell[1]]
+        if other then
+          for j, o in ipairs(bombs) do
+            if o == other and times[j] > times[i] then times[j] = times[i]; changed = true end
+          end
+        end
+      end
+    end
+  end
+  local w = {}
+  local function add(k, t0, t1)
+    w[k] = w[k] or {}
+    w[k][#w[k] + 1] = { t0, t1 }
+  end
+  for i, b in ipairs(bombs) do
+    for _, cell in ipairs(blastCells(g, b[1], b[2], b[4])) do
+      add(cell[2] * 16 + cell[1], times[i] - 4, times[i] + FLAME_FRAMES)
     end
   end
   for r = 0, MAP_H - 1 do
     for c = 0, MAP_W - 1 do
-      if isBomb(g[r][c]) then blast(c, r) end
-      if isFlame(g[r][c]) then mark(c, r) end
+      if isFlame(g[r][c]) then add(r * 16 + c, -FLAME_FRAMES, FLAME_FRAMES // 2) end
     end
   end
-  if extraBomb then blast(extraBomb[1], extraBomb[2]) end
-  return d
+  return w
 end
 
--- BFS from (c,r); goal(c,r) -> bool. Returns first step direction and path length.
-local function bfs(g, c0, r0, goal, avoid)
+local function hit(windows, k, a, b)
+  local list = windows[k]
+  if not list then return false end
+  for _, win in ipairs(list) do
+    if win[1] <= b and win[2] >= a then return true end
+  end
+  return false
+end
+
+-- Timed BFS from (c0,r0). Moving one tile takes FPT frames; a cell is entered
+-- only if no blast window overlaps the time spent in it. t0 offsets the clock
+-- (for plans that start later). Returns first step direction and length.
+local function bfs(g, c0, r0, goal, avoid, windows, t0)
+  t0 = t0 or 0
   local q, head = { { c0, r0, nil, 0 } }, 1
   local seen = { [r0 * 16 + c0] = true }
   while q[head] do
     local c, r, first, n = table.unpack(q[head]); head = head + 1
-    if goal(c, r) then return first, n end
+    if goal(c, r, n) then return first, n end
     for _, dir in ipairs(DIRS) do
       local cc, rr = c + dir[1], r + dir[2]
       local k = rr * 16 + cc
-      if not seen[k] and walkable(g, cc, rr) and not (avoid and avoid[k]) then
+      local arrive = t0 + (n + 1) * FPT
+      if not seen[k] and walkable(g, cc, rr) and not (avoid and avoid[k])
+          and not (windows and hit(windows, k, arrive - FPT, arrive + FPT // 2)) then
         seen[k] = true
         q[#q + 1] = { cc, rr, first or dir[3], n + 1 }
       end
@@ -145,77 +245,135 @@ local function steer(dir, x, y, c, r)
   return dir
 end
 
-local frame, input = 0, {}
-local step = nil  -- committed move: from (c,r) toward (tc,tr)
+local frame, input = FRAME0, {}
+local step = nil  -- committed move: from (c,r) toward (tc,tr); false while locked
+local recent = {}  -- last few plan lines, dumped on death
 local lastPlan = ""
 
 local function think()
   input = {}
-  if (r16(P1 + P_LOCK) & 1) ~= 0 then step = nil; return end
+  if (r16(P1 + P_LOCK) & 1) ~= 0 then
+    if step ~= false then
+      local es = {}
+      for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
+        if (r16(base) & 0xF000) == 0x9000 then
+          es[#es + 1] = string.format("%04X(%d,%d)", base, r16(base + P_X), r16(base + P_Y))
+        end
+      end
+      local st = {}
+      for o = 0xE0, 0xFF do st[#st + 1] = string.format("%02X", emu.read(P1 + o, WRAM, false)) end
+      log(string.format("%6d DEATH/lock at px(%d,%d) enemies %s stats[E0..FF] %s after: %s", frame,
+        r16(P1 + P_X), r16(P1 + P_Y), table.concat(es, " "), table.concat(st, " "), table.concat(recent, " | ")))
+      writeFile(string.format("%s/death_%06d.png", OUT, frame), emu.takeScreenshot())
+    end
+    step = false
+    return
+  end
+  if step == false then step = nil end
   -- The border is always hard wall during play; anything else means the
   -- stage is loading or a cutscene is up.
   if not HARD[emu.read(MAP, WRAM, false)] then return end
   local g = readMap()
+  -- Exit gate: map index at $7E5D72; open once $7E5D94 bit 15 (all gold
+  -- panels blasted, or no panels: $FFFF) is set (checked at C1:41xx).
+  local gate = r16(0x5D72)
+  local gc, gr = (gate & 0x7F) // 2, gate >> 7
+  local gateOpen = (r16(0x5D94) & 0x8000) ~= 0 and g[gr] ~= nil and gate ~= 0
+  if gateOpen then g[gr][gc] = GATE_OPEN end
   RANGE = math.max(1, emu.read(P1 + P_FIRE, WRAM, false))
   local c, r, x, y = playerTile()
-  local danger = dangerMap(g)
-  local enemies = enemyTiles()
+  local windows = blastWindows(g)
+  local danger = {}
+  for k in pairs(windows) do danger[k] = true end
+  -- All live enemies are bomb targets; ones parked on hard tiles (the castle
+  -- gate) can't be walked up to, so hunting only considers the rest.
+  local enemies, walkers = {}, {}
+  for _, e in ipairs(enemyTiles()) do
+    -- The object parked in the gate cell is the gate itself (C1:2ABF).
+    if e[1] ~= gc or e[2] ~= gr then
+      enemies[#enemies + 1] = e
+      if not HARD[g[e[2]][e[1]]] then walkers[#walkers + 1] = e end
+    end
+  end
   -- Enemy tiles and their neighbours: never path through them.
   local nearEnemy = {}
   for _, e in ipairs(enemies) do
     nearEnemy[e[2] * 16 + e[1]] = true
     for _, d in ipairs(DIRS) do nearEnemy[(e[2] + d[2]) * 16 + e[1] + d[1]] = true end
   end
-  local avoid = {}
-  for k in pairs(danger) do avoid[k] = true end
-  for k in pairs(nearEnemy) do avoid[k] = true end
   local here = r * 16 + c
   local plan, dir
+  local function safeGoal(w)
+    return function(cc, rr) return not w[rr * 16 + cc] end
+  end
 
   if danger[here] then
     plan = "flee"
-    dir = bfs(g, c, r, function(cc, rr) return not danger[rr * 16 + cc] end, nearEnemy)
-      or bfs(g, c, r, function(cc, rr) return not danger[rr * 16 + cc] end)
+    dir = bfs(g, c, r, safeGoal(windows), nearEnemy, windows)
+      or bfs(g, c, r, safeGoal(windows), nil, windows)
+      or bfs(g, c, r, safeGoal(windows))
   elseif nearEnemy[here] then
     plan = "dodge"
-    dir = bfs(g, c, r, function(cc, rr) return not avoid[rr * 16 + cc] end)
+    dir = bfs(g, c, r, function(cc, rr)
+      return not nearEnemy[rr * 16 + cc] and not danger[rr * 16 + cc]
+    end, nil, windows)
   else
-    -- Is bombing here useful (a soft block in reach) and survivable?
-    local function bricksInReach(cc, rr)
-      for _, d in ipairs(DIRS) do
-        for k = 1, RANGE do
-          local tc, tr = cc + d[1] * k, rr + d[2] * k
-          if tr < 0 or tr >= MAP_H or tc < 0 or tc >= MAP_W then break end
-          local t = g[tr][tc]
-          if SOFT[t] then return true end
-          for _, e in ipairs(enemies) do
-            if e[1] == tc and e[2] == tr then return true end
-          end
-          if HARD[t] or not walkable(g, tc, tr) then break end
+    -- Is bombing here useful (a soft block or enemy in reach)?
+    local function targetsInReach(cc, rr)
+      for _, cell in ipairs(blastCells(g, cc, rr, RANGE)) do
+        local t = g[cell[2]][cell[1]]
+        if SOFT[t] or isSwitchOff(t) then return true end
+        for _, e in ipairs(walkers) do
+          if e[1] == cell[1] and e[2] == cell[2] then return true end
         end
       end
       return false
     end
-    local function canEscape(cc, rr)
-      local after = dangerMap(g, { cc, rr })
-      return bfs(g, cc, rr, function(ec, er) return not after[er * 16 + ec] end) ~= nil
+    -- After placing a bomb at (cc,rr) at time t, can we reach a cell no blast
+    -- will ever touch, without being in any blast on the way?
+    local function canEscape(cc, rr, t)
+      local w = blastWindows(g, { cc, rr, NEW_FUSE + t, RANGE })
+      for k in pairs(w) do
+        for _, win in ipairs(w[k]) do win[1] = win[1] - t; win[2] = win[2] - t end
+      end
+      return bfs(g, cc, rr, safeGoal(w), nearEnemy, w) ~= nil
     end
     local haveBomb = emu.read(P1 + P_BOMBS_LEFT, WRAM, false) > 0
-    if haveBomb and bricksInReach(c, r) and canEscape(c, r) then
+    if haveBomb and targetsInReach(c, r) and canEscape(c, r, 0) then
       plan = "bomb"
       -- Bomb placement is edge-triggered: press on alternate frames.
       input.a = frame % 2 == 0
     else
-      plan = "seek"
-      dir = bfs(g, c, r, function(cc, rr)
-        return (cc ~= c or rr ~= r or haveBomb) and bricksInReach(cc, rr) and canEscape(cc, rr)
-      end, avoid)
+      plan = "item"
+      dir = bfs(g, c, r, function(cc, rr) return g[rr][cc] == ITEM end, nearEnemy, windows)
+      if not dir and haveBomb then
+        plan = "seek"
+        dir = bfs(g, c, r, function(cc, rr, n)
+          return (cc ~= c or rr ~= r) and not danger[rr * 16 + cc]
+            and targetsInReach(cc, rr) and canEscape(cc, rr, n * FPT)
+        end, nearEnemy, windows)
+      end
+      if not dir and gateOpen and #walkers == 0 then
+        plan = "exit"
+        dir = bfs(g, c, r, function(cc, rr) return g[rr][cc] == GATE_OPEN end, nil, windows)
+      end
+      if not dir and #walkers > 0 and haveBomb then
+        -- Nothing to bomb from here: close in on the nearest enemy.
+        plan = "hunt"
+        dir = bfs(g, c, r, function(cc, rr)
+          for _, e in ipairs(walkers) do
+            if math.abs(e[1] - cc) + math.abs(e[2] - rr) <= 3 then return true end
+          end
+          return false
+        end, nearEnemy, windows)
+      end
+      if not dir then plan = "wait" end
     end
   end
 
   -- Commit to the next tile until its centre is reached, so the plan can't
   -- flip back and forth on a tile boundary.
-  if dir and not (step and plan == "seek") then
+  if dir and not (step and plan ~= "flee" and plan ~= "dodge") then
     local d = ({ up = { 0, -1 }, down = { 0, 1 }, left = { -1, 0 }, right = { 1, 0 } })[dir]
     step = { c = c, r = r, tc = c + d[1], tr = r + d[2], dir = dir }
   end
@@ -223,7 +381,7 @@ local function think()
     local tx, ty = step.tc * 16, step.tr * 16 + 8
     if math.abs(x - tx) <= 1 and math.abs(y - ty) <= 1 then
       step = nil
-    elseif plan == "seek" and avoid[step.tr * 16 + step.tc] then
+    elseif plan ~= "flee" and (danger[step.tr * 16 + step.tc] or nearEnemy[step.tr * 16 + step.tc]) then
       step = nil  -- the committed tile became dangerous; replan next frame
     else
       input[steer(step.dir, x, y, step.c, step.r)] = true
@@ -236,7 +394,11 @@ local function think()
     end
   end
   local s = string.format("%s %s @(%d,%d) px(%d,%d)", plan, dir or "-", c, r, x, y)
-  if s ~= lastPlan then log(string.format("%6d %s", frame, s)); lastPlan = s end
+  if s ~= lastPlan then
+    log(string.format("%6d %s", frame, s)); lastPlan = s
+    recent[#recent + 1] = string.format("%d %s", frame, s)
+    if #recent > 6 then table.remove(recent, 1) end
+  end
 end
 
 local function dumpCdl(path)
@@ -257,6 +419,30 @@ end
 local loaded = LOAD == nil
 emu.addEventCallback(function() emu.setInput(input, 0) end, emu.eventType.inputPolled)
 
+local LOGFILE = string.format("%s/bot_%06d.log", OUT, FRAME0)
+local function flushLog() writeFile(LOGFILE, table.concat(logLines, "\n") .. "\n") end
+
+local function logMap()
+  local rows = {}
+  for r = 0, MAP_H - 1 do
+    local t = {}
+    for c = 0, MAP_W - 1 do t[#t + 1] = string.format("%02X", emu.read(MAP + r * ROW + c * 2, WRAM, false)) end
+    rows[#rows + 1] = string.format("  map %2d: %s", r, table.concat(t, " "))
+  end
+  log(string.format("%6d map", frame) .. "\n" .. table.concat(rows, "\n"))
+end
+
+-- Savestate + this segment's CDL; the driver resumes from here on a crash.
+local function checkpoint()
+  onNextInstruction(function()
+    writeFile(OUT .. "/ckpt.mss.tmp", emu.createSavestate())
+    dumpCdl(string.format("%s/seg_%06d.cdl", OUT, FRAME0))
+    flushLog()
+    os.rename(OUT .. "/ckpt.mss.tmp", OUT .. "/ckpt.mss")
+    writeFile(OUT .. "/ckpt.txt", tostring(frame))
+  end)
+end
+
 local function onFrame()
   if not loaded then
     local fh = assert(io.open(LOAD, "rb")); local data = fh:read("a"); fh:close()
@@ -269,15 +455,18 @@ local function onFrame()
   if not ok then log("error: " .. tostring(err)) end
   local dt = os.clock() - t0
   if dt > 0.05 then log(string.format("%6d slow think %.3fs", frame, dt)) end
-  if frame % 300 == 0 then writeFile(OUT .. "/bot.log", table.concat(logLines, "\n") .. "\n") end
   if shots[frame] then
     writeFile(string.format("%s/f%06d.png", OUT, frame), emu.takeScreenshot())
+    logMap()
   end
   frame = frame + 1
   if frame >= FRAMES then
-    writeFile(OUT .. "/bot.log", table.concat(logLines, "\n") .. "\n")
-    dumpCdl(OUT .. "/run.cdl")
+    flushLog()
+    dumpCdl(string.format("%s/seg_%06d.cdl", OUT, FRAME0))
+    writeFile(OUT .. "/ckpt.txt", tostring(frame))
     emu.stop(0)
+  elseif (frame - FRAME0) % CKPT == 0 then
+    checkpoint()
   end
 end
 
@@ -285,7 +474,7 @@ emu.addEventCallback(function()
   local ok, err = pcall(onFrame)
   if not ok then
     log(string.format("%6d fatal: %s", frame, tostring(err)))
-    writeFile(OUT .. "/bot.log", table.concat(logLines, "\n") .. "\n")
+    flushLog()
     emu.stop(4)
   end
 end, emu.eventType.endFrame)

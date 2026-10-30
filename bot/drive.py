@@ -30,11 +30,11 @@ def main():
     os.makedirs(out, exist_ok=True)
     ckpt_txt = os.path.join(out, 'ckpt.txt')
     frame0, state = 0, start
-    for attempt in range(50):
+    for attempt in range(1000):
         env = dict(os.environ, SBM2_OUT=out, SBM2_FRAMES=str(frames),
                    SBM2_FRAME0=str(frame0), SBM2_LOAD=state, SBM2_SHOTS=shots)
         rc = subprocess.run(
-            ['./Mesen', '--testrunner', os.path.join(ROOT, 'baserom.sfc'),
+            ['./Mesen', '--testrunner', '--timeout=86400', os.path.join(ROOT, 'baserom.sfc'),
              os.path.join(ROOT, 'bot', 'bot.lua')],
             cwd=MESEN, env=env, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL).returncode

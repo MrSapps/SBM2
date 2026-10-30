@@ -1,3 +1,5 @@
+local WATCH_LUA = os.getenv("SBM2_WATCH_LUA")
+if WATCH_LUA and WATCH_LUA ~= "" then dofile(WATCH_LUA) end
 -- Headless harness: plays an input script, takes screenshots / WRAM dumps on
 -- requested frames, writes the CDL at the end.
 --

@@ -21,7 +21,8 @@ Tools (not in git):
   inside it, then `ln -s asar-src/build/asar/bin/asar tools/asar`.
 - Mesen 2.1.1: unzip `Mesen_2.1.1_Linux_x64.zip` into `tools/mesen2/`, run it
   once, copy `~/.config/Mesen2/settings.json` next to the binary (portable
-  mode), and set `"AllowIoOsAccess": true` in that copy.
+  mode), and set `"AllowIoOsAccess": true` and `"ScriptTimeout": 10` in that copy
+  (the bot can exceed the default 1 s per-frame Lua budget on wide maps).
 
 ## Usage
 
@@ -40,21 +41,36 @@ unresolved indirect jumps, and width conflicts.
 
 ## RAM map (so far)
 
+Names used in the asm live in `tools/sbm2/symbols.txt`.
+
 | Address | Meaning |
 |---|---|
 | `$0036` | NMI frame counter (main loop waits on it) |
 | `$C3/$C4` | pad 1 raw (`$4218/$4219`); `$C5..$C8` pads 2-4 |
 | `$7E8000`+`$100*n` | player structs, n=0..3 (`+$00` = `$9xxx` when live) |
-| `$7E8400`-`$7E8FFF` | enemy structs, same layout |
+| `$7E8400`-`$7E8FFF` | enemy structs, same layout; `$7E8400` is the exit gate object in castle stages |
 | struct `+$10` / `+$18` | X / Y in pixels (fractions at `+$12` / `+$1A`) |
-| struct `+$52` bit 0 | no control (dying, warping in) |
+| struct `+$52` bit 0 | no control (dying, warping in, entering the exit) |
 | struct `+$6E` | filtered input word (Up `$0800`, Down `$0400`, Left `$0200`, Right `$0100`) |
-| struct `+$E1` | fire range (guess) · `+$F1` bombs left to place |
-| `$7FC000` | tile map: 16 cols × 14 rows, 2 bytes/cell, rows `$80` apart |
+| struct `+$A8` | map index of the tile under the object |
+| struct `+$E1` | fire as shown on the HUD · `+$E2` blast length − 1 · `+$F1` bombs left to place |
+| `$7F2000` | bombs, 40 × `$100`: `+1` flags (`$80` live, `$40` exploding), `+2` cell (r·64 + c·2), `+4` fuse (×2 frames), `+7` blast length − 1, `+$A` map index |
+| `$7FC000` | tile map: 32 cols × 14 rows used, 2 bytes/cell, rows `$80` apart |
+| `$7E5EFB` / `$7E5F01` | stage origin Y / X: tile = (pos + origin) / 16 |
+| `$7E5B56` | gold panel list (8-byte entries, `$FFFF` end) |
+| `$7E5D94` | panel state: `$FFFF` no panels, bit 15 set once every panel is lit (`$69` → `$70`) |
+| `$7E5D72` | map index of the exit gate (tile `$C9` closed, `$49` open) |
+| `$7E5828` | rotating magnets, 4 × `$40` (tiles `$D2/$D5/$E0/$E1` = 4 directions) |
+| `$001C6A` | password index matched on the password screen |
+| `$7F0028`-`$7F002E` | password digits being entered (one word each) |
 
-Tile codes: `$00` empty, `$01-$3F` flame, `$40-$4F` bomb, `$C2` soft block,
-`$C5/$C6` hard wall; `$66 $69 $C9 $D2` unknown so far.
-Tile (c,r) is centred at pixel (c·16, r·16+8).
+Tile codes: `$00` empty, `$01-$3F` flame, `$40-$43` bomb, `$44` item,
+`$49` open exit gate, `$66` stairs, `$69` gold panel (unlit; a blast lights
+it → `$70`), `$C2` soft block, `$C5/$C6` hard wall, `$C9` closed gate,
+`$D0-$EF` magnets etc. The tile under the player is dispatched through the
+table at C1:58DE (`tile & $3F`); `$09` (open gate) ends the stage.
+
+Clearing a stage: kill every enemy, light every gold panel; the gate opens.
 
 ## Bot
 
@@ -62,4 +78,9 @@ Tile (c,r) is centred at pixel (c·16, r·16+8).
     cd tools/mesen2 && SBM2_OUT=... SBM2_FRAMES=... SBM2_LOAD=... \
         ./Mesen --testrunner ../../baserom.sfc ../../bot/bot.lua    # bot v0
 
+    python3 bot/drive.py <outdir> <start.mss> <frames> [shot frames]   # bot with crash resume
+    python3 bot/world_states.py      # build/states/world1..5.mss via the passwords
+
 Each run writes `run.cdl`; copy it into `coverage/` and run `make disasm`.
+Mesen's test runner quits after 100 s unless given `--timeout=<s>` (the
+scripts pass one).

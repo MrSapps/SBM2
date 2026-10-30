@@ -26,9 +26,24 @@ for f in (os.getenv("SBM2_SHOTS") or ""):gmatch("%d+") do shots[tonumber(f)] = t
 local WRAM = emu.memType.snesWorkRam
 local function r16(a) return emu.read16(a, WRAM, false) end
 
+-- Object coordinates are offset from the map grid by the stage's origin
+-- ($7E5F01 x, $7E5EFB y; the collision lookup at C0:BFE2 adds them):
+-- tile = (pos + origin) // 16, so tile centres are at c*16 + 8 - origin.
+local function origin() return r16(0x5F01), r16(0x5EFB) end
+local function toTile(x, y)
+  local ox, oy = origin()
+  return (x + ox) // 16, (y + oy) // 16
+end
+local function tileCentre(c, r)
+  local ox, oy = origin()
+  return c * 16 + 8 - ox, r * 16 + 8 - oy
+end
+
+
 -- RAM map (offsets into WRAM, i.e. $7E0000 = 0)
 local MAP = 0x1C000          -- $7FC000: 16 x 14 cells, 2 bytes each, rows $80 apart
-local MAP_W, MAP_H, ROW = 16, 14, 0x80
+local MAP_W, MAP_H, ROW = 32, 14, 0x80  -- stages are up to 32 tiles wide
+local KEY_W = 64  -- cell key = r * KEY_W + c
 local P1 = 0x8000            -- $7E8000: player 1 struct
 local P_X, P_Y = 0x10, 0x18  -- pixel position (fractions at +2)
 local P_LOCK = 0x52          -- bit 0 set: no control (dying/warping)
@@ -42,7 +57,8 @@ local function enemyTiles()
   for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
     if (r16(base) & 0xF000) == 0x9000 and (r16(base + 4) & 0x8000) == 0 then
       local x, y = r16(base + P_X), r16(base + P_Y)
-      t[#t + 1] = { (x + 8) // 16, y // 16 }
+      local c, r = toTile(x, y)
+      t[#t + 1] = { c, r }
     end
   end
   return t
@@ -100,12 +116,17 @@ local DIRS = { { 0, -1, "up" }, { 0, 1, "down" }, { -1, 0, "left" }, { 1, 0, "ri
 
 -- Timing model. Fuse counts down every 2 frames; FPT is a conservative
 -- walking speed at base speed (~1.2 px/frame -> ~13 frames per 16 px tile).
-local P_FIRE = 0xE1           -- fire range (guess; confirm with a fire power-up)
+local P_FIRE = 0xE2           -- blast length - 1 (+E1 is the HUD value); bombs copy it to +7
 local RANGE = 1
 local BOMBS, BOMB_SLOTS, BOMB_STRIDE = 0x12000, 40, 0x100  -- $7F2000 bomb table
 local FLAME_FRAMES = 40       -- how long a blast stays lethal (estimate)
 local NEW_FUSE = 150          -- fuse of a freshly placed bomb, in frames
 local FPT = 16                -- frames per tile walked
+
+-- Some bombs sit with a frozen fuse (seen in 1-2); after FROZEN frames
+-- without a fuse change, treat them as obstacles that only a chain reaction
+-- can set off.
+local FROZEN, fuseSeen = 120, {}
 
 -- Live bombs from the bomb table: {c, r, t (frames to explosion), power}.
 local function readBombs(g)
@@ -113,22 +134,32 @@ local function readBombs(g)
   for i = 0, BOMB_SLOTS - 1 do
     local base = BOMBS + i * BOMB_STRIDE
     local flags = emu.read(base + 1, WRAM, false)
-    if (flags & 0x80) ~= 0 then
+    if (flags & 0x80) == 0 then
+      fuseSeen[i] = nil
+    else
       local cell = r16(base + 2)
       local c, r = (cell & 0x3F) // 2, cell >> 6
-      local t = (flags & 0x40) ~= 0 and 0 or emu.read(base + 4, WRAM, false) * 2
-      local b = { c, r, t, math.max(1, emu.read(base + 5, WRAM, false)) }
+      local fuse = emu.read(base + 4, WRAM, false)
+      local t = (flags & 0x40) ~= 0 and 0 or fuse * 2
+      local now, seen = r16(0x36), fuseSeen[i]  -- NmiCount as the clock
+      if not seen or seen[1] ~= fuse or seen[3] ~= cell then
+        fuseSeen[i] = { fuse, now, cell }
+      elseif (now - seen[2]) & 0xFFFF > FROZEN and t > 0 then
+        t = 100000
+      end
+      -- Blast length = +7 + 1 (C0:3386).
+      local b = { c, r, t, emu.read(base + 7, WRAM, false) + 1 }
       list[#list + 1] = b
-      byCell[r * 16 + c] = b
+      byCell[r * KEY_W + c] = b
     end
   end
   -- Bombs drawn on the map but missing from the table: assume they're close.
   for r = 0, MAP_H - 1 do
     for c = 0, MAP_W - 1 do
-      if isBomb(g[r][c]) and not byCell[r * 16 + c] then
+      if isBomb(g[r][c]) and not byCell[r * KEY_W + c] then
         local b = { c, r, 30, RANGE }
         list[#list + 1] = b
-        byCell[r * 16 + c] = b
+        byCell[r * KEY_W + c] = b
       end
     end
   end
@@ -154,11 +185,12 @@ end
 -- Blast windows per cell: windows[cell] = list of {t0, t1} frames from now.
 -- extra = {c, r, t, power} adds a hypothetical bomb. Chain reactions: a bomb
 -- caught in an earlier blast goes off at that blast's time.
+local lastBombs, lastTimes  -- bombs + chained times from the latest call
 local function blastWindows(g, extra)
   local bombs, byCell = readBombs(g)
   if extra then
     bombs[#bombs + 1] = extra
-    byCell[extra[2] * 16 + extra[1]] = extra
+    byCell[extra[2] * KEY_W + extra[1]] = extra
   end
   local times = {}
   for i, b in ipairs(bombs) do times[i] = b[3] end
@@ -167,7 +199,7 @@ local function blastWindows(g, extra)
     changed = false
     for i, b in ipairs(bombs) do
       for _, cell in ipairs(blastCells(g, b[1], b[2], b[4])) do
-        local other = byCell[cell[2] * 16 + cell[1]]
+        local other = byCell[cell[2] * KEY_W + cell[1]]
         if other then
           for j, o in ipairs(bombs) do
             if o == other and times[j] > times[i] then times[j] = times[i]; changed = true end
@@ -183,12 +215,42 @@ local function blastWindows(g, extra)
   end
   for i, b in ipairs(bombs) do
     for _, cell in ipairs(blastCells(g, b[1], b[2], b[4])) do
-      add(cell[2] * 16 + cell[1], times[i] - 4, times[i] + FLAME_FRAMES)
+      add(cell[2] * KEY_W + cell[1], times[i] - 4, times[i] + FLAME_FRAMES)
     end
   end
   for r = 0, MAP_H - 1 do
     for c = 0, MAP_W - 1 do
-      if isFlame(g[r][c]) then add(r * 16 + c, -FLAME_FRAMES, FLAME_FRAMES // 2) end
+      if isFlame(g[r][c]) then add(r * KEY_W + c, -FLAME_FRAMES, FLAME_FRAMES // 2) end
+    end
+  end
+  lastBombs, lastTimes = bombs, times
+  return w
+end
+
+-- windows (from blastWindows(g) this frame) plus a bomb placed at (c,r)
+-- going off at tfire, or earlier if an existing blast reaches it. Bombs it
+-- reaches go off with it. Returns an overlay; windows is not modified.
+local function withBomb(g, windows, c, r, tfire)
+  for _, win in ipairs(windows[r * KEY_W + c] or {}) do
+    if win[2] >= 0 and win[1] + 4 < tfire then tfire = math.max(0, win[1] + 4) end
+  end
+  local w = setmetatable({}, { __index = windows })
+  local function add(k)
+    local l = {}
+    for i, win in ipairs(w[k] or {}) do l[i] = win end
+    l[#l + 1] = { tfire - 4, tfire + FLAME_FRAMES }
+    rawset(w, k, l)
+  end
+  local cells = blastCells(g, c, r, RANGE)
+  for _, cell in ipairs(cells) do add(cell[2] * KEY_W + cell[1]) end
+  for i, b in ipairs(lastBombs) do
+    if lastTimes[i] > tfire then
+      for _, cell in ipairs(cells) do
+        if cell[1] == b[1] and cell[2] == b[2] then
+          for _, bc in ipairs(blastCells(g, b[1], b[2], b[4])) do add(bc[2] * KEY_W + bc[1]) end
+          break
+        end
+      end
     end
   end
   return w
@@ -209,13 +271,13 @@ end
 local function bfs(g, c0, r0, goal, avoid, windows, t0)
   t0 = t0 or 0
   local q, head = { { c0, r0, nil, 0 } }, 1
-  local seen = { [r0 * 16 + c0] = true }
+  local seen = { [r0 * KEY_W + c0] = true }
   while q[head] do
     local c, r, first, n = table.unpack(q[head]); head = head + 1
     if goal(c, r, n) then return first, n end
     for _, dir in ipairs(DIRS) do
       local cc, rr = c + dir[1], r + dir[2]
-      local k = rr * 16 + cc
+      local k = rr * KEY_W + cc
       local arrive = t0 + (n + 1) * FPT
       if not seen[k] and walkable(g, cc, rr) and not (avoid and avoid[k])
           and not (windows and hit(windows, k, arrive - FPT, arrive + FPT // 2)) then
@@ -229,14 +291,14 @@ end
 
 local function playerTile()
   local x, y = r16(P1 + P_X), r16(P1 + P_Y)
-  -- Tile (c,r) is centred on x = c*16, y = r*16 + 8 (from the start position).
-  return (x + 8) // 16, y // 16, x, y
+  local c, r = toTile(x, y)
+  return c, r, x, y
 end
 
 -- Steer toward the centre of the next tile; align on the cross axis first,
 -- since the engine does not slide the player around corners.
 local function steer(dir, x, y, c, r)
-  local cx, cy = c * 16, r * 16 + 8
+  local cx, cy = tileCentre(c, r)
   if dir == "up" or dir == "down" then
     if x < cx - 1 then return "right" elseif x > cx + 1 then return "left" end
   else
@@ -280,7 +342,7 @@ local function think()
   local gc, gr = (gate & 0x7F) // 2, gate >> 7
   local gateOpen = (r16(0x5D94) & 0x8000) ~= 0 and g[gr] ~= nil and gate ~= 0
   if gateOpen then g[gr][gc] = GATE_OPEN end
-  RANGE = math.max(1, emu.read(P1 + P_FIRE, WRAM, false))
+  RANGE = emu.read(P1 + P_FIRE, WRAM, false) + 1
   local c, r, x, y = playerTile()
   local windows = blastWindows(g)
   local danger = {}
@@ -298,13 +360,13 @@ local function think()
   -- Enemy tiles and their neighbours: never path through them.
   local nearEnemy = {}
   for _, e in ipairs(enemies) do
-    nearEnemy[e[2] * 16 + e[1]] = true
-    for _, d in ipairs(DIRS) do nearEnemy[(e[2] + d[2]) * 16 + e[1] + d[1]] = true end
+    nearEnemy[e[2] * KEY_W + e[1]] = true
+    for _, d in ipairs(DIRS) do nearEnemy[(e[2] + d[2]) * KEY_W + e[1] + d[1]] = true end
   end
-  local here = r * 16 + c
+  local here = r * KEY_W + c
   local plan, dir
   local function safeGoal(w)
-    return function(cc, rr) return not w[rr * 16 + cc] end
+    return function(cc, rr) return not w[rr * KEY_W + cc] end
   end
 
   if danger[here] then
@@ -315,7 +377,7 @@ local function think()
   elseif nearEnemy[here] then
     plan = "dodge"
     dir = bfs(g, c, r, function(cc, rr)
-      return not nearEnemy[rr * 16 + cc] and not danger[rr * 16 + cc]
+      return not nearEnemy[rr * KEY_W + cc] and not danger[rr * KEY_W + cc]
     end, nil, windows)
   else
     -- Is bombing here useful (a soft block or enemy in reach)?
@@ -332,11 +394,8 @@ local function think()
     -- After placing a bomb at (cc,rr) at time t, can we reach a cell no blast
     -- will ever touch, without being in any blast on the way?
     local function canEscape(cc, rr, t)
-      local w = blastWindows(g, { cc, rr, NEW_FUSE + t, RANGE })
-      for k in pairs(w) do
-        for _, win in ipairs(w[k]) do win[1] = win[1] - t; win[2] = win[2] - t end
-      end
-      return bfs(g, cc, rr, safeGoal(w), nearEnemy, w) ~= nil
+      local w = withBomb(g, windows, cc, rr, NEW_FUSE + t)
+      return bfs(g, cc, rr, safeGoal(w), nearEnemy, w, t) ~= nil
     end
     local haveBomb = emu.read(P1 + P_BOMBS_LEFT, WRAM, false) > 0
     if haveBomb and targetsInReach(c, r) and canEscape(c, r, 0) then
@@ -349,7 +408,7 @@ local function think()
       if not dir and haveBomb then
         plan = "seek"
         dir = bfs(g, c, r, function(cc, rr, n)
-          return (cc ~= c or rr ~= r) and not danger[rr * 16 + cc]
+          return (cc ~= c or rr ~= r) and not danger[rr * KEY_W + cc]
             and targetsInReach(cc, rr) and canEscape(cc, rr, n * FPT)
         end, nearEnemy, windows)
       end
@@ -378,10 +437,10 @@ local function think()
     step = { c = c, r = r, tc = c + d[1], tr = r + d[2], dir = dir }
   end
   if step then
-    local tx, ty = step.tc * 16, step.tr * 16 + 8
+    local tx, ty = tileCentre(step.tc, step.tr)
     if math.abs(x - tx) <= 1 and math.abs(y - ty) <= 1 then
       step = nil
-    elseif plan ~= "flee" and (danger[step.tr * 16 + step.tc] or nearEnemy[step.tr * 16 + step.tc]) then
+    elseif plan ~= "flee" and (danger[step.tr * KEY_W + step.tc] or nearEnemy[step.tr * KEY_W + step.tc]) then
       step = nil  -- the committed tile became dangerous; replan next frame
     else
       input[steer(step.dir, x, y, step.c, step.r)] = true
@@ -442,6 +501,7 @@ local function checkpoint()
     writeFile(OUT .. "/ckpt.txt", tostring(frame))
   end)
 end
+
 
 local function onFrame()
   if not loaded then

@@ -8,3 +8,4 @@ build/
 # Generated asm still embeds raw ROM data; keep out of git until data is
 # extracted from baserom.sfc at build time.
 /src/
+/tools/mesen2-src/

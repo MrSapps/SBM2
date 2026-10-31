@@ -77,31 +77,6 @@ static uint16_t *load_input(const char *path, uint32_t *len)
     return in;
 }
 
-/* Exit addresses of the NMI wait loops, as a bitmap over the low 16 bits
- * plus the exact list. */
-static uint32_t exits[64];
-static int nexits;
-static uint8_t exit_lo[0x10000];
-
-static void find_wait_loops(void)
-{
-    static const uint8_t pat[8] = {0xAD, 0x36, 0x00, 0xCD, 0x36, 0x00, 0xF0, 0xFB};
-    for (uint32_t o = 0; o + 8 <= snes.rom_size && nexits < 62; o++) {
-        if (memcmp(snes.rom + o, pat, 8)) continue;
-        uint32_t x = o + 8;
-        exits[nexits++] = 0xC00000 + x;
-        if ((x & 0xFFFF) >= 0x8000 && x < 0x400000) exits[nexits++] = x;
-        exit_lo[x & 0xFFFF] = 1;
-    }
-}
-
-static int at_exit(uint32_t pc)
-{
-    if (!exit_lo[pc & 0xFFFF]) return 0;
-    for (int i = 0; i < nexits; i++) if (exits[i] == pc) return 1;
-    return 0;
-}
-
 static void print_history(unsigned n)
 {
     if (n > hist_n) n = hist_n;
@@ -186,7 +161,6 @@ int main(int argc, char **argv)
     snprintf(metapath, sizeof metapath, "%s.txt", argv[3]);
     FILE *mf = fopen(metapath, "r");
 
-    find_wait_loops();
     snes_power(&snes);
     snes.input = input;
     snes.input_len = input_len;
@@ -198,7 +172,7 @@ int main(int argc, char **argv)
     while (maxframes < 0 || n < maxframes) {
         Cpu *c = &snes.cpu;
         uint32_t pc = (uint32_t)c->pb << 16 | c->pc;
-        if (at_exit(pc)) {
+        if (snes.wait_at[pc & 0xFFFF] && snes_wait_point(&snes, pc) == WAIT_EXIT) {
             if (fread(ref, 1, WRAM, tf) != WRAM) break;
             unsigned long rn = 0, rframe = 0, rexit = 0, rline = 0, rlate = 0;
             unsigned long long rclock = 0;

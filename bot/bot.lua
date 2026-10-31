@@ -449,6 +449,7 @@ local function think()
     -- "enemy" (an enemy on or next to the blast), or nil. A blast that would
     -- re-toggle a finished panel is never useful.
     local function targetsInReach(cc, rr)
+      if g[rr][cc] == 0x66 then return nil end  -- no bombs on stairs
       local why = nil
       for _, cell in ipairs(blastCells(g, cc, rr, RANGE)) do
         local k = cell[2] * KEY_W + cell[1]

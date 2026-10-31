@@ -23,7 +23,20 @@
  *    has not touched them yet when C3:A303 samples them ($1C88 = $3B).
  *  - Back to IPL mode on $FF to $2140 (C3:A516) or $10 to $2141 (C3:A533;
  *    assumes no sound command is ever $10 on $2141).
- * Timings are in the "fake APU" section below. */
+ * Timings are in the "fake APU" section below.
+ *
+ * Frame-step mode (s->framestep) makes the game's state independent of time,
+ * for running an interpreter and a partly native port side by side:
+ *  - NMI is raised when the CPU reaches the cmp of an NMI wait loop (after its
+ *    lda, so the loop exits right after the handler). Each such NMI is one
+ *    logic frame; the pad is latched then from input[logic frame].
+ *  - Vblank no longer raises NMI or reads pads; HDMA is not run; V-IRQ off.
+ *  - $4212: auto-joypad never busy, vblank/hblank bits toggle on every read
+ *    (the game only waits on bit 0, but nothing can deadlock either way).
+ *    $4210 bit 7 is set by each frame-step NMI.
+ *  - APU: echoes, the driver switch, its $AA ready flag and acks are all
+ *    immediate.
+ * DMA still counts time, but nothing reads the clock in this mode. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -47,8 +60,9 @@ static void line_start(Snes *s)
     if (s->vcount == LINES) {
         s->vcount = 0;
         s->field ^= 1;
-        s->rdnmi &= 0x7F;
+        if (!s->framestep) s->rdnmi &= 0x7F;
     }
+    if (s->framestep) return;
     if (s->vcount == VBLANK_LINE) {
         s->frame++;
         s->rdnmi |= 0x80;
@@ -80,7 +94,9 @@ static void tick(Snes *s, uint32_t n)
     s->clock += n;
     s->hclock += n;
     for (;;) {
-        if (!s->hdma_inited && s->vcount == 0 && s->hclock >= HDMA_INIT_AT) {
+        if (s->framestep) {
+            /* no HDMA */
+        } else if (!s->hdma_inited && s->vcount == 0 && s->hclock >= HDMA_INIT_AT) {
             s->hdma_inited = 1;
             hdma_init(s);
         }
@@ -89,7 +105,7 @@ static void tick(Snes *s, uint32_t n)
             s->clock += REFRESH;
             s->hclock += REFRESH;
         }
-        if (!s->hdma_done && s->vcount < VBLANK_LINE && s->hclock >= HDMA_AT) {
+        if (!s->framestep && !s->hdma_done && s->vcount < VBLANK_LINE && s->hclock >= HDMA_AT) {
             s->hdma_done = 1;
             hdma_line(s);
         }
@@ -152,7 +168,8 @@ enum { SWITCH_IDLE = 54000, SWITCH_BUSY = 189300,
 static void apu_ipl(Snes *s, int loader)
 {
     memcpy(s->apu_prev, s->apu_out, 4);
-    s->apu_switch_at = loader ? s->clock + (s->apu_busy ? SWITCH_BUSY : SWITCH_IDLE) : 0;
+    s->apu_switch_at = loader && !s->framestep ?
+        s->clock + (s->apu_busy ? SWITCH_BUSY : SWITCH_IDLE) : 0;
     s->apu_loader = loader ? 1 + s->apu_busy : 0;
     s->apu_mode = 0;
     s->apu_echo_pending = 0;
@@ -169,7 +186,7 @@ static void apu_echo(Snes *s, uint8_t v, int block)
     if (now > t) t += (now - t + 7 * SPC_MC - 1) / (7 * SPC_MC) * (7 * SPC_MC);
     t += (9 + (block ? BLOCK : 0)) * SPC_MC;
     if (s->apu_mode == 0 && s->apu_loader) t += KICK * SPC_MC;
-    s->apu_echo_at = t / 1000;
+    s->apu_echo_at = s->framestep ? 0 : t / 1000;
     s->apu_echo_val = v;
     s->apu_echo_pending = 1;
     s->apu_ready = t + (s->apu_loader ? 13 * SPC_MC - 550 : 16 * SPC_MC);
@@ -179,7 +196,7 @@ static void apu_start_driver(Snes *s)
 {
     s->apu_mode = 2;
     s->apu_busy = 0;
-    s->apu_aa_at = !s->apu_loader ? 0 :
+    s->apu_aa_at = !s->apu_loader || s->framestep ? 0 :
         s->apu_echo_at + (s->apu_loader == 2 ? INIT_BUSY : INIT_IDLE);
 }
 
@@ -226,7 +243,7 @@ static void apu_write(Snes *s, int port, uint8_t v)
         if (port < 2) {
             if (port == 0) s->apu_echo_pending = 0;
             s->apu_ack_val[port] = v ^ 0x80;
-            s->apu_ack_at[port] = s->clock + ACK;
+            s->apu_ack_at[port] = s->clock + (s->framestep ? 0 : ACK);
         }
         break;
     }
@@ -412,6 +429,7 @@ static uint8_t reg_read(Snes *s, uint16_t a)
     case 0x4210: v = (s->mdr & 0x70) | s->rdnmi | 0x02; s->rdnmi &= 0x7F; return v;
     case 0x4211: v = (s->mdr & 0x7F) | s->timeup; s->timeup = 0; s->cpu.irq = 0; return v;
     case 0x4212:
+        if (s->framestep) return (s->mdr & 0x3E) | (s->fs_toggle ^= 0xC0);
         return (s->mdr & 0x3E) |
                (s->vcount >= VBLANK_LINE ? 0x80 : 0) |
                (s->hclock >= 1096 || s->hclock < 4 ? 0x40 : 0) |
@@ -522,6 +540,32 @@ uint8_t snes_peek(void *ctx, uint32_t addr)
     return 0;
 }
 
+uint8_t snes_read(Snes *s, uint32_t addr) { return bus_read(s, addr & 0xFFFFFF); }
+void snes_write(Snes *s, uint32_t addr, uint8_t v) { bus_write(s, addr & 0xFFFFFF, v); }
+
+static void find_wait_loops(Snes *s)
+{
+    static const uint8_t pat[8] = {0xAD, 0x36, 0x00, 0xCD, 0x36, 0x00, 0xF0, 0xFB};
+    s->wait_at = calloc(0x10000, 1);
+    for (uint32_t o = 0; o + 8 <= s->rom_size && s->nwait < 62; o++) {
+        if (memcmp(s->rom + o, pat, 8)) continue;
+        s->wait_lo[s->nwait++] = 0xC00000 + o;
+        /* code in $8000-$FFFF can also run from the bank $00-$3F mirror */
+        if ((o & 0xFFFF) >= 0x8000 && o < 0x400000) s->wait_lo[s->nwait++] = o;
+        s->wait_at[(o + 3) & 0xFFFF] = WAIT_CMP;
+        s->wait_at[(o + 8) & 0xFFFF] = WAIT_EXIT;
+    }
+}
+
+int snes_wait_point(const Snes *s, uint32_t pc)
+{
+    int k = s->wait_at[pc & 0xFFFF];
+    if (!k) return 0;
+    uint32_t lo = pc - (k == WAIT_CMP ? 3 : 8);
+    for (int i = 0; i < s->nwait; i++) if (s->wait_lo[i] == lo) return k;
+    return 0;
+}
+
 int snes_load(Snes *s, const char *path)
 {
     memset(s, 0, sizeof *s);
@@ -543,6 +587,7 @@ int snes_load(Snes *s, const char *path)
         s->sram_size = 0x400u << n;
         s->sram = calloc(1, s->sram_size);
     }
+    find_wait_loops(s);
     return 0;
 }
 
@@ -550,7 +595,8 @@ void snes_free(Snes *s)
 {
     free(s->rom);
     free(s->sram);
-    s->rom = s->sram = NULL;
+    free(s->wait_at);
+    s->rom = s->sram = s->wait_at = NULL;
 }
 
 void snes_power(Snes *s)
@@ -579,6 +625,7 @@ void snes_power(Snes *s)
     s->cpu_speed = 8;
     s->nmi_pending = 0;
     s->nmi_at = s->cycle_start = 0;
+    s->fs_raised = s->fs_toggle = 0;
     memset(s->apu_in, 0, sizeof s->apu_in);
     apu_ipl(s, 0);
     s->apu_count = s->apu_busy = 0;
@@ -596,11 +643,32 @@ void snes_power(Snes *s)
     s->refreshed = 0;
 }
 
+/* Frame-step NMI: at a wait loop's cmp, once per wait. */
+static void framestep_nmi(Snes *s)
+{
+    uint32_t pc = (uint32_t)s->cpu.pb << 16 | s->cpu.pc;
+    int k = s->wait_at[pc & 0xFFFF] ? snes_wait_point(s, pc) : 0;
+    if (k == WAIT_EXIT) s->fs_raised = 0;
+    if (k != WAIT_CMP || s->fs_raised || !(s->nmitimen & 0x80)) return;
+    s->fs_raised = 1;
+    s->rdnmi |= 0x80;
+    if (s->nmitimen & 0x01) {
+        s->joy[0] = s->frame < s->input_len ? s->input[s->frame] : 0;
+        s->joy[1] = s->joy[2] = s->joy[3] = 0;
+        s->ser[0] = 0xFFFFFFFFu;
+        s->ser[1] = 0;
+    }
+    s->frame++;
+    s->cpu.nmi = 1;
+}
+
 void snes_step(Snes *s)
 {
-    if (s->nmi_pending && s->nmi_at <= s->cycle_start) {
+    if (s->framestep) framestep_nmi(s);
+    else if (s->nmi_pending && s->nmi_at <= s->cycle_start) {
         s->nmi_pending = 0;
         s->cpu.nmi = 1;
     }
+    if (s->hook && !s->cpu.nmi && !s->cpu.wai && !s->cpu.stp && s->hook(s)) return;
     cpu_step(&s->cpu);
 }

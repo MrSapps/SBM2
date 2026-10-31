@@ -59,10 +59,26 @@ typedef struct Snes {
     uint8_t apu_prev[4], apu_ack_val[2];
     uint64_t apu_ack_at[2];
 
-    /* input: pad 1 for video frame n is input[n] (0 past the end) */
+    /* input: pad 1 for frame n is input[n] (0 past the end); a frame is a
+     * video frame, or a logic frame in frame-step mode */
     const uint16_t *input;
     uint32_t input_len;
+
+    /* NMI wait loops (lda $0036 / cmp $0036 / beq), found in the ROM:
+     * wait_at[pc & $FFFF] is WAIT_CMP at the cmp, WAIT_EXIT after the beq. */
+    uint32_t wait_lo[64];
+    int nwait;
+    uint8_t *wait_at;
+
+    /* Frame-step mode (see snes.c): time no longer drives NMI. */
+    uint8_t framestep, fs_raised, fs_toggle;
+
+    /* Called before each instruction (not before taking an interrupt); if it
+     * returns nonzero it has executed in place of the interpreter. */
+    int (*hook)(struct Snes *s);
 } Snes;
+
+enum { WAIT_CMP = 1, WAIT_EXIT = 2 };
 
 /* Loads the ROM (a copier header is skipped). Returns 0 on success. */
 int snes_load(Snes *s, const char *path);
@@ -73,5 +89,10 @@ void snes_power(Snes *s);
 void snes_step(Snes *s);
 /* Debug view of the bus: no side effects, no time. */
 uint8_t snes_peek(void *s, uint32_t addr);
+/* Bus access as the CPU would make it (side effects and time). */
+uint8_t snes_read(Snes *s, uint32_t addr);
+void snes_write(Snes *s, uint32_t addr, uint8_t v);
+/* WAIT_CMP / WAIT_EXIT if pc (24-bit) is that point of a wait loop. */
+int snes_wait_point(const Snes *s, uint32_t pc);
 
 #endif

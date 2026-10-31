@@ -42,7 +42,7 @@ end
 
 -- RAM map (offsets into WRAM, i.e. $7E0000 = 0)
 local MAP = 0x1C000          -- $7FC000: 16 x 14 cells, 2 bytes each, rows $80 apart
-local MAP_W, MAP_H, ROW = 32, 14, 0x80  -- stages are up to 32 tiles wide
+local MAP_W, MAP_H, ROW = 32, 32, 0x80  -- 32x32 buffer (C0:BFE2 masks the index to $0FFF)
 local KEY_W = 64  -- cell key = r * KEY_W + c
 local P1 = 0x8000            -- $7E8000: player 1 struct
 local P_X, P_Y = 0x10, 0x18  -- pixel position (fractions at +2)
@@ -58,7 +58,7 @@ local function enemyTiles()
     if (r16(base) & 0xF000) == 0x9000 and (r16(base + 4) & 0x8000) == 0 then
       local x, y = r16(base + P_X), r16(base + P_Y)
       local c, r = toTile(x, y)
-      t[#t + 1] = { c, r }
+      if c >= 0 and c < MAP_W and r >= 0 and r < MAP_H then t[#t + 1] = { c, r } end
     end
   end
   return t
@@ -67,7 +67,8 @@ end
 -- Tile classification (grows as the log reveals more codes)
 local ITEM, PANEL = 0x44, 0x69
 local GATE_OPEN = 0x100  -- pseudo tile for an open exit gate
-local EMPTY = { [0x00] = true, [0x66] = true, [ITEM] = true, [PANEL] = true, [0x70] = true, [GATE_OPEN] = true }  -- $66 stairs
+local EMPTY = { [0x00] = true, [0x66] = true, [ITEM] = true, [PANEL] = true, [0x70] = true, [0x73] = true, [0x74] = true,
+  [GATE_OPEN] = true }  -- $66 stairs
 local SOFT = { [0xC2] = true }
 local HARD = { [0xC5] = true, [0xC6] = true, [0xC9] = true }
 -- Hard tiles a blast still reaches (and stops at): the castle gate, which
@@ -78,7 +79,28 @@ local BLAST_STOP = { [0xC9] = true }
 -- $69 is a gold floor panel ($7E5B56 list); the exit needs all of them to
 -- turn into $70 ($7E5D94 bit 15, checked by C1:41xx). Test: step on them.
 local SWITCH_ON = 0xE0
-local function isSwitchOff(t) return (t >= 0xD0 and t < SWITCH_ON) or t == PANEL end
+local function isSwitchOff(t) return t >= 0xD0 and t < SWITCH_ON end
+
+-- Gold panels ($7E5B56 list, 8-byte entries: +0 bit 0 toggled, +2 map index;
+-- $FFFF ends). Mode ($7E5D94 bit 0) 0: tile $69 lights to $70 when blasted.
+-- Mode 1 ($73/$74 tiles): every blast that clears over a panel toggles it
+-- (C0:E505 -> C1:2282); the exit needs all toggled (C1:2335).
+-- Returns sets of cell keys: todo (blast these), done (don't blast again).
+local function panels()
+  local todo, done = {}, {}
+  local state = r16(0x5D94)
+  if state == 0xFFFF or (state & 0x8000) ~= 0 then return todo, done end
+  local a = 0x5B56
+  while r16(a) ~= 0xFFFF and a < 0x5B56 + 8 * 32 do
+    local cell = r16(a + 2)
+    local k = (cell >> 7) * KEY_W + (cell & 0x7F) // 2
+    if (state & 1) == 0 then
+      if emu.read(MAP + cell, WRAM, false) == PANEL then todo[k] = true end
+    elseif (r16(a) & 1) == 0 then todo[k] = true else done[k] = true end
+    a = a + 8
+  end
+  return todo, done
+end
 for t = 0xD0, 0xEF do HARD[t] = true; BLAST_STOP[t] = true end
 local function isBomb(t) return t >= 0x40 and t <= 0x43 end
 -- Blasts write $01 (C0:E8E0); other low codes ($07 $08 $0E $14...) are floor
@@ -333,6 +355,15 @@ local function timeLeft() return r16(0x5E10) * 60 + r16(0x5E12) end  -- stage ti
 local playing = false     -- unlocked in a stage since the last lock
 local rollback = false    -- set by think() on a death
 local deaths, rollbacks = 0, 0
+-- Ambush search: a bomb placed only for an enemy is tried from a savestate;
+-- if nobody died AMBUSH_FRAMES later, reload and retry with a random delay
+-- and shuffled tie-breaks, up to AMBUSH_TRIES times.
+local AMBUSH_FRAMES, AMBUSH_TRIES = 220, 5
+local ambush = nil        -- { frame, data, alive, tries }
+local ambushStart = false -- think() wants to bomb for an enemy
+local ambushHold = 0      -- no enemy-only bombs before this frame
+local ambushes, ambushHits = 0, 0
+local function liveEnemies() return #enemyTiles() end
 
 local function think()
   input = {}
@@ -394,6 +425,7 @@ local function think()
     nearEnemy[e[2] * KEY_W + e[1]] = true
     for _, d in ipairs(DIRS) do nearEnemy[(e[2] + d[2]) * KEY_W + e[1] + d[1]] = true end
   end
+  local panelTodo, panelDone = panels()
   local here = r * KEY_W + c
   local plan, dir
   local function safeGoal(w)
@@ -412,15 +444,24 @@ local function think()
     end, nil, windows)
   else
     -- Is bombing here useful (a soft block or enemy in reach)?
+    -- Is bombing at (cc,rr) useful? "obj" (soft block, switch, panel),
+    -- "enemy" (an enemy on or next to the blast), or nil. A blast that would
+    -- re-toggle a finished panel is never useful.
     local function targetsInReach(cc, rr)
+      local why = nil
       for _, cell in ipairs(blastCells(g, cc, rr, RANGE)) do
+        local k = cell[2] * KEY_W + cell[1]
+        if panelDone[k] then return nil end
         local t = g[cell[2]][cell[1]]
-        if SOFT[t] or isSwitchOff(t) then return true end
-        for _, e in ipairs(walkers) do
-          if e[1] == cell[1] and e[2] == cell[2] then return true end
+        if panelTodo[k] or SOFT[t] or isSwitchOff(t) then why = "obj" end
+        -- Enemies wander, so one tile off the blast is close enough to try.
+        if not why then
+          for _, e in ipairs(walkers) do
+            if math.abs(e[1] - cell[1]) + math.abs(e[2] - cell[2]) <= 1 then why = "enemy" end
+          end
         end
       end
-      return false
+      return why
     end
     -- After placing a bomb at (cc,rr) at time t, can we reach a cell no blast
     -- will ever touch, without being in any blast on the way?
@@ -429,8 +470,11 @@ local function think()
       return bfs(g, cc, rr, safeGoal(w), nearEnemy, w, t) ~= nil
     end
     local haveBomb = emu.read(P1 + P_BOMBS_LEFT, WRAM, false) > 0
-    if haveBomb and targetsInReach(c, r) and canEscape(c, r, 0) then
+    local why = haveBomb and targetsInReach(c, r)
+    if why == "enemy" and frame < ambushHold then why = nil end
+    if why and canEscape(c, r, 0) then
       plan = "bomb"
+      if why == "enemy" and not ambush then ambushStart = true end
       -- Bomb placement is edge-triggered: press on alternate frames.
       input.a = frame % 2 == 0
     else
@@ -543,6 +587,7 @@ local function onFrame()
   end
   if rollback then
     rollback = false
+    ambush = nil
     -- Newest snapshot at least 60 frames before the death, then further
     -- back by one per 3 failures there.
     local i = #snaps
@@ -572,8 +617,36 @@ local function onFrame()
       if #snaps > 40 then table.remove(snaps, 1) end
     end)
   end
+  if ambush and frame >= ambush[1] + AMBUSH_FRAMES then
+    if liveEnemies() < ambush[3] then
+      ambushHits = ambushHits + 1
+      log(string.format("%6d ambush hit (try %d; %d/%d)", frame, ambush[4], ambushHits, ambushes))
+      ambush = nil
+    elseif ambush[4] < AMBUSH_TRIES and ambush[2] then
+      ambush[4] = ambush[4] + 1
+      local snap = ambush
+      for k = #snaps, 1, -1 do if snaps[k][1] > snap[1] then snaps[k] = nil end end
+      shuffleDirs()
+      onNextInstruction(function() emu.loadSavestate(snap[2]) end)
+      frame, step, playing, fuseSeen = snap[1], nil, false, {}
+      ambushHold = frame + math.random(8, 60)
+      return
+    else
+      log(string.format("%6d ambush gave up", frame))
+      ambush, ambushHold = nil, frame + 30
+    end
+  end
   local t0 = os.clock()
   local ok, err = pcall(think)
+  if ambushStart then
+    ambushStart = false
+    if not ambush then
+      ambushes = ambushes + 1
+      local a = { frame, nil, liveEnemies(), 0 }
+      ambush = a
+      onNextInstruction(function() a[2] = emu.createSavestate() end)
+    end
+  end
   if not ok then log("error: " .. tostring(err)) end
   local dt = os.clock() - t0
   if dt > 0.05 then log(string.format("%6d slow think %.3fs", frame, dt)) end

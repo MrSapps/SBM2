@@ -421,7 +421,12 @@ local function think()
   playing = true
   -- The border is always hard wall during play; anything else means the
   -- stage is loading or a cutscene is up.
-  if not HARD[emu.read(MAP, WRAM, false)] then
+  -- In a normal-game stage: hard border tile, not battle mode ($B9 bit 15),
+  -- normal flag $BC, player 1 object live. Anything else (title, attract
+  -- demo, cutscenes, battle) counts as off-stage.
+  local inStage = HARD[emu.read(MAP, WRAM, false)] and (r16(0xB9) & 0x8000) == 0
+    and emu.read(0xBC, WRAM, false) == 1 and (r16(P1) & 0xF000) == 0x9000
+  if not inStage then
     -- Out of a stage. After a game over the CONTINUE screen waits for Start
     -- (and times out to the title); pulse Start once it has been a while.
     -- Out of a stage (intro card, cutscene, or game over -> title). After

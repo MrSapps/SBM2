@@ -349,6 +349,7 @@ local step = nil  -- committed move: from (c,r) toward (tc,tr); false while lock
 local recent = {}  -- last few plan lines, dumped on death
 local lastPlan = ""
 local offStage = 0  -- frames since the last stage frame
+local lastWorld, gameOver = 0, false
 
 -- Rollback search: in-memory savestates every SNAP_EVERY frames; a death
 -- reloads an older one and replays with shuffled tie-breaks, going further
@@ -416,11 +417,19 @@ local function think()
   if not HARD[emu.read(MAP, WRAM, false)] then
     -- Out of a stage. After a game over the CONTINUE screen waits for Start
     -- (and times out to the title); pulse Start once it has been a while.
+    -- Out of a stage (intro card, cutscene, or game over -> title). After
+    -- a long time out, assume game over and let drive.py continue from the
+    -- world's password state (what CONTINUE + password does in the game).
     offStage = offStage + 1
-    if offStage > 300 and offStage % 60 < 4 then input.start = true end
+    if offStage == 1500 then
+      writeFile(OUT .. "/gameover.txt", tostring(lastWorld + 1))
+      log(string.format("%6d game over in world %d", frame, lastWorld + 1))
+      gameOver = true
+    end
     return
   end
   offStage = 0
+  lastWorld = emu.read(0x1C6A, WRAM, false)  -- password index = world - 1
   local g = readMap()
   -- Exit gate: map index at $7E5D72; open once $7E5D94 bit 15 (all gold
   -- panels blasted, or no panels: $FFFF) is set (checked at C1:41xx).
@@ -723,7 +732,13 @@ local function onFrame()
     logMap()
   end
   frame = frame + 1
-  if frame >= FRAMES then
+  if gameOver then
+    -- Stop here; drive.py restarts from the world's start state.
+    flushLog()
+    dumpCdl(string.format("%s/seg_%06d.cdl", OUT, FRAME0))
+    writeFile(OUT .. "/ckpt.txt", tostring(frame))
+    emu.stop(6)
+  elseif frame >= FRAMES then
     flushLog()
     dumpCdl(string.format("%s/seg_%06d.cdl", OUT, FRAME0))
     writeFile(OUT .. "/ckpt.txt", tostring(frame))

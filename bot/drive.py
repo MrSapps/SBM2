@@ -48,7 +48,14 @@ def main():
                 print('no progress; stopping', flush=True)
                 break
         frame0, state = reached, os.path.join(out, 'ckpt.mss')
-        if not os.path.exists(state):
+        over = os.path.join(out, 'gameover.txt')
+        if os.path.exists(over):
+            # Continue: restart the world from its password state.
+            world = int(open(over).read())
+            os.remove(over)
+            state = os.path.join(ROOT, 'build', 'states', f'world{world}.mss')
+            print(f'game over: continuing world {world} from {state}', flush=True)
+        elif not os.path.exists(state):
             frame0, state = 0, start
     merge_cdls(out)
 

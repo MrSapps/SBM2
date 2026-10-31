@@ -167,23 +167,23 @@ static void CheckGoldPanels(void)
 
 /* C1:2282  In panel mode 1, standing on a panel ($73/$74) flips the state
  * of the gold panel entry at the player's cell and redraws it. */
-static void GoldPanelToggle(void)
+static void GoldPanelToggle_core(void)
 {
     Cpu *c = g_cpu;
     load_cv();
     c->a = ram16(GoldPanels);
-    if (c->a & 0x8000) { SetNZ16(c->a); Ret_RTL(); return; }
+    if (c->a & 0x8000) { SetNZ16(c->a); return; }
     c->a = ram16(Exit_PanelState);
     SetNZ16(c->a);
-    if (c->a & 0x8000) { Ret_RTL(); return; }
-    if (!(c->a & 1)) { SetFlag(FZ, 1); Ret_RTL(); return; }   /* bit #1 */
+    if (c->a & 0x8000) { return; }
+    if (!(c->a & 1)) { SetFlag(FZ, 1); return; }   /* bit #1 */
     uint16_t cell = ram16(dp_PlayerCell);
     c->x = cell;
     c->a = PeekLong16(TileMap + cell);
     uint16_t d = cmp16(c->a, 0x73);
     if (c->a != 0x73) {
         d = cmp16(c->a, 0x74);
-        if (c->a != 0x74) { SetNZ16(d); store_cv(); Ret_RTL(); return; }
+        if (c->a != 0x74) { SetNZ16(d); store_cv(); return; }
     }
     ram8_set(0x97, 0x56);
     ram8_set(0x98, 0x5B);
@@ -213,6 +213,12 @@ static void GoldPanelToggle(void)
     c->a = 0xFFFF;
     SetNZ16(0);
     store_cv();
+}
+
+
+static void GoldPanelToggle(void)
+{
+    GoldPanelToggle_core();
     Ret_RTL();
 }
 
@@ -820,6 +826,198 @@ static void EnemyDie(void)
     Ret_RTL();
 }
 
+
+/* C0:A570  Object [$6A] flashing (+4 bit 5): +$B9 counts down ($FF = no
+ * limit); while it runs, palette +6 toggles between 7 and +$2A on even
+ * frames; at 0 the palette is restored and the flag cleared. */
+static void ObjFlashTick(void)
+{
+    Cpu *c = g_cpu;
+    load_cv();
+    c->y = 4;
+    uint16_t f = ind16(0x6A, 4);
+    if (!(f & 0x20)) { c->a = f; SetFlag(FN, f & 0x8000); SetFlag(FZ, 1); SetM8(0); Ret_RTL(); return; }
+    c->y = 0xB9;
+    uint8_t t = ind8(0x6A, 0xB9);
+    cmp8(t, 0xFF);
+    int restore = 0;
+    if (t != 0xFF) {
+        if (--t == 0) restore = 1;
+        else ind8_set(0x6A, 0xB9, t);
+    }
+    SetM8(0);
+    if (restore) {
+        ind16_set(0x6A, 6, ind16(0x6A, 0x2A));
+        c->y = 4;
+        c->a = ind16(0x6A, 4) & 0xFFDF;
+        ind16_set(0x6A, 4, c->a);
+        SetNZ16(c->a);
+        store_cv();
+        Ret_RTL();
+        return;
+    }
+    c->a = ram16(0x32);
+    if (c->a & 1) { SetFlag(FN, c->a & 0x8000); SetFlag(FZ, 0); store_cv(); Ret_RTL(); return; }
+    uint16_t pal = ind16(0x6A, 6);
+    cmp16(pal, 7);
+    c->a = pal == 7 ? ind16(0x6A, 0x2A) : 7;
+    c->y = 6;
+    ind16_set(0x6A, 6, c->a);
+    SetNZ16(c->a);
+    store_cv();
+    Ret_RTL();
+}
+
+/* C1:1E6F  Enemy [$82] gets stunned unless already (+$BE bit 0 / negative)
+ * or +$D0 & $0F: state reset, motion cleared, flashing without limit. */
+static void EnemyStun(void)
+{
+    Cpu *c = g_cpu;
+    c->y = 0xBE;
+    uint16_t be = ind16(0x82, 0xBE);
+    c->a = be;
+    SetNZ16(be);
+    if (be & 0x8000) { Ret_RTL(); return; }
+    if (be & 1) { SetFlag(FZ, 0); Ret_RTL(); return; }
+    c->y = 0xD0;
+    c->a = ind16(0x82, 0xD0) & 0x0F;
+    if (c->a) { SetNZ16(c->a); Ret_RTL(); return; }
+    ind16_set(0x82, 0xBE, ind16(0x82, 0xBE) | 1);
+    ind16_set(0x82, 0x50, 0);
+    ind16_set(0x82, 0x6A, 4);
+    ind16_set(0x82, 0x0C, 0);
+    ind16_set(0x82, 0x68, (ind16(0x82, 0x68) & 0x7FFF) | 1);
+    ind16_set(0x82, 0x14, 0);
+    ind16_set(0x82, 0x16, 0);
+    ind16_set(0x82, 0x1C, 0);
+    ind16_set(0x82, 0x1E, 0);
+    uint16_t f = ind16(0x82, 4) | 0x20;
+    ind16_set(0x82, 4, f);
+    ind8_set(0x82, 0xB9, 0xFF);
+    c->y = 0xB9;
+    c->a = (f & 0xFF00) | 0xFF;
+    SetNZ8(0xFF);
+    SetM8(0);
+    Ret_RTL();
+}
+
+/* C1:1EE2  Enemy [$82] takes a hit (unless +$43 & $7F = $7F, or types
+ * $A4/$A6 while +$50 is set): C1:1F41, then hit points +$43 down; at 0 it
+ * is marked dying (+$68 bit 1) and flashes. */
+static void EnemyHit(void)
+{
+    Cpu *c = g_cpu;
+    load_cv();
+    c->y = 0x43;
+    uint16_t hp = ind8(0x82, 0x43) & 0x7F;
+    if (hp == 0x7F) {
+        c->a = 0x7F;
+        SetNZ16(0);
+        SetFlag(FC, 1);
+        SetM8(0);
+        Ret_RTL();
+        return;
+    }
+    c->y = 0x7E;
+    uint16_t type = ind16(0x82, 0x7E);
+    c->a = type;
+    if (type == 0xA4 || type == 0xA6) {
+        fc = 1;
+        c->y = 0x50;
+        c->a = ind16(0x82, 0x50);
+        if (c->a) { SetNZ16(c->a); store_cv(); SetM8(0); Ret_RTL(); return; }
+    } else {
+        cmp16(type, 0xA6);
+    }
+    SetNZ16(c->a);
+    store_cv();
+    SetM8(0);
+    CallLong(0xC11F41);
+    c->y = 0x43;
+    uint8_t v = ind8(0x82, 0x43);
+    if (v && --v) {
+        ind8_set(0x82, 0x43, v);
+        c->a = (c->a & 0xFF00) | v;
+        SetNZ8(v);
+        SetM8(0);
+        Ret_RTL();
+        return;
+    }
+    SetM8(0);
+    ind16_set(0x82, 0x68, ind16(0x82, 0x68) | 2);
+    uint16_t f = ind16(0x82, 4) | 0x20;
+    ind16_set(0x82, 4, f);
+    ind8_set(0x82, 0xB9, 0xFF);
+    c->y = 0xB9;
+    c->a = (f & 0xFF00) | 0xFF;
+    SetNZ8(0xFF);
+    Ret_RTL();
+}
+
+
+/* --- stage timer and score display ---
+ * $7E5E10/$5E12 = minutes/seconds; $5E14 = frame counter for a second ($40
+ * logic frames); $5E16..$5E1E = decimal digits scratch (10000s..1s);
+ * $5E04/06/08 = timer digits m, s tens, s ones and $5E0A.. their gfx codes;
+ * $5DF0..$5DF8 = score digits and $5DFA.. their gfx codes (word table at
+ * C5:D432 per digit). */
+#define TimerMinutes 0x7E5E10
+#define TimerSeconds 0x7E5E12
+
+/* C1:1CA3  Decimal digits of A by repeated subtraction. */
+static void DigitSplit(uint16_t v)
+{
+    static const uint16_t kPow[4] = { 10000, 1000, 100, 10 };
+    ram16_set(0x40, v);
+    for (int i = 0; i < 5; i++) ram16_set(0x7E5E16 + 2 * i, 0);
+    for (int i = 0; i < 4; i++) {
+        for (;;) {
+            uint16_t r = ram16(0x40) - kPow[i];
+            if (r & 0x8000) break;
+            ram16_set(0x40, r);
+            ram16_set(0x7E5E16 + 2 * i, ram16(0x7E5E16 + 2 * i) + 1);
+        }
+    }
+    ram16_set(0x7E5E1E, ram16(0x40));
+}
+
+static uint16_t digit_gfx(uint16_t d) { return PeekLong16(0xC5D432 + (uint16_t)(d << 1)); }
+
+/* C1:1BA3  Score digits and their graphics. Called from the stage loops'
+ * call lists, which ignore its registers. */
+static void ScoreDigits(void)
+{
+    DigitSplit(ram16(ScoreHundreds));
+    for (int i = 0; i < 5; i++) ram16_set(0x7E5DF0 + 2 * i, ram16(0x7E5E16 + 2 * i));
+    for (int i = 0; i < 5; i++) ram16_set(0x7E5DFA + 2 * i, digit_gfx(ram16(0x7E5DF0 + 2 * i)));
+    Ret_RTL();
+}
+
+/* C1:1C1A  Stage timer: unless stopped ($5E20 < 0, or $5C54 >= $0A / = 4
+ * outside play), one second per $40 frames; at 0:00 $5C56 = 0 (time up).
+ * Called from the stage loops' call lists, which ignore its registers. */
+static void StageTimer(void)
+{
+    if (ram16(0x7E5E20) & 0x8000) { Ret_RTL(); return; }
+    uint16_t mode = ram16(0x7E5C54);
+    if ((ram16(0xB9) & 0x8000) ? mode == 4 : mode >= 0x0A) { Ret_RTL(); return; }
+    uint16_t t = ram16(0x7E5E14);
+    if (t != 0x40) { ram16_set(0x7E5E14, t + 1); Ret_RTL(); return; }
+    ram16_set(0x7E5E14, 0);
+    uint16_t sec = ram16(TimerSeconds) - 1;
+    if (!(sec & 0x8000)) ram16_set(TimerSeconds, sec);
+    else if (ram16(TimerMinutes)) {
+        ram16_set(TimerMinutes, ram16(TimerMinutes) - 1);
+        ram16_set(TimerSeconds, 59);
+    } else ram16_set(0x7E5C56, 0);
+    DigitSplit(ram16(TimerSeconds));
+    ram16_set(0x7E5E04, ram16(TimerMinutes));
+    ram16_set(0x7E5E06, ram16(0x7E5E1C));
+    ram16_set(0x7E5E08, ram16(0x7E5E1E));
+    for (int i = 0; i < 3; i++) ram16_set(0x7E5E0A + 2 * i, digit_gfx(ram16(0x7E5E04 + 2 * i)));
+    Ret_RTL();
+}
+
 /* --- exit --- */
 
 /* C1:41A8  Player [$6A] on the open gate: if it may leave (not already
@@ -897,6 +1095,548 @@ static void PlayerOnExitTile(void)
     Ret_RTL();
 }
 
+
+
+/* C1:22F3  The single switch panel (state $7E5AAC, cell $7E5AAE, gfx index
+ * $7E5AB0): stepping on it ($5E) flips it and redraws ($106C/$106E). */
+static void SwitchPanelToggle_core(void)
+{
+    uint16_t st = ram16(0x7E5AAC);
+    if (st & 0x8000) return;
+    if (ram16(0x7E5AAE) != ram16(dp_PlayerCell)) return;
+    uint16_t gfx = (st & 1) ? 0x106E : 0x106C;
+    WriteLong16(TileGfxMap + ram16(0x7E5AB0), gfx);
+    ram16_set(0x7E5AB2, gfx);
+    ram16_set(0x7E5AAC, st ^ 1);
+}
+
+/* C0:E46C  The bomb's owner (player 1 + $100 * (+$06 & $7F) via C0:E651, or
+ * $7E8500 for bit 11 bombs via C0:E667; pointer in $70) gets it back: +$F8
+ * placed count down, +$F1 bombs left = +$E1 - +$F8 (types 3 and 6 at +$F5:
+ * none, or one when nothing is placed). */
+static void BombReturnToOwner(void)
+{
+    if (ind16(0x6A, 0) & 0x0800) {
+        ram8_set(0x70, 0x00);
+        ram8_set(0x71, 0x85);
+    } else {
+        ram8_set(0x70, 0x00);
+        ram8_set(0x71, ind8(0x6A, 6) | 0x80);
+    }
+    ram8_set(0x72, 0x7E);
+    uint8_t placed = ind8(0x70, 0xF8);
+    if (placed) ind8_set(0x70, 0xF8, --placed);
+    uint8_t type = ind8(0x70, 0xF5), left;
+    if (type == 3) left = 0;
+    else if (type == 6) left = placed ? 0 : 1;
+    else left = ind8(0x70, 0xE1) - placed;
+    ind8_set(0x70, 0xF1, left);
+}
+
+/* C0:E14F  A finished blast: C0:E4E3 clears the bomb (state 0, its gfx and
+ * tile back from TileGfxMap2/CellItems), C0:E5FE/E505/E558/E5AB do the same
+ * for each direction's flame cells (and the panels there toggle), then
+ * C0:E303 clears its BlastMap cells. */
+static void FlameRestoreDir(uint16_t list)
+{
+    uint32_t b = dp_ptr(0x6A);
+    uint16_t steps = (uint8_t)(PeekLong8(b + 7) + 1);
+    ram16_set(0x4E, steps);
+    ram8_set(0x72, ram8(0x6C));
+    uint16_t p = (uint16_t)(b + list);
+    ram16_set(0x70, p);
+    uint32_t bank = b & 0xFF0000;
+    for (;;) {
+        uint32_t e = bank | p;
+        uint16_t gfx = PeekLong16(e);
+        if (gfx == 0xFFFF) break;
+        WriteLong16(TileGfxMap + gfx, ReadLong16(TileGfxMap2 + gfx));
+        uint16_t cell = PeekLong16(e + 2);
+        ram16_set(dp_PlayerCell, cell);
+        WriteLong16(TileMap + cell, ReadLong16(CellItems + cell));
+        SwitchPanelToggle_core();
+        GoldPanelToggle_core();
+        ram16_set(0x4E, --steps);
+        if (!steps) break;
+        p += 6;
+        ram16_set(0x70, p);
+    }
+}
+
+static void BlastUnpaintDir(uint16_t list, int up, int set5e)
+{
+    uint32_t b = ram16(0x82) | (uint32_t)ram8(0x84) << 16;
+    uint16_t steps = (uint8_t)(PeekLong8(b + 7) + 1);
+    ram16_set(0x4E, steps);
+    ram8_set(0x72, ram8(0x84));
+    uint16_t p = (uint16_t)(b + list);
+    ram16_set(0x70, p);
+    uint32_t bank = b & 0xFF0000;
+    for (;;) {
+        uint32_t e = bank | p;
+        uint16_t cell = PeekLong16(e + 2);
+        if (up && cell >= 0x2000) break;
+        if (PeekLong16(e) == 0xFFFF) break;
+        if (set5e) ram16_set(0x5E, cell);
+        WriteLong16(BlastMap + cell, 0);
+        ram16_set(0x4E, --steps);
+        if (!steps) break;
+        p += 6;
+        ram16_set(0x70, p);
+    }
+}
+
+static void FlameCleanup(void)
+{
+    uint32_t b = dp_ptr(0x6A);
+    WriteLong16(b, 0);
+    uint16_t gfx = PeekLong16(b + BOMB_POS);
+    WriteLong16(TileGfxMap + gfx, ReadLong16(TileGfxMap2 + gfx));
+    uint16_t cell = PeekLong16(b + BOMB_CELL);
+    WriteLong16(TileMap + cell, ReadLong16(CellItems + cell));
+    FlameRestoreDir(0x10);
+    FlameRestoreDir(0x4C);
+    FlameRestoreDir(0x88);
+    FlameRestoreDir(0xC4);
+    ram16_set(0x82, ram16(0x6A));
+    ram8_set(0x84, ram8(0x6C));
+    WriteLong16(BlastMap + PeekLong16(b + BOMB_CELL), 0);
+    BlastUnpaintDir(0x10, 1, 0);
+    BlastUnpaintDir(0x4C, 0, 1);
+    BlastUnpaintDir(0x88, 0, 1);
+    BlastUnpaintDir(0xC4, 0, 0);
+}
+
+/* --- bombs ---
+ * Bomb objects ($7F2000 + $100 * n), [$6A] while updated: +$00 state (bit 14
+ * exploding, 12 frozen?, 11 alt anim, 7/6/0 fuse control, 5 no tile, 0-4 anim
+ * set), +$02 gfx index, +$04 fuse, +$07 range, +$08/+$09 anim timer/frame,
+ * +$0A cell, +$0C attr. BombList ($7E2960): live bombs, $FFFF-terminated. */
+#define BombList 0x7E2960
+
+/* C0:E174 and C0:E195/E1A9/E203/E255/E2A7: mark the cells a blast reaches
+ * in BlastMap: the bomb's cell, then each direction's entry list (written
+ * by BlastExtend*) for range+1 entries, up to a solid/$43/$44 tile ($2000+
+ * cells end the upward list too). [$82] = the bomb. */
+static void BlastPaintDir(uint16_t list, int up, int set5e)
+{
+    uint32_t b = ram16(0x82) | (uint32_t)ram8(0x84) << 16;
+    uint16_t steps = (uint8_t)(PeekLong8(b + 7) + 1);
+    ram16_set(0x4E, steps);
+    ram8_set(0x72, ram8(0x84));
+    uint16_t p = (uint16_t)(b + list);
+    ram16_set(0x70, p);
+    uint32_t bank = b & 0xFF0000;
+    for (;;) {
+        uint32_t e = bank | p;
+        uint16_t cell = PeekLong16(e + 2);
+        if (up && cell >= 0x2000) break;
+        if (PeekLong16(e) == 0xFFFF) break;
+        if (set5e) ram16_set(0x5E, cell);   /* down/left keep the cell in $5E */
+        g_cpu->x = cell;
+        uint16_t tile = ReadLong16(TileMap + cell);
+        if ((tile & 0x80) || tile == 0x44 || tile == 0x43) break;
+        WriteLong16(BlastMap + cell, 0xFFFF);
+        ram16_set(0x4E, --steps);
+        if (!steps) break;
+        p += 6;
+        ram16_set(0x70, p);
+    }
+}
+
+static void BlastPaint(void)
+{
+    ram16_set(0x82, ram16(0x6A));
+    ram8_set(0x84, ram8(0x6C));
+    uint32_t b = ram16(0x82) | (uint32_t)ram8(0x84) << 16;
+    g_cpu->x = PeekLong16(b + BOMB_CELL);
+    WriteLong16(BlastMap + g_cpu->x, 0xFFFF);
+    BlastPaintDir(0x10, 1, 0);
+    BlastPaintDir(0x4C, 0, 1);
+    BlastPaintDir(0x88, 0, 1);
+    BlastPaintDir(0xC4, 0, 0);
+}
+
+
+/* C0:EAA7/EB8E/EC68/ED42  When a bomb goes off, each direction's flame list
+ * is checked cell by cell: what the flame hits (C1:46E9 objects; type $22 is
+ * pushed via C1:2811, $16 via C1:26AA; tile $03 C0:EFD3, $02/$04/$0B
+ * C0:EF44; solid, $26, $04, $0B tiles) cuts the list there ($FFFF). */
+typedef struct BlastDirInfo {
+    uint16_t list, opposite;
+    uint16_t dir, delta;    /* $5E / $5C for C1:2811 */
+    uint8_t up;
+} BlastDirInfo;
+
+static const BlastDirInfo kResolve[4] = {
+    { 0x10, 0x4C, 3, 0xFF80, 1 },   /* up */
+    { 0x4C, 0x10, 2, 0x0080, 0 },   /* down */
+    { 0xC4, 0x88, 0, 0x0002, 0 },   /* right */
+    { 0x88, 0xC4, 1, 0xFFFE, 0 },   /* left */
+};
+
+static void BlastResolveDir(const BlastDirInfo *d)
+{
+    Cpu *c = g_cpu;
+    ram16_set(0x48, d->opposite);
+    ram8_set(0x6F, ram8(0x6C));
+    uint16_t steps = (ind8(0x6A, BOMB_RANGE) & 0xFF) + 1;
+    ram16_set(0x4E, steps);
+    uint16_t p = (uint16_t)(ram16(0x6A) + d->list);
+    ram16_set(0x6D, p);
+    uint32_t bank = (uint32_t)ram8(0x6C) << 16;
+    for (;;) {
+        uint32_t e = bank | p;
+        int cut = 0;
+        c->y = 2;
+        if (d->up && PeekLong16(e + 2) >= 0x2000) cut = 1;
+        else if (PeekLong16(e) == 0xFFFF) return;
+        else {
+            uint16_t cell = PeekLong16(e + 2);
+            ram16_set(0x4C, cell);
+            c->x = cell;
+            uint16_t t = ReadLong16(TileMap + cell) & 0x3F;
+            ram16_set(0x7E5BEE, t);
+            int next = 0, done = 0;
+            if (!(ram16(0xB9) & 0x8000)) {
+                c->a = ram16(0xB9);
+                CallLong(0xC146E9);
+                if (GetFlag(FC)) cut = done = 1;
+                else if (c->a == 0x22) {
+                    ram16_set(0x5E, d->dir);
+                    ram16_set(0x5C, d->delta);
+                    c->a = d->delta;
+                    CallLong(0xC12811);
+                    cut = done = 1;
+                } else if (c->a == 0x16) {
+                    CallLong(0xC126AA);
+                    cut = done = 1;
+                }
+            }
+            if (!done) {
+                t = ram16(0x7E5BEE);
+                if (t == 0x0F || t == 0x09) next = 1;
+                else if (t == 0x03) { c->a = t; CallLong(0xC0EFD3); cut = 1; }
+                else {
+                    int check = 1;
+                    if (t == 0x02 || t == 0x04 || t == 0x0B) {
+                        c->a = t;
+                        CallLong(0xC0EF44);
+                        if (ind16(0x6A, 0) & 4) {
+                            check = 0;
+                            if (ram16(0x7E5BEE) != 5) next = 1; else cut = 1;
+                        }
+                    }
+                    if (check) {
+                        uint16_t tile = ReadLong16(TileMap + ram16(0x4C));
+                        uint16_t k = tile & 0x3F;
+                        if ((tile & 0x80) || k == 0x26 || k == 0x04 || k == 0x0B) cut = 1;
+                        else next = 1;
+                    }
+                }
+            }
+            (void)next;
+        }
+        if (cut) { WriteLong16(e, 0xFFFF); return; }
+        ram16_set(0x4E, --steps);
+        if (!steps) return;
+        p += 6;
+        ram16_set(0x6D, p);
+    }
+}
+
+/* C0:EA83  The bomb starts exploding (state bit 14, anim reset) and its
+ * flame lists are cut where they hit something. */
+static void BombExplode(void)
+{
+    ind16_set(0x6A, 0, ind16(0x6A, 0) | 0x4000);
+    ind16_set(0x6A, 8, 0);
+    ram16_set(0x7E5C12, 0);
+    for (int i = 0; i < 4; i++) BlastResolveDir(&kResolve[i]);
+}
+
+/* C0:E980  One live bomb: explodes when its cell holds a flame (tile 1, or
+ * CellItems 1 outside $B9 < 0) or its fuse runs out (fuse ticks unless
+ * state bit 0 without bit 7, or $B9 bit 14 without state bit 6); otherwise
+ * keeps its tile ($43), animates (+$08/+$09 through the frame table at
+ * [$7F], from C5:F4E7 per anim set or C5:F52B) and repaints its blast map. */
+static void BombUpdate(void)
+{
+    Cpu *c = g_cpu;
+    uint16_t st = ind16(0x6A, 0);
+    if (st & 0x1000) return;
+    uint16_t cell = ind16(0x6A, BOMB_CELL);
+    c->x = cell;
+    c->y = BOMB_CELL;
+    int boom = 0;
+    if (ReadLong16(TileMap + cell) == 1) { boom = 1; c->a = 1; }
+    else if (!(ram16(0xB9) & 0x8000) && ReadLong16(CellItems + cell) == 1) { boom = 1; c->a = 1; }
+    else {
+        st = ind16(0x6A, 0);
+        int tick;
+        uint16_t a = st;
+        if (!(st & 0x80) && (st & 1)) tick = 0;
+        else if (st & 0x40) tick = 1;
+        else { a = ram16(0xB9); tick = !(a & 0x4000); }
+        if (tick) {
+            uint8_t fuse = ind8(0x6A, 4) - 1;
+            c->y = 4;
+            if (!fuse) { boom = 1; c->a = a & 0xFF00; }
+            else ind8_set(0x6A, 4, fuse);
+        }
+    }
+    if (boom) {
+        SetM8(0);
+        BombReturnToOwner();
+        BombExplode();
+        c->a = 0x42;
+        ram16_set(0x40, 0x42);
+        ram16_set(0x42, 0);
+        CallLong(0xC3A4B5);
+        return;
+    }
+    SetM8(0);
+    st = ind16(0x6A, 0);
+    if (st & 0x20) return;
+    cell = ind16(0x6A, BOMB_CELL);
+    WriteLong16(TileMap + cell, 0x43);
+    uint32_t tbl;
+    if (st & 0x0800) tbl = 0xC5F52B;
+    else tbl = PeekLong24(0xC5F4E7 + (st & 0x1F) * 4);
+    ram8_set(0x7F, tbl);
+    ram8_set(0x80, tbl >> 8);
+    ram8_set(0x81, tbl >> 16);
+    uint8_t t = ind8(0x6A, 8) - 1;
+    ind8_set(0x6A, 8, t);
+    if (t) return;
+    ind8_set(0x6A, 8, 2);
+    uint8_t f = ind8(0x6A, 9);
+    ind8_set(0x6A, 9, f + 1);
+    uint16_t code = PeekLong16(tbl + f * 2);
+    if (code & 0x8000) {
+        ind8_set(0x6A, 9, 0);
+        code = PeekLong16(tbl);
+    }
+    code |= ind8(0x6A, 0x0C) << 8;
+    ram16_set(0x4C, code);
+    WriteLong16(TileGfxMap + ind16(0x6A, BOMB_POS), code);
+    BlastPaint();
+}
+
+
+/* C0:E679, E86D/E6CC/E757/E7E2  Flame graphics for the bomb's cell and each
+ * direction's entries: frame +$09 of the animation for the segment type
+ * (+4 of an entry; tables at C5:F423), attr +$0C; TileMap gets 1 (flame).
+ * Per entry C0:E8F8 (scene 5) and, unless $B9 < 0, C1:28CD run first. */
+static uint16_t flame_gfx(uint16_t seg)
+{
+    uint16_t ptr = PeekLong16(0xC5F423 + (uint16_t)(seg << 1));
+    ram16_set(0x6D, ptr);
+    ram8_set(0x6F, 0xC5);
+    uint16_t code = PeekLong16(0xC50000 + (uint16_t)(ptr + ram16(0x4E)));
+    code |= ind8(0x6A, 0x0C) << 8;
+    ram16_set(0x4C, code);
+    return code;
+}
+
+static void FlameDrawCenter(void)
+{
+    ram16_set(0x4E, (uint8_t)(ind8(0x6A, 9) << 1));
+    flame_gfx(0);
+    WriteLong16(TileMap + ind16(0x6A, BOMB_CELL), 1);
+    WriteLong16(TileGfxMap + ind16(0x6A, BOMB_POS), ram16(0x4C));
+}
+
+static void FlameDrawDir(uint16_t list, int up)
+{
+    Cpu *c = g_cpu;
+    ram16_set(0x48, 0);
+    ram8_set(0x72, ram8(0x6C));
+    ram16_set(0x4E, (uint8_t)(ind8(0x6A, 9) << 1));
+    uint16_t steps = (uint8_t)(ind8(0x6A, BOMB_RANGE) + 1);
+    ram16_set(0x48, steps);
+    uint16_t p = (uint16_t)(ram16(0x6A) + list);
+    ram16_set(0x70, p);
+    uint32_t bank = (uint32_t)ram8(0x6C) << 16;
+    for (;;) {
+        uint32_t e = bank | p;
+        uint16_t gfx = PeekLong16(e);
+        if (up ? gfx >= 0x2000 : gfx == 0xFFFF) return;
+        uint16_t seg = PeekLong16(e + 4);
+        c->a = flame_gfx(seg);
+        c->x = (uint16_t)(seg << 1);
+        c->y = 0x0C;
+        CallLong(0xC0E8F8);
+        if (!(ram16(0xB9) & 0x8000)) { c->a = ram16(0xB9); CallLong(0xC128CD); }
+        e = bank | ram16(0x70);
+        WriteLong16(TileMap + PeekLong16(e + 2), 1);
+        WriteLong16(TileGfxMap + PeekLong16(e), ram16(0x4C));
+        ram16_set(0x48, --steps);
+        if (!steps) return;
+        p = ram16(0x70) + 6;
+        ram16_set(0x70, p);
+    }
+}
+
+/* C0:E0F0  An exploding bomb: counts down +$08, then draws the flames
+ * (FlameDraw*) and steps +$09 through the frame lengths
+ * at C5:F415 ($FF = done: C0:E14F clears up). */
+static void BlastTick(void)
+{
+    Cpu *c = g_cpu;
+    uint8_t t = ind8(0x6A, 8);
+    if (t && --t) { ind8_set(0x6A, 8, t); return; }
+    c->a &= 0xFF00;
+    c->y = 8;
+    SetM8(0);
+    FlameDrawCenter();
+    FlameDrawDir(0x10, 1);
+    FlameDrawDir(0x4C, 0);
+    FlameDrawDir(0x88, 0);
+    FlameDrawDir(0xC4, 0);
+    SetM8(0);
+    uint8_t f = ind8(0x6A, 9);
+    c->x = f;
+    uint8_t len = PeekLong8(0xC5F415 + f);
+    if (len != 0xFF) {
+        ind8_set(0x6A, 8, len);
+        ind8_set(0x6A, 9, f + 1);
+        return;
+    }
+    ind8_set(0x6A, 9, 0);
+    FlameCleanup();
+}
+
+
+/* C0:DEEE (C0:DEE7 unless $7E5D60 < 0)  BombList = the live bombs (state
+ * bit 15) of the 40 slots, in slot order. */
+static void BombListRebuild(void)
+{
+    ram8_set(0x6A, 0x00);
+    ram8_set(0x6B, 0x20);
+    ram8_set(0x6C, 0x7F);
+    ram16_set(BombList, 0xFFFF);
+    uint16_t x = 0;
+    for (int n = 0x28; n; n--) {
+        ram16_set(0x1E, n);
+        if (ind16(0x6A, 0) & 0x8000) {
+            ram16_set(BombList + x, ram16(0x6A));
+            x += 2;
+            ram16_set(BombList + x, 0xFFFF);
+        }
+        ram16_set(0x6A, ram16(0x6A) + 0x100);
+    }
+    ram16_set(0x1E, 0);
+    g_cpu->x = x;
+    g_cpu->y = 0;
+}
+
+/* C0:DF30  With $7E5D60 < 0: rebuilds the list, then live bombs (not
+ * exploding / frozen, fuse not about to fire) standing on CellItems $17-$1E
+ * go to C0:DF87. */
+static void BombsOnItems(void)
+{
+    Cpu *c = g_cpu;
+    BombListRebuild();
+    for (uint16_t i = 0;; i += 2) {
+        ram16_set(0x1C, i);
+        uint16_t b = ram16(BombList + i);
+        if (b == 0xFFFF) break;
+        ram16_set(0x6A, b);
+        uint16_t st = ind16(0x6A, 0);
+        if (st & 0x5000) continue;
+        if (!((st & 1) && !(st & 0x80)) && ind8(0x6A, 4) == 1) continue;
+        uint16_t cell = ind16(0x6A, BOMB_CELL);
+        uint16_t t = ReadLong16(CellItems + cell) & 0x3F;
+        if (t >= 0x17 && t < 0x1F) {
+            c->a = t;
+            c->x = cell;
+            c->y = BOMB_CELL;
+            CallLong(0xC0DF87);
+        }
+    }
+}
+
+
+/* C0:3583  Bomb range: the player's +$F2, or 9 on the listed cells
+ * ($7E2FF0, 4-byte entries) in scene 6 / scene group $10. [$7C] = bomb. */
+static void BombSetRange(void)
+{
+    uint16_t scene = ram16(0x1A);
+    if (scene == 6 || (scene & 0xF0) == 0x10) {
+        uint16_t cell = ind16(0x6A, OBJ_CELL);
+        for (uint16_t x = 0;; x += 4) {
+            uint16_t w = ram16(0x7E2FF0 + x);
+            if (w & 0x8000) break;
+            if (w == cell) { ind8_set(0x7C, BOMB_RANGE, 9); return; }
+        }
+    }
+    ind8_set(0x7C, BOMB_RANGE, ind8(0x6A, 0xF2));
+}
+
+/* C0:34C0  Player [$6A] places a bomb in the first free slot ([$7C]): kind
+ * +$F3 (0 when bit 1 is set and a bomb is already out), fuse $48, owner
+ * (player index), attr, range, serial +$F6, its cell gets tile $43. Its one
+ * caller does not look at registers or flags afterwards. */
+static void BombPlace(void)
+{
+    ram8_set(0x7C, 0x00);
+    ram8_set(0x7D, 0x20);
+    ram8_set(0x7E, 0x7F);
+    for (int n = 0x28;; ) {
+        if (!(ind16(0x7C, 0) & 0x8000)) break;
+        ram16_set(0x7C, ram16(0x7C) + 0x100);
+        if (!--n) { Ret_RTL(); return; }
+    }
+    uint8_t f3 = ind8(0x6A, 0xF3);
+    uint16_t kind = ((f3 & 2) && ind8(0x6A, 0xF8)) ? 0 : f3;
+    ind8_set(0x6A, 0x42, kind);
+    ind16_set(0x7C, 0, kind | 0x8000);
+    ind16_set(0x7C, BOMB_POS, ind16(0x6A, 0xAA));
+    ind8_set(0x7C, 4, 0x48);
+    uint8_t owner = ram8(0x6B) & 0x7F;
+    ind8_set(0x7C, 6, owner);
+    ind8_set(0x7C, 0x0C, (uint8_t)((owner + 1) << 2));
+    BombSetRange();
+    uint16_t serial = ind16(0x6A, 0xF6) + 1;
+    ind16_set(0x6A, 0xF6, serial);
+    ind8_set(0x7C, 5, serial);
+    ind16_set(0x7C, 8, 1);
+    uint16_t cell = ind16(0x6A, OBJ_CELL);
+    ind16_set(0x7C, BOMB_CELL, cell);
+    WriteLong16(TileMap + cell, 0x43);
+    if (ind16(0x7C, 0) & 2) ind8_set(0x7C, BOMB_RANGE, 9);
+    SetM8(0);
+    Ret_RTL();
+}
+
+/* C0:E0AA  Every other frame ($32 even): bomb list upkeep (C0:DF30 when
+ * $7E5D60 < 0, C0:DEE7), then each bomb in BombList; stops after the first
+ * one that starts exploding. Its callers (the stage loops) ignore its
+ * registers and flags, so only WRAM and the register widths are kept. */
+static void BombsUpdate(void)
+{
+    Cpu *c = g_cpu;
+    if (ram16(0x32) & 1) { Ret_RTL(); return; }
+    if (ram16(0x7E5D60) & 0x8000) BombsOnItems();
+    else BombListRebuild();
+    for (uint16_t i = 0;; i += 2) {
+        ram16_set(0x1C, i);
+        c->x = i;
+        uint16_t bomb = ram16(BombList + i);
+        if (bomb == 0xFFFF) break;
+        ram16_set(0x6A, bomb);
+        uint16_t st = ind16(0x6A, 0);
+        c->a = st;
+        if (st & 0x4000) { BlastTick(); SetM8(0); continue; }
+        BombUpdate();
+        SetM8(0);
+        if (ind16(0x6A, 0) & 0x4000) break;
+    }
+    SetM8(0);
+    Ret_RTL();
+}
+
 const Hook g_hooks[] = {
     { 0xC0BFE2, "MapTileAtXY",       MapTileAtXY,       FM | FX, 0, 0 },
     { 0xC14031, "PlayerTileHandler", PlayerTileHandler, FX,      0, 0 },
@@ -923,5 +1663,16 @@ const Hook g_hooks[] = {
     { 0xC12A9C, "FindExitGate",      FindExitGate,      FM | FX, 0, 0 },
     { 0xC15028, "EnemyDie",          EnemyDie,          FM | FX, 0, 0 },
     { 0xC141A8, "PlayerOnExitTile",  PlayerOnExitTile,  FM | FX, 0, 0 },
+    { 0xC0A570, "ObjFlashTick",      ObjFlashTick,      FM | FX, 0, 0 },
+    { 0xC11E6F, "EnemyStun",         EnemyStun,         FM | FX, 0, 0 },
+    { 0xC11EE2, "EnemyHit",          EnemyHit,          FX,      0, 0 },
+    { 0xC034C0, "BombPlace",         BombPlace,         FM | FX, 0,
+      IGN_A | IGN_X | IGN_Y | IGN_NZ | IGN_C | IGN_V },
+    { 0xC11C1A, "StageTimer",        StageTimer,        FM | FX, 0,
+      IGN_A | IGN_X | IGN_Y | IGN_NZ | IGN_C | IGN_V },
+    { 0xC11BA3, "ScoreDigits",       ScoreDigits,       FM | FX, 0,
+      IGN_A | IGN_X | IGN_Y | IGN_NZ | IGN_C | IGN_V },
+    { 0xC0E0AA, "BombsUpdate",       BombsUpdate,       FM | FX, 0,
+      IGN_A | IGN_X | IGN_Y | IGN_NZ | IGN_C | IGN_V },
 };
 const int g_nhooks = sizeof g_hooks / sizeof *g_hooks;

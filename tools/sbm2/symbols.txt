@@ -46,6 +46,11 @@ C1:47E6 BuildMagnetList
 7E2200 OamBuffer            ; 4 bytes per sprite slot
 7E2400 OamHigh              ; 2 bits per slot
 7E2960 BombList             ; pointers to live bombs, $FFFF-terminated
+7E5E14 TimerFrames          ; frames into the current second ($40 per second)
+7E5C56 TimeNotUp            ; 0 once the timer ran out
+7E5DF0 ScoreDigitVals       ; 5 digits, gfx codes at $7E5DFA
+7E5E04 TimerDigitVals       ; m, s tens, s ones; gfx codes at $7E5E0A
+7E5BEE BlastCellType        ; tile & $3F of the cell a flame is checking
 7F6000 Scratch6000          ; map scan lists; also a per-cell bit map (C0:F117)
 C0:3386 BlastExtendLeft     ; walks bomb +7 + 1 cells, stops at solid/$43/$44
 C0:323F BlastExtendUp       ; same, -$80 per cell, also stops at cells >= $2000
@@ -66,6 +71,32 @@ C0:37E2 FindTileInMap       ; cells with TileMap = $94 -> [$97] {cell, gfx}
 C0:3778 FindItemInMap       ; same over CellItems
 C0:E980 BombUpdate          ; fuse +4, anim +8/+9; every 2nd frame ($32 even)
 C0:E0AA BombsUpdate         ; bomb list $7E2960 (pointers, $FFFF end)
+C0:E0F0 BlastTick           ; exploding bomb: flame frames, then FlameCleanup
+C0:E14F FlameCleanup        ; restore tiles/gfx under the blast, clear BlastMap
+C0:E174 BlastPaint          ; BlastMap = cells the blast reaches
+C0:E46C BombReturnToOwner   ; owner +$F8 placed--, +$F1 bombs left
+C0:EA83 BombExplode         ; state bit 14, then BlastResolve* per direction
+C0:EAA7 BlastResolveUp      ; cut the flame list where it hits something
+C0:EB8E BlastResolveDown
+C0:EC68 BlastResolveRight
+C0:ED42 BlastResolveLeft
+C0:E679 FlameDrawCenter
+C0:E86D FlameDrawUp
+C0:E6CC FlameDrawDown
+C0:E757 FlameDrawLeft
+C0:E7E2 FlameDrawRight
+C0:DEEE BombListRebuild
+C0:DF30 BombsOnItems        ; bombs on CellItems $17-$1E -> C0:DF87
+C0:34C0 BombPlace           ; player [$6A] -> first free bomb slot [$7C]
+C0:3583 BombSetRange
+C1:22F3 SwitchPanelToggle
+C0:A570 ObjFlashTick        ; +4 bit 5: palette 7 <-> +$2A, +$B9 countdown
+C1:1E6F EnemyStun
+C1:1EE2 EnemyHit            ; +$43 hit points
+C1:1C1A StageTimer          ; 1 s per $40 frames at $7E5E14
+C1:1BA3 ScoreDigits
+C1:1CA3 DigitSplit          ; A -> decimal digits $7E5E16..$5E1E
+C1:1D17 TimerTick
 CC:1926 CheckPassword       ; digits $7F0028.. vs table CC:0000 -> PasswordIndex
 001C6A PasswordIndex
 7F0028 PasswordDigits

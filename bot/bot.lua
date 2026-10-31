@@ -433,7 +433,7 @@ local function think()
     -- a long time out, assume game over and let drive.py continue from the
     -- world's password state (what CONTINUE + password does in the game).
     offStage = offStage + 1
-    if offStage == 1500 then
+    if offStage == 3000 then  -- longer than any intro or cutscene seen so far
       writeFile(OUT .. "/gameover.txt", tostring(lastWorld + 1))
       log(string.format("%6d game over in world %d", frame, lastWorld + 1))
       gameOver = true

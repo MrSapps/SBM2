@@ -80,7 +80,9 @@ local BLAST_STOP = { [0xC9] = true }
 -- $69 is a gold floor panel ($7E5B56 list); the exit needs all of them to
 -- turn into $70 ($7E5D94 bit 15, checked by C1:41xx). Test: step on them.
 local SWITCH_ON = 0xE0
-local function isSwitchOff(t) return t >= 0xD0 and t < SWITCH_ON end
+-- $D0-$EF are magnets etc. (C1:44F6): blasts rotate them but the exit
+-- doesn't depend on them, so they are never bomb targets.
+local function isSwitchOff(t) return false end
 
 -- Gold panels ($7E5B56 list, 8-byte entries: +0 bit 0 toggled, +2 map index;
 -- $FFFF ends). Mode ($7E5D94 bit 0) 0: tile $69 lights to $70 when blasted.

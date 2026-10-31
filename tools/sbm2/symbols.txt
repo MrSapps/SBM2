@@ -18,6 +18,7 @@ C1:47E6 BuildMagnetList
 
 # --- direct page ---
 0036 NmiCount
+00D6 RngSeed
 00C3 Joy1Raw
 
 # --- WRAM ---
@@ -32,7 +33,21 @@ C1:47E6 BuildMagnetList
 7E80A8 Player1_Cell
 7F2000 Bombs                ; 40 x $100
 7FC000 TileMap              ; 32 x 32 cells, 2 bytes, rows $80 apart
+7E5DAE BlastStopped         ; set while extending a blast once it hit something
+7E5E46 BlastHitSpecial      ; a blast reached a cell whose CellItems is $0E
+7F8000 BlastMap             ; per cell, $FFFF = reached by a blast
+7FA000 TileGfxMap           ; per-cell graphics codes (guess)
+7FB000 TileGfxMap2
+7FD000 CellItems            ; per-cell item code (guess), $0E special
+7F0030 PasswordResult       ; 1 = valid, 2 = invalid (indexed by X)
 C0:3386 BlastExtendLeft     ; walks bomb +7 + 1 cells, stops at solid/$43/$44
+C0:323F BlastExtendUp       ; same, -$80 per cell, also stops at cells >= $2000
+C0:32E5 BlastExtendDown
+C0:3423 BlastExtendRight
+C1:2282 GoldPanelToggle     ; mode 1: player on $73/$74 flips the panel entry at $5E
+C0:0CDF Random              ; $D6 = ($D6|1)*$383; A = hi word of (X & $FF) * seed
+C0:0D20 Mul16x16            ; $44 = $40 * $42 (low 16 bits)
+C0:0D02 Mul8x16             ; $40:$44 = (high byte of $D8) * $42
 CC:1926 CheckPassword       ; digits $7F0028.. vs table CC:0000 -> PasswordIndex
 001C6A PasswordIndex
 7F0028 PasswordDigits

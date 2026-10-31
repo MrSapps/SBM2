@@ -46,6 +46,13 @@ of every logic frame (each exit from an NMI wait loop, e.g. `$CC:0054`).
 `build/port/verify` with no arguments lists its options (instruction history,
 write watch, per-frame timing, per-instruction clocks).
 
+Ported routines live in `port/game.c` and replace the ROM code at their
+address through `port/hook.c`. `make verify-hybrid` runs two machines in
+frame-step mode (one NMI per wait loop, no timing), one interpreted and one
+with the C routines, and compares them after every logic frame;
+`HYBRID_FLAGS=-c` also checks every native call against the interpreter
+(registers, flags, WRAM), `-N` disables the hooks, `-o/-x NAME` picks them.
+
 ## Notes so far
 
 - HiROM + FastROM, 8 Mbit, no SRAM. RESET $00:FA00, NMI $00:FD84.

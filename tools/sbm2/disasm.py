@@ -111,6 +111,8 @@ if __name__ == '__main__':
     t = Tracer(rom)
     entries = [e for *_, e in vector_entries(rom)]
     extra, t.noret = load_hints(sys.argv[2])
+    for e in extra:  # hinted entries are jump-table targets: give them labels
+        t.labels.setdefault(canon(e[0]), 'loc')
     for path in sys.argv[4:]:
         # Merge several CDLs (e.g. from different bot runs) by OR-ing flags.
         cdl = open(path, 'rb').read()

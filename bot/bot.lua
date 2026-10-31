@@ -81,7 +81,9 @@ local SWITCH_ON = 0xE0
 local function isSwitchOff(t) return (t >= 0xD0 and t < SWITCH_ON) or t == PANEL end
 for t = 0xD0, 0xEF do HARD[t] = true; BLAST_STOP[t] = true end
 local function isBomb(t) return t >= 0x40 and t <= 0x43 end
-local function isFlame(t) return t >= 0x01 and t <= 0x3F end
+-- Blasts write $01 (C0:E8E0); other low codes ($07 $08 $0E $14...) are floor
+-- variants whose tile handler (C1:58DE table) does nothing.
+local function isFlame(t) return t >= 0x01 and t <= 0x03 end
 
 local logLines, seenUnknown = {}, {}
 local function log(s) logLines[#logLines + 1] = s end
@@ -109,7 +111,9 @@ end
 local function walkable(g, c, r)
   if r < 0 or r >= MAP_H or c < 0 or c >= MAP_W then return false end
   local t = g[r][c]
-  return EMPTY[t] == true
+  -- $04-$3F: floor variants; some ($0B $0C $17-$1A $23) run a handler when
+  -- stood on (C1:58DE table): conveyors/warps, not hazards as far as known.
+  return EMPTY[t] == true or (t >= 0x04 and t < 0x40)
 end
 
 local DIRS = { { 0, -1, "up" }, { 0, 1, "down" }, { -1, 0, "left" }, { 1, 0, "right" } }

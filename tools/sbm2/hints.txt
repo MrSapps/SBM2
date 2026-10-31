@@ -1,0 +1,14 @@
+# PlayerTileHandler table C1:58DE (jml [$7F] via C0:FD80, A/X 16-bit)
+code C1408B m16 x16
+code C1408C m16 x16
+code C140B9 m16 x16
+code C141A8 m16 x16
+code C14264 m16 x16
+code C14269 m16 x16
+code C1426E m16 x16
+code C14273 m16 x16
+code C14278 m16 x16
+code C14279 m16 x16
+code C1427A m16 x16
+code C1427B m16 x16
+code C1427C m16 x16

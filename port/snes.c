@@ -423,6 +423,18 @@ static void hdma_line(Snes *s)
     s->hclock += cost;
 }
 
+/* Pad log: apply the script's WRAM pokes that come next (frame-step). */
+static void fs_pokes(Snes *s)
+{
+    while (s->pad_pos + 2 < s->npads && (s->pads[s->pad_pos] & 0xF) == PADLOG_POKE) {
+        uint32_t off = (uint32_t)(s->pads[s->pad_pos] >> 4 & 1) << 16 | s->pads[s->pad_pos + 1];
+        uint16_t v = s->pads[s->pad_pos + 2];
+        s->wram[off] = v;
+        s->wram[(off + 1) & 0x1FFFF] = v >> 8;
+        s->pad_pos += 3;
+    }
+}
+
 /* --- CPU registers $4016-$4017, $4200-$43FF --- */
 static uint8_t reg_read(Snes *s, uint16_t a)
 {
@@ -447,6 +459,7 @@ static uint8_t reg_read(Snes *s, uint16_t a)
     if (a == 0x4219 && (s->pads || s->pad_record)) {
         /* A pad read (the game reads $4219, then $4218): replay or record. */
         if (s->pads) {
+            fs_pokes(s);
             while (s->pad_pos < s->npads && (s->pads[s->pad_pos] & 0xF)) {
                 s->pad_pos++;   /* an NMI event that frame-step could not place */
                 s->pad_desync++;
@@ -738,21 +751,27 @@ static void framestep_nmi(Snes *s)
     if (s->pad_markers) {
         if (s->fs_raised) return;   /* the next frame's NMIs come after the exit */
         if (!wram16(s, 0x16)) s->fs_seen16 = 1;
-        if (s->pad_pos < s->npads && (s->pads[s->pad_pos] & PADLOG_EXTRA)) {
-            uint16_t v = s->pads[s->pad_pos];
+        /* Pokes take effect just before the event after them (the script
+         * made them at the end of a video frame, right before vblank). */
+        uint32_t q = s->pad_pos;
+        while (q + 2 < s->npads && (s->pads[q] & 0xF) == PADLOG_POKE) q += 3;
+        if (q < s->npads && (s->pads[q] & PADLOG_EXTRA)) {
+            uint16_t v = s->pads[q];
             int set16 = wram16(s, 0x16) != 0, set18 = wram16(s, 0x18) != 0;
             int ok = !(v & PADLOG_AT_LDA) &&
                      set18 == !!(v & PADLOG_18_SET) && set16 == !!(v & PADLOG_16_SET) &&
                      (!set16 || s->fs_seen16);
             if (ok || k == WAIT_LDA) {
+                fs_pokes(s);
                 s->pad_pos++;
                 fs_raise(s);
             }
             return;
         }
         if (k != WAIT_CMP || s->fs_raised) return;
+        fs_pokes(s);
         if (s->pad_pos < s->npads && s->pads[s->pad_pos] == PADLOG_FRAME) s->pad_pos++;
-        else s->pad_desync++;
+        else if (s->pad_pos < s->npads) s->pad_desync++;
     } else if (k != WAIT_CMP || s->fs_raised) return;
     s->fs_raised = 1;
     if (s->nmitimen & 0x01) {

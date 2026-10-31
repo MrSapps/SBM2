@@ -1,5 +1,9 @@
 local WATCH_LUA = os.getenv("SBM2_WATCH_LUA")
 if WATCH_LUA and WATCH_LUA ~= "" then dofile(WATCH_LUA) end
+-- Pad log (bot/inputlog.lua) for replaying the run in port/hybrid: ckpt.inputs
+-- next to ckpt.mss, run.inputs at the end; rollbacks rewind it.
+local BOT_DIR = debug.getinfo(1, "S").source:match("^@(.*)/[^/]*$") or "."
+local inputlog = dofile(BOT_DIR .. "/inputlog.lua")
 -- SBM2 bot v0: single-player normal game.
 --
 -- Reads the tile map and player 1 from WRAM, flees bomb blasts with BFS, and
@@ -475,7 +479,7 @@ local function think()
   local st = r16(0x5D94)
   if st ~= 0xFFFF and (st & 0x8000) == 0 and next(panelTodo) ~= nil
       and (frame - lastProgress > ASSIST or timeLeft() < 30) and #walkers == 0 then
-    emu.write16(0x5D94, st | 0x8000, WRAM)
+    inputlog.write16(0x5D94, st | 0x8000)   -- logged: replays can't infer it
     local msg = string.format("frame %d world %d: panels assisted (%s)", frame, lastWorld + 1, sig)
     log("ASSIST " .. msg)
     local fh = io.open(OUT .. "/assists.txt", "a"); if fh then fh:write(msg .. "\n"); fh:close() end
@@ -642,6 +646,7 @@ local function onNextInstruction(fn)
 end
 
 local loaded = LOAD == nil
+if loaded then inputlog.start(nil) end
 emu.addEventCallback(function() emu.setInput(input, 0) end, emu.eventType.inputPolled)
 
 local LOGFILE = string.format("%s/bot_%06d.log", OUT, FRAME0)
@@ -661,8 +666,11 @@ end
 local function checkpoint()
   onNextInstruction(function()
     writeFile(OUT .. "/ckpt.mss.tmp", emu.createSavestate())
+    local logged = inputlog.save(OUT .. "/ckpt.inputs.tmp")
     dumpCdl(string.format("%s/seg_%06d.cdl", OUT, FRAME0))
     flushLog()
+    if logged then os.rename(OUT .. "/ckpt.inputs.tmp", OUT .. "/ckpt.inputs")
+    else os.remove(OUT .. "/ckpt.inputs") end   -- start state had no sidecar
     os.rename(OUT .. "/ckpt.mss.tmp", OUT .. "/ckpt.mss")
     writeFile(OUT .. "/ckpt.txt", tostring(frame))
   end)
@@ -672,7 +680,10 @@ end
 local function onFrame()
   if not loaded then
     local fh = assert(io.open(LOAD, "rb")); local data = fh:read("a"); fh:close()
-    onNextInstruction(function() emu.loadSavestate(data) end)
+    onNextInstruction(function()
+      emu.loadSavestate(data)
+      inputlog.start(LOAD)   -- the state's sidecar: log from power-on
+    end)
     loaded = true
     return
   end
@@ -695,7 +706,10 @@ local function onFrame()
         math.randomseed(rollbacks * 7919 + snap[1])
         exploreUntil = snap[1] + 60 * (tries + 1)
         shuffleDirs()
-        onNextInstruction(function() emu.loadSavestate(snap[2]) end)
+        onNextInstruction(function()
+          emu.loadSavestate(snap[2])
+          inputlog.truncate(snap[3])
+        end)
         frame, step, playing, fuseSeen = snap[1], nil, false, {}
         return
       end
@@ -705,7 +719,7 @@ local function onFrame()
       and (#snaps == 0 or snaps[#snaps][1] < frame) then
     local f = frame
     onNextInstruction(function()
-      snaps[#snaps + 1] = { f, emu.createSavestate() }
+      snaps[#snaps + 1] = { f, emu.createSavestate(), inputlog.mark() }
       if #snaps > 40 then table.remove(snaps, 1) end
     end)
   end
@@ -719,7 +733,10 @@ local function onFrame()
       local snap = ambush
       for k = #snaps, 1, -1 do if snaps[k][1] > snap[1] then snaps[k] = nil end end
       shuffleDirs()
-      onNextInstruction(function() emu.loadSavestate(snap[2]) end)
+      onNextInstruction(function()
+        emu.loadSavestate(snap[2])
+        inputlog.truncate(snap[6])
+      end)
       frame, step, playing, fuseSeen = snap[1], nil, false, {}
       ambushHold = frame + math.random(8, 60)
       return
@@ -736,7 +753,7 @@ local function onFrame()
       ambushes = ambushes + 1
       local a = { frame, nil, liveEnemies(), 0, score() }
       ambush = a
-      onNextInstruction(function() a[2] = emu.createSavestate() end)
+      onNextInstruction(function() a[2], a[6] = emu.createSavestate(), inputlog.mark() end)
     end
   end
   if not ok then log("error: " .. tostring(err)) end
@@ -752,11 +769,13 @@ local function onFrame()
     flushLog()
     dumpCdl(string.format("%s/seg_%06d.cdl", OUT, FRAME0))
     writeFile(OUT .. "/ckpt.txt", tostring(frame))
+    inputlog.save(OUT .. "/run.inputs")
     emu.stop(6)
   elseif frame >= FRAMES then
     flushLog()
     dumpCdl(string.format("%s/seg_%06d.cdl", OUT, FRAME0))
     writeFile(OUT .. "/ckpt.txt", tostring(frame))
+    inputlog.save(OUT .. "/run.inputs")
     emu.stop(0)
   elseif (frame - FRAME0) % CKPT == 0 then
     checkpoint()
@@ -768,6 +787,7 @@ emu.addEventCallback(function()
   if not ok then
     log(string.format("%6d fatal: %s", frame, tostring(err)))
     flushLog()
+    inputlog.save(OUT .. "/run.inputs")
     emu.stop(4)
   end
 end, emu.eventType.endFrame)

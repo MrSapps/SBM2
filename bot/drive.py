@@ -1,5 +1,8 @@
 """Run bot.lua in Mesen until a frame budget is reached, resuming from the
 last checkpoint whenever Mesen exits early. Merges segment CDLs into run.cdl.
+The pad log (bot/inputlog.lua) follows the state each segment starts from
+(its .inputs sidecar: ckpt.inputs, or the world state's after a game over), so
+<outdir>/run.inputs always replays the run from power-on (port/hybrid).
 
 Usage: drive.py <outdir> <start.mss> <frames> [shots,...]
 """
@@ -22,6 +25,12 @@ def merge_cdls(out):
         open(os.path.join(out, 'run.cdl'), 'wb').write(merged)
 
 
+def check_sidecar(state):
+    if not os.path.exists(state[:-4] + '.inputs'):
+        print(f'warning: {state} has no .inputs sidecar; no replayable log '
+              '(bot/world_states.py makes them)', flush=True)
+
+
 def main():
     out = os.path.abspath(sys.argv[1])
     start = os.path.abspath(sys.argv[2])
@@ -31,6 +40,7 @@ def main():
     ckpt_txt = os.path.join(out, 'ckpt.txt')
     frame0, state = 0, start
     for attempt in range(1000):
+        check_sidecar(state)
         env = dict(os.environ, SBM2_OUT=out, SBM2_FRAMES=str(frames),
                    SBM2_FRAME0=str(frame0), SBM2_LOAD=state, SBM2_SHOTS=shots)
         rc = subprocess.run(

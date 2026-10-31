@@ -20,6 +20,7 @@
  *   -o NAME     enable only this hook (repeatable)
  *   -x NAME     disable this hook (repeatable)
  *   -c          shadow-check every hooked call (interpreter on a copy)
+ *   -w ADDR     log A's writes to WRAM address ADDR (hex offset)
  *
  * The dead stack ($0100 up to SP) is not compared: native code does not
  * leave the return addresses of its internal calls there. */
@@ -33,6 +34,18 @@
 static Snes rec, ma, mb;
 static uint8_t ref[WRAM], ignore[WRAM];
 static long ever[WRAM];
+static long watch = -1, cur_frame;
+static void (*real_write)(void *, uint32_t, uint8_t);
+
+static void watch_write(void *ctx, uint32_t addr, uint8_t v)
+{
+    uint8_t b = addr >> 16;
+    long w = (b & 0xFE) == 0x7E ? (long)(addr & 0x1FFFF)
+           : (!(b & 0x40) && (addr & 0xFFFF) < 0x2000) ? (long)(addr & 0xFFFF) : -1;
+    if (w == watch)
+        printf("  write %05lX = %02X  pc %02X:%04X  frame %ld\n", w, v, ma.cpu.pb, ma.cpu.pc, cur_frame);
+    real_write(ctx, addr, v);
+}
 
 static int at_exit(const Snes *s)
 {
@@ -159,6 +172,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-N")) hooks = 0;
         else if (!strcmp(argv[i], "-c")) g_hook_check = 1;
         else if (!strcmp(argv[i], "-W") && i + 1 < argc) wpath = argv[++i];
+        else if (!strcmp(argv[i], "-w") && i + 1 < argc) watch = strtol(argv[++i], NULL, 16) & 0x1FFFF;
         else if (!strcmp(argv[i], "-R") && i + 1 < argc) rpath = argv[++i];
         else if (!strcmp(argv[i], "-i") && i + 1 < argc) {
             unsigned lo, hi;
@@ -224,11 +238,13 @@ int main(int argc, char **argv)
         else { m[k]->input = script; m[k]->input_len = vlen; }
     }
     if (hooks) hook_install(&mb, enable);
+    if (watch >= 0) { real_write = ma.cpu.write; ma.cpu.write = watch_write; }
 
     long n;
     int bad = 0;
     for (n = 0; n < frames && !(pads && ma.pad_pos >= len); n++) {
         g_last_hook = -1;
+        cur_frame = n;
         if (run_frame(&ma) || run_frame(&mb)) {
             printf("frame %ld: no wait-loop exit (A at %02X:%04X, B at %02X:%04X)\n", n,
                    ma.cpu.pb, ma.cpu.pc, mb.cpu.pb, mb.cpu.pc);

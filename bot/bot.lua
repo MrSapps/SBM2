@@ -363,6 +363,12 @@ local exploreUntil = 0    -- after a rollback, "wait" becomes a random move
 -- Cells where pressing A placed no bomb (stairs, gate cells, ...): no bomb
 -- attempts there until noBombUntil[key].
 local noBombUntil, bombTry = {}, nil  -- bombTry = { key, since }
+-- Stall detection: if score, soft blocks, open panels and enemy count stay
+-- the same for STALL frames, explore (novelty-seeking walk) for a while, to
+-- find conveyors, warps and other ways between rooms.
+local STALL, visits = 1500, {}
+local progressSig, progressAt = nil, 0
+local stallUntil = 0      -- explore overrides seek/hunt/item until then
 local deaths, rollbacks = 0, 0
 -- Ambush search: a bomb placed only for an enemy is tried from a savestate;
 -- if nobody died AMBUSH_FRAMES later, reload and retry with a random delay
@@ -437,6 +443,17 @@ local function think()
   end
   local panelTodo, panelDone = panels()
   local here = r * KEY_W + c
+  visits[here] = (visits[here] or 0) + 1
+  local soft, todo = 0, 0
+  for rr = 0, MAP_H - 1 do for cc = 0, MAP_W - 1 do if SOFT[g[rr][cc]] then soft = soft + 1 end end end
+  for _ in pairs(panelTodo) do todo = todo + 1 end
+  local sig = string.format("%d/%d/%d/%d", score(), soft, todo, #enemies)
+  if sig ~= progressSig then progressSig, progressAt = sig, frame
+  elseif frame - progressAt > STALL then
+    progressAt = frame
+    exploreUntil, stallUntil = frame + 600, frame + 600
+    log(string.format("%6d stalled (%s); exploring", frame, sig))
+  end
   local plan, dir
   local function safeGoal(w)
     return function(cc, rr) return not w[rr * KEY_W + cc] end
@@ -519,13 +536,17 @@ local function think()
           return false
         end, nearEnemy, windows)
       end
+      if frame < stallUntil and plan ~= "bomb" then dir = nil end
       if not dir and frame < exploreUntil then
-        -- Replaying after a death: waiting is what failed, so try something.
+        -- After a death or a long stall: walk toward the least visited
+        -- neighbour (random tie-break) and sometimes drop a bomb.
         plan = "explore"
-        local opts = {}
+        local best, opts = math.huge, {}
         for _, d in ipairs(DIRS) do
-          if walkable(g, c + d[1], r + d[2]) and not danger[(r + d[2]) * KEY_W + c + d[1]] then
-            opts[#opts + 1] = d[3]
+          local k = (r + d[2]) * KEY_W + c + d[1]
+          if walkable(g, c + d[1], r + d[2]) and not danger[k] and not nearEnemy[k] then
+            local v = visits[k] or 0
+            if v < best then best, opts = v, { d[3] } elseif v == best then opts[#opts + 1] = d[3] end
           end
         end
         if #opts > 0 then dir = opts[math.random(#opts)] end

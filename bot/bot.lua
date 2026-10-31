@@ -409,7 +409,7 @@ local function think()
   -- panels blasted, or no panels: $FFFF) is set (checked at C1:41xx).
   local gate = r16(0x5D72)
   local gc, gr = (gate & 0x7F) // 2, gate >> 7
-  local gateOpen = (r16(0x5D94) & 0x8000) ~= 0 and g[gr] ~= nil and gate ~= 0
+  local gateOpen = g[gr] ~= nil and gate ~= 0 and g[gr][gc] == 0x49  -- open gate tile (C1:41A8 via $09)
   if gateOpen then g[gr][gc] = GATE_OPEN end
   RANGE = emu.read(P1 + P_FIRE, WRAM, false) + 1
   local c, r, x, y = playerTile()

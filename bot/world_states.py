@@ -5,7 +5,9 @@ starts the stage given by the word table at CC:19BE) is read from the ROM,
 so nothing ROM-derived is stored in the repo.
 
 Usage: world_states.py [outdir]   (default build/states)
-Writes title_menu.mss, password.mss and world<N>.mss (N = 1..5).
+Writes title_menu.mss, password.mss and world<N>.mss (N = 1..5), each with
+its .inputs sidecar (logic-frame input since power-on, see bot/inputlog.lua;
+harness.lua writes it). States without a sidecar are remade.
 """
 import os
 import subprocess
@@ -31,6 +33,11 @@ def run(out, script, load=None, save=None):
                    stdout=subprocess.DEVNULL)
 
 
+def have(state):
+    """The state and its input-log sidecar both exist."""
+    return os.path.exists(state) and os.path.exists(state[:-4] + '.inputs')
+
+
 def presses(buttons, start=10, gap=12):
     lines, f = ['0 -'], start
     for b in buttons:
@@ -45,10 +52,10 @@ def main():
     os.makedirs(states, exist_ok=True)
     title = os.path.join(states, 'title_menu.mss')
     pw = os.path.join(states, 'password.mss')
-    if not os.path.exists(title):
+    if not have(title):
         run(os.path.join(work, 'title'), ['0 -', '950 start', '954 -', '1300 end'],
             save=f'1290:{title}')
-    if not os.path.exists(pw):
+    if not have(pw):
         lines, f = presses(['down', 'down', 'start'], gap=30)
         run(os.path.join(work, 'pw'), lines + [f'{f + 330} end'], load=title,
             save=f'{f + 320}:{pw}')
@@ -59,6 +66,8 @@ def main():
         lines, f = presses(buttons + ['start'])
         # Saved on the "N-1 START!" card; the bot waits for the stage itself.
         out = os.path.join(states, f'world{stage >> 4}.mss')
+        if have(out) and have(pw) and os.path.getmtime(out) >= os.path.getmtime(pw):
+            continue
         run(os.path.join(work, f'w{n}'), lines + [f'{f + 210} end'], load=pw,
             save=f'{f + 200}:{out}')
         print(f'world {stage >> 4}: {out}', flush=True)

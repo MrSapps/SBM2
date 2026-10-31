@@ -158,7 +158,7 @@ local RANGE = 1
 local BOMBS, BOMB_SLOTS, BOMB_STRIDE = 0x12000, 40, 0x100  -- $7F2000 bomb table
 local FLAME_FRAMES = 40       -- how long a blast stays lethal (estimate)
 local NEW_FUSE = 150          -- fuse of a freshly placed bomb, in frames
-local FPT = 16                -- frames per tile walked
+local FPT = 20                -- frames per tile walked (measured 17-23 at base speed)
 
 -- Some bombs sit with a frozen fuse (seen in 1-2); after FROZEN frames
 -- without a fuse change, treat them as obstacles that only a chain reaction
@@ -317,7 +317,7 @@ local function bfs(g, c0, r0, goal, avoid, windows, t0)
       local k = rr * KEY_W + cc
       local arrive = t0 + (n + 1) * FPT
       if not seen[k] and walkable(g, cc, rr) and not (avoid and avoid[k])
-          and not (windows and hit(windows, k, arrive - FPT, arrive + FPT // 2)) then
+          and not (windows and hit(windows, k, arrive - FPT, arrive + FPT)) then
         seen[k] = true
         q[#q + 1] = { cc, rr, first or dir[3], n + 1 }
       end

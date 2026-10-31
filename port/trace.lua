@@ -18,6 +18,9 @@
 --                (late = NMIs since the previous frame that did not end a
 --                wait, i.e. lag)
 --   SBM2_FRAMES  logic frames to dump (default 3000)
+--   SBM2_LOAD    savestate to start from (needs its bot/inputlog.lua sidecar;
+--                logic frames are then numbered from power-on as in it)
+-- The run's logic-frame input log is written to <SBM2_TRACE>.inputs.
 -- Usage: port/trace.sh (Mesen needs --timeout for long runs).
 local OUT = assert(os.getenv("SBM2_TRACE"), "SBM2_TRACE not set")
 local N = tonumber(os.getenv("SBM2_FRAMES") or "3000")
@@ -31,7 +34,14 @@ end
 
 local bin = assert(io.open(OUT, "wb"))
 local meta = assert(io.open(OUT .. ".txt", "w"))
-local n, frame, late = 0, 0, 0
+local n, frame, late, dumped = 0, 0, 0, 0
+
+local DIR = debug.getinfo(1, "S").source:match("^@(.*)/[^/]*$") or "."
+local inputlog = dofile(DIR .. "/../bot/inputlog.lua")
+local LOAD = os.getenv("SBM2_LOAD")
+if LOAD == "" then LOAD = nil end
+local loaded = LOAD == nil
+if loaded then inputlog.start(nil) end
 
 local chr = {}
 for i = 0, 255 do chr[i] = string.char(i) end
@@ -51,6 +61,7 @@ end
 local stopping = false
 local function finish()
   stopping = true
+  inputlog.save(OUT .. ".inputs")
   bin:close()
   meta:close()
   emu.stop(0)
@@ -98,15 +109,15 @@ end, emu.callbackType.exec, nmiVec, nmiVec)
 -- NmiCount write: the 16-bit inc writes both bytes; dump on the second. The
 -- callback may run before that byte lands, so the dump patches it in.
 emu.addMemoryCallback(function(addr, value)
-  if not pending or stopping then return end
+  if not pending or stopping or not loaded then return end
   writes = writes + 1
   if writes < 2 then return end
   local s = emu.getState()
   dumpWram(addr, value)
   meta:write(string.format("%d %d %06X %d %d %d\n", n, frame, pending + 8,
     s["masterClock"], s["ppu.scanline"], late))
-  n, late, pending = n + 1, 0, nil
-  if n >= N then finish() end
+  n, late, pending, dumped = n + 1, 0, nil, dumped + 1
+  if dumped >= N then finish() end
 end, emu.callbackType.write, 0x0036, 0x0037)
 
 local idx, held = 1, "-"
@@ -122,6 +133,20 @@ end, emu.eventType.inputPolled)
 
 emu.addEventCallback(function()
   if stopping then return end
+  if not loaded then
+    local fh = assert(io.open(LOAD, "rb"))
+    local data = fh:read("a")
+    fh:close()
+    local id
+    id = emu.addMemoryCallback(function()
+      emu.removeMemoryCallback(id, emu.callbackType.exec, 0, 0xFFFFFF)
+      emu.loadSavestate(data)
+      inputlog.start(LOAD)
+      n, pending = inputlog.mark(), nil
+      loaded = true
+    end, emu.callbackType.exec, 0, 0xFFFFFF)
+    return
+  end
   frame = frame + 1
   if held == "end" then finish() end
 end, emu.eventType.endFrame)

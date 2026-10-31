@@ -348,6 +348,7 @@ local frame, input = FRAME0, {}
 local step = nil  -- committed move: from (c,r) toward (tc,tr); false while locked
 local recent = {}  -- last few plan lines, dumped on death
 local lastPlan = ""
+local offStage = 0  -- frames since the last stage frame
 
 -- Rollback search: in-memory savestates every SNAP_EVERY frames; a death
 -- reloads an older one and replays with shuffled tie-breaks, going further
@@ -412,7 +413,14 @@ local function think()
   playing = true
   -- The border is always hard wall during play; anything else means the
   -- stage is loading or a cutscene is up.
-  if not HARD[emu.read(MAP, WRAM, false)] then return end
+  if not HARD[emu.read(MAP, WRAM, false)] then
+    -- Out of a stage. After a game over the CONTINUE screen waits for Start
+    -- (and times out to the title); pulse Start once it has been a while.
+    offStage = offStage + 1
+    if offStage > 300 and offStage % 60 < 4 then input.start = true end
+    return
+  end
+  offStage = 0
   local g = readMap()
   -- Exit gate: map index at $7E5D72; open once $7E5D94 bit 15 (all gold
   -- panels blasted, or no panels: $FFFF) is set (checked at C1:41xx).

@@ -715,11 +715,12 @@ static void fs_raise(Snes *s)
 
 /* Frame-step NMIs. Without NMI events in the pad log: one at each wait
  * loop's cmp. With them (a log of a real run), the log also says where the
- * real machine had NMIs that did not end a wait (lag, loading screens): each
- * is raised at the first point where $16 and $18 are as that NMI saw them -
- * for one with $16 set, only after $16 has been 0 in this logic frame (it
- * came after the frame's logic) - and at the latest at the wait loop's lda,
- * where it makes the loop wait for the next one. Never inside a handler. */
+ * real machine had NMIs that did not end a wait: one that hit a wait loop's
+ * lda (the logic finished just at vblank) is raised there too, and makes the
+ * loop wait for the next; others (lag, loading screens) at the first point
+ * where $16 and $18 are as that NMI saw them - for one with $16 set, only
+ * after $16 has been 0 in this logic frame (it came after the frame's logic)
+ * - or at the latest at the wait loop's lda. Never inside a handler. */
 static void framestep_nmi(Snes *s)
 {
     uint32_t pc = (uint32_t)s->cpu.pb << 16 | s->cpu.pc;
@@ -731,11 +732,13 @@ static void framestep_nmi(Snes *s)
     }
     if (!(s->nmitimen & 0x80)) return;
     if (s->pad_markers) {
+        if (s->fs_raised) return;   /* the next frame's NMIs come after the exit */
         if (!wram16(s, 0x16)) s->fs_seen16 = 1;
         if (s->pad_pos < s->npads && (s->pads[s->pad_pos] & PADLOG_EXTRA)) {
             uint16_t v = s->pads[s->pad_pos];
             int set16 = wram16(s, 0x16) != 0, set18 = wram16(s, 0x18) != 0;
-            int ok = set18 == !!(v & PADLOG_18_SET) && set16 == !!(v & PADLOG_16_SET) &&
+            int ok = !(v & PADLOG_AT_LDA) &&
+                     set18 == !!(v & PADLOG_18_SET) && set16 == !!(v & PADLOG_16_SET) &&
                      (!set16 || s->fs_seen16);
             if (ok || k == WAIT_LDA) {
                 s->pad_pos++;
@@ -764,7 +767,8 @@ static void record_nmi(Snes *s)
     uint32_t pc = (uint32_t)s->cpu.pb << 16 | s->cpu.pc;
     int k = s->wait_at[pc & 0xFFFF] ? snes_wait_point(s, pc) : 0;
     uint16_t v = k == WAIT_CMP || k == WAIT_BEQ ? PADLOG_FRAME :
-        PADLOG_EXTRA | (wram16(s, 0x16) ? PADLOG_16_SET : 0) | (wram16(s, 0x18) ? PADLOG_18_SET : 0);
+        PADLOG_EXTRA | (wram16(s, 0x16) ? PADLOG_16_SET : 0) | (wram16(s, 0x18) ? PADLOG_18_SET : 0) |
+        (k == WAIT_LDA ? PADLOG_AT_LDA : 0);
     if (s->pad_rec_len == s->pad_rec_cap) {
         s->pad_rec_cap = s->pad_rec_cap ? 2 * s->pad_rec_cap : 4096;
         s->pad_rec = realloc(s->pad_rec, s->pad_rec_cap * 2);

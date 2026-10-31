@@ -552,18 +552,48 @@ static void find_wait_loops(Snes *s)
         s->wait_lo[s->nwait++] = 0xC00000 + o;
         /* code in $8000-$FFFF can also run from the bank $00-$3F mirror */
         if ((o & 0xFFFF) >= 0x8000 && o < 0x400000) s->wait_lo[s->nwait++] = o;
-        s->wait_at[(o + 3) & 0xFFFF] = WAIT_CMP;
-        s->wait_at[(o + 8) & 0xFFFF] = WAIT_EXIT;
+        s->wait_at[(o + 3) & 0xFFFF] |= WAIT_CMP;
+        s->wait_at[(o + 8) & 0xFFFF] |= WAIT_EXIT;
     }
 }
 
 int snes_wait_point(const Snes *s, uint32_t pc)
 {
     int k = s->wait_at[pc & 0xFFFF];
-    if (!k) return 0;
-    uint32_t lo = pc - (k == WAIT_CMP ? 3 : 8);
-    for (int i = 0; i < s->nwait; i++) if (s->wait_lo[i] == lo) return k;
+    for (int i = 0; k && i < s->nwait; i++) {
+        if ((k & WAIT_CMP) && s->wait_lo[i] == pc - 3) return WAIT_CMP;
+        if ((k & WAIT_EXIT) && s->wait_lo[i] == pc - 8) return WAIT_EXIT;
+    }
     return 0;
+}
+
+uint16_t *snes_load_input(const char *path, uint32_t *len)
+{
+    static const struct { const char *name; uint16_t bit; } names[] = {
+        {"a", PAD_A}, {"b", PAD_B}, {"x", PAD_X}, {"y", PAD_Y}, {"l", PAD_L},
+        {"r", PAD_R}, {"start", PAD_START}, {"select", PAD_SELECT},
+        {"up", PAD_UP}, {"down", PAD_DOWN}, {"left", PAD_LEFT}, {"right", PAD_RIGHT},
+    };
+    FILE *f = fopen(path, "r");
+    if (!f) return NULL;
+    uint32_t cap = 1024, n = 0, frame;
+    uint16_t *in = calloc(cap, 2), held = 0;
+    char line[256], btn[200];
+    while (fgets(line, sizeof line, f)) {
+        if (sscanf(line, "%u %199s", &frame, btn) != 2) continue;
+        while (n < frame) {
+            if (n == cap) { cap *= 2; in = realloc(in, cap * 2); }
+            in[n++] = held;
+        }
+        if (!strcmp(btn, "end")) break;
+        held = 0;
+        for (char *t = strtok(btn, "+"); t; t = strtok(NULL, "+"))
+            for (size_t i = 0; i < sizeof names / sizeof *names; i++)
+                if (!strcmp(t, names[i].name)) held |= names[i].bit;
+    }
+    fclose(f);
+    *len = n;
+    return in;
 }
 
 int snes_load(Snes *s, const char *path)

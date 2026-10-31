@@ -70,7 +70,8 @@ local GATE_OPEN = 0x100  -- pseudo tile for an open exit gate
 local EMPTY = { [0x00] = true, [0x66] = true, [ITEM] = true, [PANEL] = true, [0x70] = true, [0x73] = true, [0x74] = true,
   [GATE_OPEN] = true }  -- $66 stairs
 local SOFT = { [0xC2] = true }
-local HARD = { [0xC5] = true, [0xC6] = true, [0xC9] = true }
+local HARD = { [0xC9] = true }
+for t = 0xC3, 0xCF do HARD[t] = true end  -- walls: $C5/$C6 (world 1), $C8/$CA (world 4)
 -- Hard tiles a blast still reaches (and stops at): the castle gate, which
 -- has an enemy-like object parked in it.
 local BLAST_STOP = { [0xC9] = true }
@@ -135,7 +136,9 @@ local function walkable(g, c, r)
   local t = g[r][c]
   -- $04-$3F: floor variants; some ($0B $0C $17-$1A $23) run a handler when
   -- stood on (C1:58DE table): conveyors/warps, not hazards as far as known.
-  return EMPTY[t] == true or (t >= 0x04 and t < 0x40)
+  -- $40-$7F are the same floor codes with flag bits (the tile handler only
+  -- looks at tile & $3F); $40-$43 are bombs.
+  return EMPTY[t] == true or (t >= 0x04 and t < 0x80 and not isBomb(t))
 end
 
 local DIRS = { { 0, -1, "up" }, { 0, 1, "down" }, { -1, 0, "left" }, { 1, 0, "right" } }

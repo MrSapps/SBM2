@@ -65,7 +65,7 @@ typedef struct Snes {
     uint32_t input_len;
 
     /* NMI wait loops (lda $0036 / cmp $0036 / beq), found in the ROM:
-     * wait_at[pc & $FFFF] is WAIT_CMP at the cmp, WAIT_EXIT after the beq. */
+     * wait_at[pc & $FFFF] has bit WAIT_CMP at a cmp, WAIT_EXIT after a beq. */
     uint32_t wait_lo[64];
     int nwait;
     uint8_t *wait_at;
@@ -82,6 +82,9 @@ enum { WAIT_CMP = 1, WAIT_EXIT = 2 };
 
 /* Loads the ROM (a copier header is skipped). Returns 0 on success. */
 int snes_load(Snes *s, const char *path);
+/* Input script ("<frame> <buttons>" lines, as bot/harness.lua) as one pad
+ * word per frame; NULL if unreadable. */
+uint16_t *snes_load_input(const char *path, uint32_t *len);
 void snes_free(Snes *s);
 /* Power-on: WRAM zeroed, registers reset, CPU reset. */
 void snes_power(Snes *s);

@@ -47,36 +47,6 @@ static void watch_write(void *ctx, uint32_t addr, uint8_t v)
     real_write(ctx, addr, v);
 }
 
-/* Input script: "<frame> <buttons>" lines, held until the next line. */
-static uint16_t *load_input(const char *path, uint32_t *len)
-{
-    static const struct { const char *name; uint16_t bit; } names[] = {
-        {"a", PAD_A}, {"b", PAD_B}, {"x", PAD_X}, {"y", PAD_Y}, {"l", PAD_L},
-        {"r", PAD_R}, {"start", PAD_START}, {"select", PAD_SELECT},
-        {"up", PAD_UP}, {"down", PAD_DOWN}, {"left", PAD_LEFT}, {"right", PAD_RIGHT},
-    };
-    FILE *f = fopen(path, "r");
-    if (!f) return NULL;
-    uint32_t cap = 1024, n = 0, frame;
-    uint16_t *in = calloc(cap, 2), held = 0;
-    char line[256], btn[200];
-    while (fgets(line, sizeof line, f)) {
-        if (sscanf(line, "%u %199s", &frame, btn) != 2) continue;
-        while (n < frame) {
-            if (n == cap) { cap *= 2; in = realloc(in, cap * 2); }
-            in[n++] = held;
-        }
-        if (!strcmp(btn, "end")) break;
-        held = 0;
-        for (char *t = strtok(btn, "+"); t; t = strtok(NULL, "+"))
-            for (size_t i = 0; i < sizeof names / sizeof *names; i++)
-                if (!strcmp(t, names[i].name)) held |= names[i].bit;
-    }
-    fclose(f);
-    *len = n;
-    return in;
-}
-
 static void print_history(unsigned n)
 {
     if (n > hist_n) n = hist_n;
@@ -153,7 +123,7 @@ int main(int argc, char **argv)
 
     if (snes_load(&snes, argv[1])) { fprintf(stderr, "can't load %s\n", argv[1]); return 2; }
     uint32_t input_len;
-    uint16_t *input = load_input(argv[2], &input_len);
+    uint16_t *input = snes_load_input(argv[2], &input_len);
     if (!input) { fprintf(stderr, "can't read %s\n", argv[2]); return 2; }
     FILE *tf = fopen(argv[3], "rb");
     if (!tf) { fprintf(stderr, "can't read %s\n", argv[3]); return 2; }

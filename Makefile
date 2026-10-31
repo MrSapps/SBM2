@@ -1,7 +1,7 @@
 ASAR := tools/asar
 ROM  := build/sbm2.sfc
 
-.PHONY: all compare disasm coverage clean verify trace
+.PHONY: all compare disasm coverage clean verify trace verify-hybrid
 all: compare
 
 $(ROM): $(wildcard src/*.asm)
@@ -44,3 +44,14 @@ $(PORT_TRACE): $(PORT_INPUT) port/trace.lua
 
 verify: build/port/verify $(PORT_TRACE)
 	build/port/verify baserom.sfc $(PORT_INPUT) $(PORT_TRACE) $(VERIFY_FLAGS)
+
+# Hybrid port: interpreter vs interpreter + native routines, frame-step mode.
+HYBRID_SRC := port/hybrid.c port/hook.c port/game.c port/snes.c port/cpu.c
+build/port/hybrid: $(HYBRID_SRC) port/hook.h port/snes.h port/cpu.h
+	@mkdir -p build/port
+	$(CC) $(CFLAGS) -o $@ $(HYBRID_SRC)
+
+# Same as port/input.txt but places bombs (A) in game, so blasts get exercised.
+HYBRID_INPUT ?= port/input_hybrid.txt
+verify-hybrid: build/port/hybrid
+	build/port/hybrid baserom.sfc $(HYBRID_INPUT) $(HYBRID_FLAGS)

@@ -516,11 +516,17 @@ local function think()
       plan = "item"
       dir = bfs(g, c, r, function(cc, rr) return g[rr][cc] == ITEM end, nearEnemy, windows)
       if not dir and haveBomb then
+        -- Objectives (blocks, panels) first; enemy-only spots after.
         plan = "seek"
-        dir = bfs(g, c, r, function(cc, rr, n)
-          return (cc ~= c or rr ~= r) and not danger[rr * KEY_W + cc]
-            and targetsInReach(cc, rr) and canEscape(cc, rr, n * FPT)
-        end, nearEnemy, windows)
+        for _, want in ipairs({ "obj", "enemy" }) do
+          dir = bfs(g, c, r, function(cc, rr, n)
+            if (cc == c and rr == r) or danger[rr * KEY_W + cc] then return false end
+            local why = targetsInReach(cc, rr)
+            return why == want and (want == "obj" or frame >= ambushHold)
+              and canEscape(cc, rr, n * FPT)
+          end, nearEnemy, windows)
+          if dir then break end
+        end
       end
       if not dir and gateOpen and #walkers == 0 then
         plan = "exit"

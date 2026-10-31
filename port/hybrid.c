@@ -4,17 +4,16 @@
  * WRAM, CPU registers, PPU and DMA registers must be identical.
  *
  * Usage: hybrid <rom> <input> [options]
- * <input> is a pad-read log (*.inputs, from bot/inputlog.lua: the value of
- * every pad read the game made since power-on, little-endian words), or an
- * input script in video frames (bot/harness.lua format), converted to a
- * pad-read log by running the timed machine once.
+ * <input> is a pad log (*.inputs, from bot/inputlog.lua: every pad read and
+ * NMI of a real run since power-on), or an input script in video frames
+ * (bot/harness.lua format), turned into a pad log by running the timed
+ * machine once.
  *   -n N        logic frames to run (default: until the log is used up)
  *   -L          the input script counts logic frames (pad latched per frame)
  *   -W FILE     write the pad-read log used
  *   -R TRACE    also compare A with a Mesen WRAM trace (port/trace.lua) at
- *               every logic frame it has; summarises. A trace taken from a
- *               savestate is placed by the pad-read count of its first frame
- *               (TRACE.txt): of A's frames with that count, the closest match
+ *               every logic frame it has (TRACE.txt numbers them; a trace
+ *               from a savestate starts later); summarises
  *   -i LO-HI    ignore this WRAM range (hex offsets) in the -R comparison
  *   -N          no hooks in B (self-check: A and B must match 100%)
  *   -o NAME     enable only this hook (repeatable)
@@ -213,28 +212,23 @@ int main(int argc, char **argv)
     }
     FILE *rf = rpath ? fopen(rpath, "rb") : NULL;
     if (rpath && !rf) { fprintf(stderr, "can't read %s\n", rpath); return 2; }
-    long ref_first = -1, ref_frames = 0, ref_clean = 0, ref_pads = -1;
-    int ref_on = 0;
-    long ref_best = -1, ref_best_n = -1;
+    long ref_first = -1, ref_frames = 0, ref_clean = 0, ref_start = 0;
     if (rf) {
-        char mp[1024], line[256];
+        char mp[1024];
         snprintf(mp, sizeof mp, "%s.txt", rpath);
         FILE *mf = fopen(mp, "r");
-        long v[7];
-        if (mf && fgets(line, sizeof line, mf) &&
-            sscanf(line, "%ld %ld %lx %ld %ld %ld %ld", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6]) == 7)
-            ref_pads = v[6];
+        if (mf && fscanf(mf, "%ld", &ref_start) != 1) ref_start = 0;
         if (mf) fclose(mf);
-        ref_on = ref_pads < 0;   /* power-on trace: frame 0 is frame 0 */
-        if (!ref_on && fread(ref, 1, WRAM, rf) != WRAM) ref_pads = -1;
     }
+    int markers = 0;
+    for (uint32_t i = 0; pads && i < len; i++) if (pads[i] & 0xF) { markers = 1; break; }
 
     if (snes_load(&ma, argv[1]) || snes_load(&mb, argv[1])) { fprintf(stderr, "can't load %s\n", argv[1]); return 2; }
     Snes *m[2] = {&ma, &mb};
     for (int k = 0; k < 2; k++) {
         snes_power(m[k]);
         m[k]->framestep = 1;
-        if (pads) { m[k]->pads = pads; m[k]->npads = len; }
+        if (pads) { m[k]->pads = pads; m[k]->npads = len; m[k]->pad_markers = markers; }
         else { m[k]->input = script; m[k]->input_len = vlen; }
     }
     if (hooks) hook_install(&mb, enable);
@@ -255,18 +249,7 @@ int main(int argc, char **argv)
         }
         if (g_hook_check_failed) { printf("frame %ld: shadow check failed\n", n); bad = 1; break; }
         if (compare(n)) { bad = 1; break; }
-        if (rf && !ref_on && (long)ma.pad_pos == ref_pads) {
-            /* placing a savestate trace: remember the best-matching frame */
-            long d = compare_ref(n, -1);
-            if (ref_best < 0 || d < ref_best) { ref_best = d; ref_best_n = n; }
-        }
-        if (rf && !ref_on && ref_best_n >= 0 && (long)ma.pad_pos > ref_pads) {
-            printf("savestate trace placed at frame %ld (%ld bytes off there)\n", ref_best_n, ref_best);
-            ref_on = 1;
-            rewind(rf);
-            fseek(rf, (long)(n - ref_best_n) * WRAM, SEEK_SET);
-        }
-        if (rf && ref_on && fread(ref, 1, WRAM, rf) == WRAM) {
+        if (rf && n >= ref_start && fread(ref, 1, WRAM, rf) == WRAM) {
             ref_frames++;
             long d = compare_ref(n, 0);
             if (!d) ref_clean++;
@@ -284,6 +267,7 @@ int main(int argc, char **argv)
         fclose(rf);
     }
     if (!bad) printf("OK: %ld logic frames match\n", n);
+    if (pads) printf("pad log: %u of %u entries used, %u did not fit\n", ma.pad_pos, len, ma.pad_desync);
     if (hooks) {
         printf("hook calls (fallbacks):\n");
         for (int i = 0; i < g_nhooks; i++)

@@ -72,20 +72,28 @@ typedef struct Snes {
     uint8_t pad_record;
 
     /* NMI wait loops (lda $0036 / cmp $0036 / beq), found in the ROM:
-     * wait_at[pc & $FFFF] has bit WAIT_CMP at a cmp, WAIT_EXIT after a beq. */
+     * wait_at[pc & $FFFF] has a WAIT_* bit for each loop point there. */
     uint32_t wait_lo[64];
     int nwait;
     uint8_t *wait_at;
 
     /* Frame-step mode (see snes.c): time no longer drives NMI. */
     uint8_t framestep, fs_raised, fs_toggle;
+    uint8_t fs_seen16, fs_in_nmi;   /* pad-log NMI events, see snes.c */
+    uint16_t fs_nmi_sp;
+    uint8_t pad_markers;            /* the pad log has NMI event markers */
+    uint32_t pad_desync;            /* log entries that did not fit */
 
     /* Called before each instruction (not before taking an interrupt); if it
      * returns nonzero it has executed in place of the interpreter. */
     int (*hook)(struct Snes *s);
 } Snes;
 
-enum { WAIT_CMP = 1, WAIT_EXIT = 2 };
+enum { WAIT_CMP = 1, WAIT_EXIT = 2, WAIT_LDA = 4, WAIT_BEQ = 8 };
+/* Pad-log entries with a nonzero low nibble (never set in a pad word) are NMI
+ * events: PADLOG_FRAME = the NMI that ended a wait (one logic frame), or
+ * PADLOG_EXTRA | 16_SET | 18_SET = another NMI, with the handler's $16/$18. */
+enum { PADLOG_FRAME = 1, PADLOG_EXTRA = 2, PADLOG_16_SET = 4, PADLOG_18_SET = 8 };
 
 /* Loads the ROM (a copier header is skipped). Returns 0 on success. */
 int snes_load(Snes *s, const char *path);
@@ -102,7 +110,8 @@ uint8_t snes_peek(void *s, uint32_t addr);
 /* Bus access as the CPU would make it (side effects and time). */
 uint8_t snes_read(Snes *s, uint32_t addr);
 void snes_write(Snes *s, uint32_t addr, uint8_t v);
-/* WAIT_CMP / WAIT_EXIT if pc (24-bit) is that point of a wait loop. */
+/* WAIT_LDA / WAIT_CMP / WAIT_BEQ / WAIT_EXIT if pc (24-bit) is that point of
+ * a wait loop. */
 int snes_wait_point(const Snes *s, uint32_t pc);
 
 #endif

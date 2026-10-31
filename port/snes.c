@@ -446,7 +446,13 @@ static uint8_t reg_read(Snes *s, uint16_t a)
     }
     if (a == 0x4219 && (s->pads || s->pad_record)) {
         /* A pad read (the game reads $4219, then $4218): replay or record. */
-        if (s->pads) s->joy[0] = s->pad_pos < s->npads ? s->pads[s->pad_pos] : 0;
+        if (s->pads) {
+            while (s->pad_pos < s->npads && (s->pads[s->pad_pos] & 0xF)) {
+                s->pad_pos++;   /* an NMI event that frame-step could not place */
+                s->pad_desync++;
+            }
+            s->joy[0] = s->pad_pos < s->npads ? s->pads[s->pad_pos] : 0;
+        }
         s->pad_pos++;
         if (s->pad_record) {
             if (s->pad_rec_len == s->pad_rec_cap) {
@@ -568,7 +574,9 @@ static void find_wait_loops(Snes *s)
         s->wait_lo[s->nwait++] = 0xC00000 + o;
         /* code in $8000-$FFFF can also run from the bank $00-$3F mirror */
         if ((o & 0xFFFF) >= 0x8000 && o < 0x400000) s->wait_lo[s->nwait++] = o;
+        s->wait_at[o & 0xFFFF] |= WAIT_LDA;
         s->wait_at[(o + 3) & 0xFFFF] |= WAIT_CMP;
+        s->wait_at[(o + 6) & 0xFFFF] |= WAIT_BEQ;
         s->wait_at[(o + 8) & 0xFFFF] |= WAIT_EXIT;
     }
 }
@@ -577,7 +585,9 @@ int snes_wait_point(const Snes *s, uint32_t pc)
 {
     int k = s->wait_at[pc & 0xFFFF];
     for (int i = 0; k && i < s->nwait; i++) {
+        if ((k & WAIT_LDA) && s->wait_lo[i] == pc) return WAIT_LDA;
         if ((k & WAIT_CMP) && s->wait_lo[i] == pc - 3) return WAIT_CMP;
+        if ((k & WAIT_BEQ) && s->wait_lo[i] == pc - 6) return WAIT_BEQ;
         if ((k & WAIT_EXIT) && s->wait_lo[i] == pc - 8) return WAIT_EXIT;
     }
     return 0;
@@ -673,7 +683,8 @@ void snes_power(Snes *s)
     s->cpu_speed = 8;
     s->nmi_pending = 0;
     s->nmi_at = s->cycle_start = 0;
-    s->fs_raised = s->fs_toggle = 0;
+    s->fs_raised = s->fs_toggle = s->fs_seen16 = s->fs_in_nmi = 0;
+    s->pad_desync = 0;
     s->pad_pos = s->pad_rec_len = 0;
     memset(s->apu_in, 0, sizeof s->apu_in);
     apu_ipl(s, 0);
@@ -692,15 +703,51 @@ void snes_power(Snes *s)
     s->refreshed = 0;
 }
 
-/* Frame-step NMI: at a wait loop's cmp, once per wait. */
+static uint16_t wram16(const Snes *s, uint16_t a) { return s->wram[a] | s->wram[a + 1] << 8; }
+
+static void fs_raise(Snes *s)
+{
+    s->rdnmi |= 0x80;
+    s->fs_in_nmi = 1;
+    s->fs_nmi_sp = s->cpu.sp;
+    s->cpu.nmi = 1;
+}
+
+/* Frame-step NMIs. Without NMI events in the pad log: one at each wait
+ * loop's cmp. With them (a log of a real run), the log also says where the
+ * real machine had NMIs that did not end a wait (lag, loading screens): each
+ * is raised at the first point where $16 and $18 are as that NMI saw them -
+ * for one with $16 set, only after $16 has been 0 in this logic frame (it
+ * came after the frame's logic) - and at the latest at the wait loop's lda,
+ * where it makes the loop wait for the next one. Never inside a handler. */
 static void framestep_nmi(Snes *s)
 {
     uint32_t pc = (uint32_t)s->cpu.pb << 16 | s->cpu.pc;
     int k = s->wait_at[pc & 0xFFFF] ? snes_wait_point(s, pc) : 0;
-    if (k == WAIT_EXIT) s->fs_raised = 0;
-    if (k != WAIT_CMP || s->fs_raised || !(s->nmitimen & 0x80)) return;
+    if (k == WAIT_EXIT) { s->fs_raised = 0; s->fs_seen16 = 0; }
+    if (s->fs_in_nmi) {
+        if (s->cpu.sp < s->fs_nmi_sp) return;
+        s->fs_in_nmi = 0;
+    }
+    if (!(s->nmitimen & 0x80)) return;
+    if (s->pad_markers) {
+        if (!wram16(s, 0x16)) s->fs_seen16 = 1;
+        if (s->pad_pos < s->npads && (s->pads[s->pad_pos] & PADLOG_EXTRA)) {
+            uint16_t v = s->pads[s->pad_pos];
+            int set16 = wram16(s, 0x16) != 0, set18 = wram16(s, 0x18) != 0;
+            int ok = set18 == !!(v & PADLOG_18_SET) && set16 == !!(v & PADLOG_16_SET) &&
+                     (!set16 || s->fs_seen16);
+            if (ok || k == WAIT_LDA) {
+                s->pad_pos++;
+                fs_raise(s);
+            }
+            return;
+        }
+        if (k != WAIT_CMP || s->fs_raised) return;
+        if (s->pad_pos < s->npads && s->pads[s->pad_pos] == PADLOG_FRAME) s->pad_pos++;
+        else s->pad_desync++;
+    } else if (k != WAIT_CMP || s->fs_raised) return;
     s->fs_raised = 1;
-    s->rdnmi |= 0x80;
     if (s->nmitimen & 0x01) {
         if (!s->pads) s->joy[0] = s->frame < s->input_len ? s->input[s->frame] : 0;
         s->joy[1] = s->joy[2] = s->joy[3] = 0;
@@ -708,7 +755,21 @@ static void framestep_nmi(Snes *s)
         s->ser[1] = 0;
     }
     s->frame++;
-    s->cpu.nmi = 1;
+    fs_raise(s);
+}
+
+/* Timed mode, recording a pad log: note each NMI as the real machine has it. */
+static void record_nmi(Snes *s)
+{
+    uint32_t pc = (uint32_t)s->cpu.pb << 16 | s->cpu.pc;
+    int k = s->wait_at[pc & 0xFFFF] ? snes_wait_point(s, pc) : 0;
+    uint16_t v = k == WAIT_CMP || k == WAIT_BEQ ? PADLOG_FRAME :
+        PADLOG_EXTRA | (wram16(s, 0x16) ? PADLOG_16_SET : 0) | (wram16(s, 0x18) ? PADLOG_18_SET : 0);
+    if (s->pad_rec_len == s->pad_rec_cap) {
+        s->pad_rec_cap = s->pad_rec_cap ? 2 * s->pad_rec_cap : 4096;
+        s->pad_rec = realloc(s->pad_rec, s->pad_rec_cap * 2);
+    }
+    s->pad_rec[s->pad_rec_len++] = v;
 }
 
 void snes_step(Snes *s)
@@ -717,6 +778,7 @@ void snes_step(Snes *s)
     else if (s->nmi_pending && s->nmi_at <= s->cycle_start) {
         s->nmi_pending = 0;
         s->cpu.nmi = 1;
+        if (s->pad_record) record_nmi(s);
     }
     if (s->hook && !s->cpu.nmi && !s->cpu.wai && !s->cpu.stp && s->hook(s)) return;
     cpu_step(&s->cpu);

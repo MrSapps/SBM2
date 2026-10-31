@@ -485,7 +485,8 @@ local function think()
         if panelTodo[k] or SOFT[t] or isSwitchOff(t) then why = "obj" end
         -- Enemies wander, so one tile off the blast is close enough to try.
         if not why then
-          for _, e in ipairs(walkers) do
+          -- All enemies, including ones built into walls (2-1's furnace).
+          for _, e in ipairs(enemies) do
             if math.abs(e[1] - cell[1]) + math.abs(e[2] - cell[2]) <= 1 then why = "enemy" end
           end
         end

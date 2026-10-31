@@ -93,9 +93,10 @@ enum { WAIT_CMP = 1, WAIT_EXIT = 2, WAIT_LDA = 4, WAIT_BEQ = 8 };
 /* Pad-log entries with a nonzero low nibble (never set in a pad word) are NMI
  * events: PADLOG_FRAME = the NMI that ended a wait (one logic frame), or
  * PADLOG_EXTRA | 16_SET | 18_SET [| AT_LDA] = another NMI, with the handler's
- * $16/$18 [and having hit a wait loop's lda]. */
-enum { PADLOG_FRAME = 1, PADLOG_EXTRA = 2, PADLOG_16_SET = 4, PADLOG_18_SET = 8,
-       PADLOG_AT_LDA = 0x10 };
+ * $16/$18 [and having hit a wait loop's lda]; or PADLOG_POKE | bank << 4,
+ * offset, value = a 16-bit WRAM write by the recording script (3 words). */
+enum { PADLOG_FRAME = 1, PADLOG_EXTRA = 2, PADLOG_POKE = 3, PADLOG_16_SET = 4,
+       PADLOG_18_SET = 8, PADLOG_AT_LDA = 0x10 };
 
 /* Loads the ROM (a copier header is skipped). Returns 0 on success. */
 int snes_load(Snes *s, const char *path);

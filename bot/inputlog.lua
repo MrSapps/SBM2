@@ -14,7 +14,9 @@
 -- Savestate sidecars: "<state without .mss>.inputs", the log up to the state.
 -- Format: little-endian 16-bit words, no header: pad reads ($4218 | $4219 <<
 -- 8, low nibble always 0), $0001 = logic-frame NMI, $0002 | 4 if $16 != 0 |
--- 8 if $18 != 0 | $10 if it hit a wait loop's lda = any other NMI.
+-- 8 if $18 != 0 | $10 if it hit a wait loop's lda = any other NMI, and
+-- $0003 | (offset >> 16) << 4, offset & $FFFF, value = a 16-bit WRAM poke by
+-- the script (inputlog.write16), replayed at the same point.
 --
 -- Use:
 --   local inputlog = dofile(dir .. "/inputlog.lua")
@@ -24,6 +26,7 @@
 --   inputlog.truncate(n)        -- after reloading that state
 --   inputlog.save(path)         -- false if the start state had no sidecar
 --   inputlog.saveState(path, data)  -- writes a .mss and its sidecar
+--   inputlog.write16(off, v)    -- emu.write16 to WRAM offset off, logged
 --   inputlog.frames()           -- logic frames since power-on
 --   inputlog.onFrame(fn)        -- fn(n, nmiCountLowByte, extraNmis, loop) at the
 --                               -- end of each logic frame (in the NmiCount write;
@@ -108,7 +111,15 @@ end
 
 local function countFrames()
   frames = 0
-  for _, v in ipairs(log) do if v == 1 then frames = frames + 1 end end
+  local i = 1
+  while i <= #log do
+    local v = log[i]
+    if v & 0xF == 3 then i = i + 3
+    else
+      if v == 1 then frames = frames + 1 end
+      i = i + 1
+    end
+  end
 end
 
 function M.frames() return frames end
@@ -140,6 +151,13 @@ function M.start(statePath)
     emu.addMemoryCallback(onNmiCount, emu.callbackType.write, 0x0036, 0x0036)
     installed = true
   end
+end
+
+function M.write16(off, v)
+  emu.write16(off, v, wram)
+  log[#log + 1] = 3 | ((off >> 16) << 4)
+  log[#log + 1] = off & 0xFFFF
+  log[#log + 1] = v & 0xFFFF
 end
 
 function M.mark() return #log end

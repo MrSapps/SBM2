@@ -420,6 +420,225 @@ static void CheckPassword(void)
     Ret_RTL();
 }
 
+
+/* --- object sprites ---
+ * [$6A] = object, [$79] = sprite piece {dx, dy, tile, attr, ...}. Object
+ * fields: +$80 OAM slot, +$82/+$84 screen x/y, +$86 tile + attr (word),
+ * +$88 added to the attr byte, +$06 palette (bits 1-3 of attr) unless
+ * negative, +$04 bit 6 = hidden, +$52 bit 4 (with scene $1A&$0F = 7) and
+ * scene group $40 force priority bits. */
+#define OamBuffer 0x7E2200      /* 4 bytes per slot */
+#define OamHigh   0x7E2400      /* 2 bits per slot */
+
+static uint32_t dp_ptr(uint8_t dp) { return ram16(dp) | (uint32_t)ram8(dp + 2) << 16; }
+static uint8_t ind8(uint8_t dp, uint16_t y) { return PeekLong8(dp_ptr(dp) + y); }
+static uint16_t ind16(uint8_t dp, uint16_t y) { return PeekLong16(dp_ptr(dp) + y); }
+static void ind8_set(uint8_t dp, uint16_t y, uint8_t v) { WriteLong8(dp_ptr(dp) + y, v); }
+static void ind16_set(uint8_t dp, uint16_t y, uint16_t v) { WriteLong16(dp_ptr(dp) + y, v); }
+
+/* C0:A077  Screen position = object x/y + the piece's signed dx/dy. Leaves
+ * $4E = dy (word), A = y, Y = $84, flags from the add. */
+static void SpritePieceOffset_core(void)
+{
+    Cpu *c = g_cpu;
+    uint16_t dx = (int8_t)ind8(0x79, 0);
+    ram16_set(0x4E, dx);
+    ind16_set(0x6A, 0x82, adc16(ind16(0x6A, 0x10), dx, 0));
+    uint16_t dy = (int8_t)ind8(0x79, 1);
+    ram16_set(0x4E, dy);
+    c->a = adc16(ind16(0x6A, 0x18), dy, 0);
+    ind16_set(0x6A, 0x84, c->a);
+    c->y = 0x84;
+    SetNZ16(c->a);
+}
+
+static void SpritePieceOffset(void)
+{
+    load_cv();
+    SpritePieceOffset_core();
+    store_cv();
+    Ret_RTL();
+}
+
+/* C0:9FFB  Priority bits $30 into attr (+$86) in scene group $40, or in
+ * scene type 7 while +$52 bit 4 is set. Not while $B9 is negative. */
+static void SpritePriority_core(void)
+{
+    Cpu *c = g_cpu;
+    c->a = ram16(0xB9);
+    if (c->a & 0x8000) { SetNZ16(c->a); return; }
+    uint16_t a = ram16(0x1A) & 0xF0;
+    if (a != 0x40) {
+        uint16_t t = ram16(0x1A) & 0x0F;
+        if (t != 7) { c->a = t; SetNZ16(cmp16(t, 7)); return; }
+        fc = 1;
+        c->y = 0x52;
+        c->a = ind16(0x6A, 0x52);
+        if (!(c->a & 0x10)) { SetFlag(FN, c->a & 0x8000); SetFlag(FZ, 1); return; }
+    } else {
+        fc = 1;
+        c->a = a;
+    }
+    c->y = 0x86;
+    uint8_t v = ind8(0x6A, 0x86) | 0x30;
+    ind8_set(0x6A, 0x86, v);
+    c->a = (c->a & 0xFF00) | v;
+    SetNZ8(v);
+}
+
+static void SpritePriority(void)
+{
+    load_cv();
+    SpritePriority_core();
+    SetFlag(FC, fc);
+    Ret_RTL();
+}
+
+/* C0:A02D  Tile (+$86) and attr (+$87) from the piece, palette from +$06. */
+static void SpritePieceAttr_core(void)
+{
+    Cpu *c = g_cpu;
+    uint8_t tile = ind8(0x79, 2);
+    ram8_set(0x4E, tile);
+    c->y = 0x86;
+    ind8_set(0x6A, 0x86, (ind8(0x79, 3) & 1) | tile);
+    SpritePriority_core();
+    c->y = 0x87;
+    ind8_set(0x6A, 0x87, ind8(0x79, 4));
+    c->y = 6;
+    uint16_t pal = ind16(0x6A, 6);
+    if (pal & 0x8000) { c->a = pal; SetNZ16(pal); return; }
+    uint8_t shifted = (uint8_t)(pal << 1);
+    fc = (pal >> 7) & 1;
+    ram8_set(0x4E, shifted);
+    c->y = 0x86;
+    uint8_t v = (ind8(0x6A, 0x86) & 0xF1) | shifted;
+    ind8_set(0x6A, 0x86, v);
+    c->a = (pal & 0xFF00) | v;
+    SetNZ8(v);
+}
+
+static void SpritePieceAttr(void)
+{
+    load_cv();
+    SpritePieceAttr_core();
+    SetFlag(FC, fc);
+    Ret_RTL();
+}
+
+/* C0:A0B8  The slot's two OAM high-table bits: bit 0 = x bit 8 (+$82 bit 8),
+ * bit 1 = size (piece attr bit 7), shifted into place in $7E2400 using the
+ * mask table at C5:FBEB. Returns with A/X/Y 16-bit. */
+static void SpriteHighBits_core(void)
+{
+    Cpu *c = g_cpu;
+    uint8_t bits = 0;
+    if (ind16(0x6A, 0x82) & 0x100) bits |= 1;
+    if (ind8(0x79, 3) & 0x80) bits |= 2;
+    uint16_t slot = ind16(0x6A, 0x80);
+    ram16_set(0x48, slot);
+    uint16_t a16 = slot >> 2;
+    uint8_t xi = a16 & 0xFF;
+    uint8_t old = ram8(OamHigh + xi);
+    ram8_set(0x40, old);
+    uint8_t sub = slot & 3;
+    uint8_t mask = PeekLong8(0xC5FBEB + sub);
+    ram8_set(0x44, mask);
+    for (int i = 0; i < sub * 2; i++) bits <<= 1;
+    ram16_set(0x46, bits);
+    ram8_set(0x42, 0);
+    uint8_t v = (old & mask) | bits;
+    uint8_t lo = slot & 0xFF;
+    fc = (lo >> 1) & 1;
+    xi = lo >> 2;
+    ram8_set(OamHigh + xi, v);
+    c->x = xi;
+    c->y = v;
+    c->a = (a16 & 0xFF00) | v;
+    SetNZ8(v);
+    SetM8(0);
+    SetX8(0);
+}
+
+static void SpriteHighBits(void)
+{
+    load_cv();
+    SpriteHighBits_core();
+    SetFlag(FC, fc);
+    Ret_RTL();
+}
+
+/* C1:4E1E  Builds an object's OAM entry from its current sprite piece. */
+static void DrawObjectSprite(void)
+{
+    Cpu *c = g_cpu;
+    load_cv();
+    SpritePieceOffset_core();
+    int v_offset = fv;
+    SpritePieceAttr_core();
+    SpriteHighBits_core();
+    uint16_t slot = ind16(0x6A, 0x80);
+    uint16_t x = slot << 2;
+    c->x = x;
+    c->y = 4;
+    uint16_t flags = ind16(0x6A, 4);
+    if (flags & 0x40) {             /* hidden */
+        c->a = flags;
+        SetFlag(FN, flags & 0x8000);
+        SetFlag(FZ, 0);
+        SetFlag(FC, (slot >> 14) & 1);
+        SetFlag(FV, v_offset);
+        Ret_RTL();
+        return;
+    }
+    uint16_t tw = ind16(0x6A, 0x86);
+    uint16_t sum = adc16((uint16_t)(tw << 8 | tw >> 8), ind16(0x6A, 0x88), 0);
+    uint16_t nw = sum << 8 | sum >> 8;
+    ind16_set(0x6A, 0x86, nw);
+    WriteLong8(OamBuffer + x, ind8(0x6A, 0x82));
+    WriteLong8(OamBuffer + x + 1, ind8(0x6A, 0x84));
+    WriteLong8(OamBuffer + x + 2, nw >> 8);
+    WriteLong8(OamBuffer + x + 3, nw & 0xFF);
+    c->x = x + 3;
+    c->y = 0x86;
+    c->a = nw;
+    SetNZ8(nw & 0xFF);
+    store_cv();
+    Ret_RTL();
+}
+
+/* C0:F117  With M = 8-bit: if neither byte $7F6000[$46] nor [$44] has a
+ * bit of mask $42, ors the object's bytes +[$7C] / +[$79] (masked) into
+ * them. (Purpose unclear; called a lot.) */
+static void MergeCellMask(void)
+{
+    Cpu *c = g_cpu;
+    int x16 = !GetFlag(FX);
+    uint16_t i46 = x16 ? ram16(0x46) : ram8(0x46);
+    uint16_t i44 = x16 ? ram16(0x44) : ram8(0x44);
+    uint8_t mask = ram8(0x42);
+    uint8_t b46 = ReadLong8(0x7F6000 + i46);
+    ram8_set(0x76, b46);
+    c->x = i46;
+    if (b46 & mask) { c->a = (c->a & 0xFF00) | (b46 & mask); SetNZ8(b46 & mask); goto out; }
+    uint8_t b44 = ReadLong8(0x7F6000 + i44);
+    ram8_set(0x73, b44);
+    c->x = i44;
+    if (b44 & mask) { c->a = (c->a & 0xFF00) | (b44 & mask); SetNZ8(b44 & mask); goto out; }
+    uint16_t y7c = x16 ? ram16(0x7C) : ram8(0x7C);
+    uint16_t y79 = x16 ? ram16(0x79) : ram8(0x79);
+    WriteLong8(0x7F6000 + i46, (ind8(0x6A, y7c) & mask) | b46);
+    uint8_t v = (ind8(0x6A, y79) & mask) | b44;
+    WriteLong8(0x7F6000 + i44, v);
+    c->a = (c->a & 0xFF00) | v;
+    c->y = y79;
+    c->x = i44;
+    if (x16) SetNZ16(i44); else SetNZ8(i44);
+out:
+    SetM8(0);
+    Ret_RTL();
+}
+
 const Hook g_hooks[] = {
     { 0xC0BFE2, "MapTileAtXY",       MapTileAtXY,       FM | FX, 0, 0 },
     { 0xC14031, "PlayerTileHandler", PlayerTileHandler, FX,      0, 0 },
@@ -433,5 +652,11 @@ const Hook g_hooks[] = {
     { 0xC03386, "BlastExtendLeft",   BlastExtendLeft,   FM | FX, 0, 0 },
     { 0xC03423, "BlastExtendRight",  BlastExtendRight,  FM | FX, 0, 0 },
     { 0xCC1926, "CheckPassword",     CheckPassword,     FX,      0, 0 },
+    { 0xC0A077, "SpritePieceOffset", SpritePieceOffset, FM | FX, 0, 0 },
+    { 0xC09FFB, "SpritePriority",    SpritePriority,    FM | FX, 0, 0 },
+    { 0xC0A02D, "SpritePieceAttr",   SpritePieceAttr,   FX,      0, 0 },
+    { 0xC0A0B8, "SpriteHighBits",    SpriteHighBits,    FM | FX, 0, 0 },
+    { 0xC14E1E, "DrawObjectSprite",  DrawObjectSprite,  FM | FX, 0, 0 },
+    { 0xC0F117, "MergeCellMask",     MergeCellMask,     0,       FM, 0 },
 };
 const int g_nhooks = sizeof g_hooks / sizeof *g_hooks;

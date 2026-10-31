@@ -82,7 +82,9 @@ local BLAST_STOP = { [0xC9] = true }
 local SWITCH_ON = 0xE0
 -- $D0-$EF are magnets etc. (C1:44F6): blasts rotate them but the exit
 -- doesn't depend on them, so they are never bomb targets.
-local function isSwitchOff(t) return false end
+local TRY = {}  -- SBM2_TRY_TILES="D3,E2": treat these as bomb targets (experiments)
+for h in (os.getenv("SBM2_TRY_TILES") or ""):gmatch("%x+") do TRY[tonumber(h, 16)] = true end
+local function isSwitchOff(t) return TRY[t] == true end
 
 -- Gold panels ($7E5B56 list, 8-byte entries: +0 bit 0 toggled, +2 map index;
 -- $FFFF ends). Mode ($7E5D94 bit 0) 0: tile $69 lights to $70 when blasted.
@@ -371,6 +373,7 @@ local noBombUntil, bombTry = {}, nil  -- bombTry = { key, since }
 local STALL, visits = 1500, {}
 local progressSig, progressAt = nil, 0
 local stallUntil = 0      -- explore overrides seek/hunt/item until then
+local ASSIST, lastProgress = 6000, 0
 local deaths, rollbacks = 0, 0
 -- Ambush search: a bomb placed only for an enemy is tried from a savestate;
 -- if nobody died AMBUSH_FRAMES later, reload and retry with a random delay
@@ -465,6 +468,18 @@ local function think()
   for rr = 0, MAP_H - 1 do for cc = 0, MAP_W - 1 do if SOFT[g[rr][cc]] then soft = soft + 1 end end end
   for _ in pairs(panelTodo) do todo = todo + 1 end
   local sig = string.format("%d/%d/%d/%d", score(), soft, todo, #enemies)
+  -- Assist (logged): a stage whose panels we can't finish (unsolved gimmick)
+  -- gets the game's own "all panels lit" bit ($5D94 bit 15, as C1:2335
+  -- sets it) after ASSIST frames without progress or when time is short.
+  if sig ~= progressSig then lastProgress = frame end
+  local st = r16(0x5D94)
+  if st ~= 0xFFFF and (st & 0x8000) == 0 and next(panelTodo) ~= nil
+      and (frame - lastProgress > ASSIST or timeLeft() < 30) and #walkers == 0 then
+    emu.write16(0x5D94, st | 0x8000, WRAM)
+    local msg = string.format("frame %d world %d: panels assisted (%s)", frame, lastWorld + 1, sig)
+    log("ASSIST " .. msg)
+    local fh = io.open(OUT .. "/assists.txt", "a"); if fh then fh:write(msg .. "\n"); fh:close() end
+  end
   if sig ~= progressSig then progressSig, progressAt = sig, frame
   elseif frame - progressAt > STALL then
     progressAt = frame

@@ -359,6 +359,7 @@ local triesAt = {}        -- rollbacks per snapshot frame (survives re-snapshots
 local function timeLeft() return r16(0x5E10) * 60 + r16(0x5E12) end  -- stage timer
 local playing = false     -- unlocked in a stage since the last lock
 local rollback = false    -- set by think() on a death
+local exploreUntil = 0    -- after a rollback, "wait" becomes a random move
 local deaths, rollbacks = 0, 0
 -- Ambush search: a bomb placed only for an enemy is tried from a savestate;
 -- if nobody died AMBUSH_FRAMES later, reload and retry with a random delay
@@ -508,6 +509,18 @@ local function think()
           return false
         end, nearEnemy, windows)
       end
+      if not dir and frame < exploreUntil then
+        -- Replaying after a death: waiting is what failed, so try something.
+        plan = "explore"
+        local opts = {}
+        for _, d in ipairs(DIRS) do
+          if walkable(g, c + d[1], r + d[2]) and not danger[(r + d[2]) * KEY_W + c + d[1]] then
+            opts[#opts + 1] = d[3]
+          end
+        end
+        if #opts > 0 then dir = opts[math.random(#opts)] end
+        if haveBomb and math.random() < 0.1 then input.a = true end
+      end
       if not dir then plan = "wait" end
     end
   end
@@ -609,6 +622,7 @@ local function onFrame()
         rollbacks = rollbacks + 1
         log(string.format("%6d rollback to %d (try %d, deaths %d)", frame, snap[1], tries, deaths))
         math.randomseed(rollbacks * 7919 + snap[1])
+        exploreUntil = snap[1] + 60 * (tries + 1)
         shuffleDirs()
         onNextInstruction(function() emu.loadSavestate(snap[2]) end)
         frame, step, playing, fuseSeen = snap[1], nil, false, {}

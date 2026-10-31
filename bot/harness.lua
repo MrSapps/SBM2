@@ -12,7 +12,12 @@ if WATCH_LUA and WATCH_LUA ~= "" then dofile(WATCH_LUA) end
 --   SBM2_OUT     output directory (must exist)
 --   SBM2_LOAD    savestate file to load before frame 0 (frames count from it)
 --   SBM2_SAVE    "<frame>:<path>" write a savestate at that frame
+-- Every savestate written gets a "<state>.inputs" sidecar (bot/inputlog.lua),
+-- the input of each logic frame since power-on (read from SBM2_LOAD's own
+-- sidecar); <SBM2_OUT>/run.inputs gets the whole run.
 local OUT = os.getenv("SBM2_OUT") or "build/run"
+local DIR = debug.getinfo(1, "S").source:match("^@(.*)/[^/]*$") or "."
+local inputlog = dofile(DIR .. "/inputlog.lua")
 local frame = 0
 
 local script = {}
@@ -62,6 +67,7 @@ if LOAD == "" then LOAD = nil end
 local saveFrame, savePath = (os.getenv("SBM2_SAVE") or ""):match("^(%d+):(.+)$")
 saveFrame = tonumber(saveFrame)
 local loaded = LOAD == nil
+if not LOAD then inputlog.start(nil) end
 
 local idx, held = 1, "-"
 emu.addEventCallback(function()
@@ -79,18 +85,22 @@ emu.addEventCallback(function()
     local fh = assert(io.open(LOAD, "rb"))
     local data = fh:read("a")
     fh:close()
-    onNextInstruction(function() emu.loadSavestate(data) end)
+    onNextInstruction(function()
+      emu.loadSavestate(data)
+      inputlog.start(LOAD)
+    end)
     loaded = true
     return
   end
   if frame == saveFrame then
-    onNextInstruction(function() writeFile(savePath, emu.createSavestate()) end)
+    onNextInstruction(function() inputlog.saveState(savePath, emu.createSavestate()) end)
   end
   if shots[frame] then
     writeFile(string.format("%s/f%06d.png", OUT, frame), emu.takeScreenshot())
     dumpWram(string.format("%s/f%06d.wram", OUT, frame))
   end
   if held == "end" then
+    inputlog.save(OUT .. "/run.inputs")
     dumpCdl(OUT .. "/run.cdl")
     emu.stop(0)
   end

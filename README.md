@@ -33,6 +33,19 @@ Tools (not in git):
 `tools/sbm2/trace.py baserom.sfc hints.txt [cdl]` prints coverage stats,
 unresolved indirect jumps, and width conflicts.
 
+## Port runtime
+
+`port/` holds the C side: a 65816 interpreter (`cpu.c`), the SNES bus with a
+timing model and a fake APU (`snes.c`), and `verify.c`, which runs the ROM
+with an input script and compares all of WRAM with a Mesen trace at the start
+of every logic frame (each exit from an NMI wait loop, e.g. `$CC:0054`).
+
+    make trace     # Mesen: port/input.txt -> build/trace/ref.bin (+ .txt)
+    make verify    # interpreter vs trace; VERIFY_FLAGS="-p 40 -k" etc.
+
+`build/port/verify` with no arguments lists its options (instruction history,
+write watch, per-frame timing, per-instruction clocks).
+
 ## Notes so far
 
 - HiROM + FastROM, 8 Mbit, no SRAM. RESET $00:FA00, NMI $00:FD84.

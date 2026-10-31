@@ -1,0 +1,77 @@
+/* SNES bus for the port's verification runtime: HiROM cartridge, WRAM, the
+ * CPU-side registers that affect game logic, DMA, and a coarse video timing
+ * model (master clocks, scanlines, vblank, NMI, auto-joypad). No rendering,
+ * no SPC700: the APU ports are faked (see snes.c). */
+#ifndef SNES_H
+#define SNES_H
+#include <stdint.h>
+#include "cpu.h"
+
+/* Joypad bits as read from $4218/$4219. */
+enum { PAD_R = 0x0010, PAD_L = 0x0020, PAD_X = 0x0040, PAD_A = 0x0080,
+       PAD_RIGHT = 0x0100, PAD_LEFT = 0x0200, PAD_DOWN = 0x0400,
+       PAD_UP = 0x0800, PAD_START = 0x1000, PAD_SELECT = 0x2000,
+       PAD_Y = 0x4000, PAD_B = 0x8000 };
+
+typedef struct Snes {
+    Cpu cpu;
+    uint8_t *rom;
+    uint32_t rom_size;
+    uint8_t *sram;
+    uint32_t sram_size;
+    uint8_t wram[0x20000];
+    uint8_t ppu[0x40];          /* last value written to $2100-$213F */
+    uint8_t mdr;                /* open bus */
+
+    /* timing */
+    uint64_t clock;             /* master clocks since power-on */
+    uint32_t hclock;            /* position in the scanline */
+    uint16_t vcount;
+    uint8_t field;
+    uint8_t refreshed;
+    uint8_t cpu_speed;          /* clocks of the last CPU cycle */
+    uint64_t cycle_start;       /* clock when the last CPU cycle began */
+    uint64_t nmi_at;            /* when the pending NMI was raised */
+    uint8_t nmi_pending;
+    uint32_t frame;             /* vblanks started so far */
+    uint64_t autojoy_end;       /* $4212 bit 0 is set until this clock */
+
+    /* CPU registers $4200-$421F */
+    uint8_t nmitimen, rdnmi, timeup, memsel, wrio;
+    uint8_t wrmpya;
+    uint16_t wrdiv, rddiv, rdmpy;
+    uint16_t htime, vtime;
+    uint16_t joy[4];            /* $4218-$421F */
+    uint32_t ser[2];            /* $4016/$4017 serial shift registers */
+    uint8_t strobe;
+
+    uint32_t wram_addr;         /* $2181-$2183 */
+    uint8_t dma[8][16];         /* $43x0-$43xF */
+    uint8_t hdmaen, hdma_live, hdma_xfer;   /* channel bitmasks */
+    uint8_t hdma_inited, hdma_done;
+
+    /* fake APU, see snes.c */
+    uint8_t apu_in[4], apu_out[4];
+    uint8_t apu_mode, apu_count, apu_loader;
+    uint8_t apu_echo_val, apu_echo_pending;
+    uint8_t apu_busy;
+    uint64_t apu_echo_at, apu_ready, apu_switch_at, apu_aa_at;
+    uint8_t apu_prev[4], apu_ack_val[2];
+    uint64_t apu_ack_at[2];
+
+    /* input: pad 1 for video frame n is input[n] (0 past the end) */
+    const uint16_t *input;
+    uint32_t input_len;
+} Snes;
+
+/* Loads the ROM (a copier header is skipped). Returns 0 on success. */
+int snes_load(Snes *s, const char *path);
+void snes_free(Snes *s);
+/* Power-on: WRAM zeroed, registers reset, CPU reset. */
+void snes_power(Snes *s);
+/* One CPU instruction (or interrupt entry / idle cycle). */
+void snes_step(Snes *s);
+/* Debug view of the bus: no side effects, no time. */
+uint8_t snes_peek(void *s, uint32_t addr);
+
+#endif

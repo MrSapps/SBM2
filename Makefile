@@ -31,7 +31,7 @@ CC      ?= cc
 CFLAGS  ?= -O2 -Wall -Wextra -std=c99
 PORT_INPUT  ?= port/input.txt
 PORT_TRACE  ?= build/trace/ref.bin
-PORT_FRAMES ?= 4000
+PORT_FRAMES ?= 6000
 build/port/verify: port/verify.c port/snes.c port/cpu.c port/snes.h port/cpu.h
 	@mkdir -p build/port
 	$(CC) $(CFLAGS) -o $@ port/verify.c port/snes.c port/cpu.c

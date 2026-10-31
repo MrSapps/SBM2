@@ -360,6 +360,9 @@ local function timeLeft() return r16(0x5E10) * 60 + r16(0x5E12) end  -- stage ti
 local playing = false     -- unlocked in a stage since the last lock
 local rollback = false    -- set by think() on a death
 local exploreUntil = 0    -- after a rollback, "wait" becomes a random move
+-- Cells where pressing A placed no bomb (stairs, gate cells, ...): no bomb
+-- attempts there until noBombUntil[key].
+local noBombUntil, bombTry = {}, nil  -- bombTry = { key, since }
 local deaths, rollbacks = 0, 0
 -- Ambush search: a bomb placed only for an enemy is tried from a savestate;
 -- if nobody died AMBUSH_FRAMES later, reload and retry with a random delay
@@ -456,6 +459,7 @@ local function think()
     -- re-toggle a finished panel is never useful.
     local function targetsInReach(cc, rr)
       if g[rr][cc] == 0x66 then return nil end  -- no bombs on stairs
+      if (noBombUntil[rr * KEY_W + cc] or 0) > frame then return nil end
       local why = nil
       for _, cell in ipairs(blastCells(g, cc, rr, RANGE)) do
         local k = cell[2] * KEY_W + cell[1]
@@ -482,6 +486,12 @@ local function think()
     if why == "enemy" and frame < ambushHold then why = nil end
     if why and canEscape(c, r, 0) then
       plan = "bomb"
+      if not bombTry or bombTry[1] ~= here then bombTry = { here, frame }
+      elseif frame - bombTry[2] > 20 then
+        noBombUntil[here] = frame + 600
+        log(string.format("%6d no bomb appears at (%d,%d); avoiding it", frame, c, r))
+        bombTry = nil
+      end
       if why == "enemy" and not ambush then ambushStart = true end
       -- Bomb placement is edge-triggered: press on alternate frames.
       input.a = frame % 2 == 0
@@ -547,6 +557,7 @@ local function think()
       end
     end
   end
+  if plan ~= "bomb" then bombTry = nil end
   local s = string.format("%s %s @(%d,%d) px(%d,%d)", plan, dir or "-", c, r, x, y)
   if s ~= lastPlan then
     log(string.format("%6d %s", frame, s)); lastPlan = s

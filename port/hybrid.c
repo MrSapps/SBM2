@@ -4,16 +4,17 @@
  * WRAM, CPU registers, PPU and DMA registers must be identical.
  *
  * Usage: hybrid <rom> <input> [options]
- * <input> is a logic-frame input log (*.inputs, from bot/inputlog.lua: one
- * little-endian pad word per logic frame since power-on), or an input script
- * in video frames (bot/harness.lua format), converted by running the timed
- * machine once and recording the pad latched for each logic frame.
- *   -n N        logic frames to run (default: all of the input)
- *   -L          the input script counts logic frames instead
- *   -W FILE     write the logic-frame input used as an .inputs log
+ * <input> is a pad-read log (*.inputs, from bot/inputlog.lua: the value of
+ * every pad read the game made since power-on, little-endian words), or an
+ * input script in video frames (bot/harness.lua format), converted to a
+ * pad-read log by running the timed machine once.
+ *   -n N        logic frames to run (default: until the log is used up)
+ *   -L          the input script counts logic frames (pad latched per frame)
+ *   -W FILE     write the pad-read log used
  *   -R TRACE    also compare A with a Mesen WRAM trace (port/trace.lua) at
- *               every logic frame it has (it may start later, e.g. from a
- *               savestate: TRACE.txt gives the frame numbers); summarises
+ *               every logic frame it has; summarises. A trace taken from a
+ *               savestate is placed by the pad-read count of its first frame
+ *               (TRACE.txt): of A's frames with that count, the closest match
  *   -i LO-HI    ignore this WRAM range (hex offsets) in the -R comparison
  *   -N          no hooks in B (self-check: A and B must match 100%)
  *   -o NAME     enable only this hook (repeatable)
@@ -49,23 +50,26 @@ static int run_frame(Snes *s)
     return 0;
 }
 
-/* Pad latched for each logic frame of a timed run with video-frame input. */
-static uint16_t *record_input(const char *rom, const uint16_t *video, uint32_t vlen,
-                              long frames, uint32_t *len)
+/* Pad reads of a timed run with video-frame input, for up to `frames`
+ * logic frames. */
+static uint16_t *record_pads(const char *rom, const uint16_t *video, uint32_t vlen,
+                             long frames, uint32_t *len)
 {
     if (snes_load(&rec, rom)) return NULL;
     snes_power(&rec);
     rec.input = video;
     rec.input_len = vlen;
-    uint16_t *in = calloc(frames, 2);
+    rec.pad_record = 1;
     long n = 0;
     while (n < frames && rec.frame < vlen + 60) {
         if (run_frame(&rec)) break;
-        in[n++] = rec.joy[0];
+        n++;
     }
-    *len = n;
+    uint16_t *pads = malloc((rec.pad_rec_len + 1) * 2);
+    memcpy(pads, rec.pad_rec, rec.pad_rec_len * 2);
+    *len = rec.pad_rec_len;
     snes_free(&rec);
-    return in;
+    return pads;
 }
 
 static int compare(long frame)
@@ -127,12 +131,12 @@ static long compare_ref(long frame, int verbose)
     long n = 0;
     for (uint32_t i = 0; i < WRAM; i++) {
         if (ignore[i] || (i >= 0x100 && i <= ma.cpu.sp) || ma.wram[i] == ref[i]) continue;
-        if (verbose && n < 24)
+        if (verbose > 0 && n < 24)
             printf("    $%06X: mesen %02X  frame-step %02X\n", 0x7E0000 + i, ref[i], ma.wram[i]);
-        ever[i]++;
+        if (verbose >= 0) ever[i]++;
         n++;
     }
-    if (verbose) printf("  frame %ld: %ld bytes differ from Mesen\n", frame, n);
+    if (verbose > 0) printf("  frame %ld: %ld bytes differ from Mesen\n", frame, n);
     return n;
 }
 
@@ -173,33 +177,42 @@ int main(int argc, char **argv)
         } else { fprintf(stderr, "bad option %s\n", argv[i]); return 2; }
     }
 
-    uint32_t vlen, len;
+    uint32_t vlen, len = 0;
     size_t al = strlen(argv[2]);
     int is_log = al > 7 && !strcmp(argv[2] + al - 7, ".inputs");
-    uint16_t *video = is_log ? load_log(argv[2], &vlen) : snes_load_input(argv[2], &vlen);
-    if (!video) { fprintf(stderr, "can't read %s\n", argv[2]); return 2; }
-    uint16_t *input = video;
-    len = vlen;
-    if (!logic_input && !is_log) {
-        input = record_input(argv[1], video, vlen, frames > 0 ? frames : 100000, &len);
-        if (!input) { fprintf(stderr, "can't load %s\n", argv[1]); return 2; }
-        printf("recorded %u logic frames of input\n", len);
+    uint16_t *script = is_log ? load_log(argv[2], &vlen) : snes_load_input(argv[2], &vlen);
+    if (!script) { fprintf(stderr, "can't read %s\n", argv[2]); return 2; }
+    uint16_t *pads = NULL;
+    if (is_log) {
+        pads = script;
+        len = vlen;
+    } else if (!logic_input) {
+        pads = record_pads(argv[1], script, vlen, frames > 0 ? frames : 1000000, &len);
+        if (!pads) { fprintf(stderr, "can't load %s\n", argv[1]); return 2; }
+        printf("recorded %u pad reads\n", len);
     }
-    if (frames < 0 || frames > (long)len) frames = len;
-    if (wpath) {
+    if (frames < 0) frames = pads ? 100000000 : (long)vlen;
+    if (wpath && pads) {
         FILE *f = fopen(wpath, "wb");
-        for (uint32_t i = 0; f && i < len; i++) { fputc(input[i] & 0xFF, f); fputc(input[i] >> 8, f); }
+        for (uint32_t i = 0; f && i < len; i++) { fputc(pads[i] & 0xFF, f); fputc(pads[i] >> 8, f); }
         if (f) fclose(f);
     }
     FILE *rf = rpath ? fopen(rpath, "rb") : NULL;
     if (rpath && !rf) { fprintf(stderr, "can't read %s\n", rpath); return 2; }
-    long ref_first = -1, ref_frames = 0, ref_clean = 0, ref_start = 0;
+    long ref_first = -1, ref_frames = 0, ref_clean = 0, ref_pads = -1;
+    int ref_on = 0;
+    long ref_best = -1, ref_best_n = -1;
     if (rf) {
-        char mp[1024];
+        char mp[1024], line[256];
         snprintf(mp, sizeof mp, "%s.txt", rpath);
         FILE *mf = fopen(mp, "r");
-        if (mf && fscanf(mf, "%ld", &ref_start) != 1) ref_start = 0;
+        long v[7];
+        if (mf && fgets(line, sizeof line, mf) &&
+            sscanf(line, "%ld %ld %lx %ld %ld %ld %ld", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6]) == 7)
+            ref_pads = v[6];
         if (mf) fclose(mf);
+        ref_on = ref_pads < 0;   /* power-on trace: frame 0 is frame 0 */
+        if (!ref_on && fread(ref, 1, WRAM, rf) != WRAM) ref_pads = -1;
     }
 
     if (snes_load(&ma, argv[1]) || snes_load(&mb, argv[1])) { fprintf(stderr, "can't load %s\n", argv[1]); return 2; }
@@ -207,14 +220,14 @@ int main(int argc, char **argv)
     for (int k = 0; k < 2; k++) {
         snes_power(m[k]);
         m[k]->framestep = 1;
-        m[k]->input = input;
-        m[k]->input_len = len;
+        if (pads) { m[k]->pads = pads; m[k]->npads = len; }
+        else { m[k]->input = script; m[k]->input_len = vlen; }
     }
     if (hooks) hook_install(&mb, enable);
 
     long n;
     int bad = 0;
-    for (n = 0; n < frames; n++) {
+    for (n = 0; n < frames && !(pads && ma.pad_pos >= len); n++) {
         g_last_hook = -1;
         if (run_frame(&ma) || run_frame(&mb)) {
             printf("frame %ld: no wait-loop exit (A at %02X:%04X, B at %02X:%04X)\n", n,
@@ -226,7 +239,18 @@ int main(int argc, char **argv)
         }
         if (g_hook_check_failed) { printf("frame %ld: shadow check failed\n", n); bad = 1; break; }
         if (compare(n)) { bad = 1; break; }
-        if (rf && n >= ref_start && fread(ref, 1, WRAM, rf) == WRAM) {
+        if (rf && !ref_on && (long)ma.pad_pos == ref_pads) {
+            /* placing a savestate trace: remember the best-matching frame */
+            long d = compare_ref(n, -1);
+            if (ref_best < 0 || d < ref_best) { ref_best = d; ref_best_n = n; }
+        }
+        if (rf && !ref_on && ref_best_n >= 0 && (long)ma.pad_pos > ref_pads) {
+            printf("savestate trace placed at frame %ld (%ld bytes off there)\n", ref_best_n, ref_best);
+            ref_on = 1;
+            rewind(rf);
+            fseek(rf, (long)(n - ref_best_n) * WRAM, SEEK_SET);
+        }
+        if (rf && ref_on && fread(ref, 1, WRAM, rf) == WRAM) {
             ref_frames++;
             long d = compare_ref(n, 0);
             if (!d) ref_clean++;

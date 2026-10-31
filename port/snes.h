@@ -63,6 +63,13 @@ typedef struct Snes {
      * video frame, or a logic frame in frame-step mode */
     const uint16_t *input;
     uint32_t input_len;
+    /* pad-read log: if pads is set, each read of $4219 takes the next value;
+     * with pad_record, every read's value is appended to pad_rec */
+    const uint16_t *pads;
+    uint32_t npads, pad_pos;
+    uint16_t *pad_rec;
+    uint32_t pad_rec_len, pad_rec_cap;
+    uint8_t pad_record;
 
     /* NMI wait loops (lda $0036 / cmp $0036 / beq), found in the ROM:
      * wait_at[pc & $FFFF] has bit WAIT_CMP at a cmp, WAIT_EXIT after a beq. */

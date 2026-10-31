@@ -29,7 +29,11 @@
  * for running an interpreter and a partly native port side by side:
  *  - NMI is raised when the CPU reaches the cmp of an NMI wait loop (after its
  *    lda, so the loop exits right after the handler). Each such NMI is one
- *    logic frame; the pad is latched then from input[logic frame].
+ *    logic frame; the pad is latched then from input[logic frame]. Or, with
+ *    s->pads (a log of every pad read, bot/inputlog.lua), each read of $4219
+ *    takes the next value: the game reads the pad in mainline code, and during
+ *    a long loading screen in Mesen such a read sees a later frame's pad than
+ *    the last NMI, which per-logic-frame input cannot reproduce.
  *  - Vblank no longer raises NMI or reads pads; HDMA is not run; V-IRQ off.
  *  - $4212: auto-joypad never busy, vblank/hblank bits toggle on every read
  *    (the game only waits on bit 0, but nothing can deadlock either way).
@@ -440,6 +444,18 @@ static uint8_t reg_read(Snes *s, uint16_t a)
     case 0x4216: return s->rdmpy;
     case 0x4217: return s->rdmpy >> 8;
     }
+    if (a == 0x4219 && (s->pads || s->pad_record)) {
+        /* A pad read (the game reads $4219, then $4218): replay or record. */
+        if (s->pads) s->joy[0] = s->pad_pos < s->npads ? s->pads[s->pad_pos] : 0;
+        s->pad_pos++;
+        if (s->pad_record) {
+            if (s->pad_rec_len == s->pad_rec_cap) {
+                s->pad_rec_cap = s->pad_rec_cap ? 2 * s->pad_rec_cap : 4096;
+                s->pad_rec = realloc(s->pad_rec, s->pad_rec_cap * 2);
+            }
+            s->pad_rec[s->pad_rec_len++] = s->joy[0];
+        }
+    }
     if (a >= 0x4218 && a < 0x4220) {
         uint16_t j = s->joy[(a - 0x4218) >> 1];
         return a & 1 ? j >> 8 : j;
@@ -626,7 +642,9 @@ void snes_free(Snes *s)
     free(s->rom);
     free(s->sram);
     free(s->wait_at);
+    free(s->pad_rec);
     s->rom = s->sram = s->wait_at = NULL;
+    s->pad_rec = NULL;
 }
 
 void snes_power(Snes *s)
@@ -656,6 +674,7 @@ void snes_power(Snes *s)
     s->nmi_pending = 0;
     s->nmi_at = s->cycle_start = 0;
     s->fs_raised = s->fs_toggle = 0;
+    s->pad_pos = s->pad_rec_len = 0;
     memset(s->apu_in, 0, sizeof s->apu_in);
     apu_ipl(s, 0);
     s->apu_count = s->apu_busy = 0;
@@ -683,7 +702,7 @@ static void framestep_nmi(Snes *s)
     s->fs_raised = 1;
     s->rdnmi |= 0x80;
     if (s->nmitimen & 0x01) {
-        s->joy[0] = s->frame < s->input_len ? s->input[s->frame] : 0;
+        if (!s->pads) s->joy[0] = s->frame < s->input_len ? s->input[s->frame] : 0;
         s->joy[1] = s->joy[2] = s->joy[3] = 0;
         s->ser[0] = 0xFFFFFFFFu;
         s->ser[1] = 0;

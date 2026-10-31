@@ -14,12 +14,13 @@
 --   SBM2_INPUT   input script, same format as bot/harness.lua
 --   SBM2_TRACE   output file: WRAM dumps concatenated; plus <SBM2_TRACE>.txt,
 --                one line per logic frame:
---                "<n> <video frame> <exit pc> <master clock> <scanline> <late nmis>"
+--                "<n> <video frame> <exit pc> <master clock> <scanline> <late nmis> <pad reads>"
 --                (late = NMIs since the previous frame that did not end a
 --                wait, i.e. lag)
 --   SBM2_FRAMES  logic frames to dump (default 3000)
---   SBM2_LOAD    savestate to start from (needs its bot/inputlog.lua sidecar;
---                logic frames are then numbered from power-on as in it)
+--   SBM2_LOAD    savestate to start from (needs its bot/inputlog.lua sidecar);
+--                <n> then counts from the state, and <pad reads> (the pad-read
+--                log length, from power-on) is what places the frames
 -- The run's logic-frame input log is written to <SBM2_TRACE>.inputs.
 -- Usage: port/trace.sh (Mesen needs --timeout for long runs).
 local OUT = assert(os.getenv("SBM2_TRACE"), "SBM2_TRACE not set")
@@ -114,8 +115,8 @@ emu.addMemoryCallback(function(addr, value)
   if writes < 2 then return end
   local s = emu.getState()
   dumpWram(addr, value)
-  meta:write(string.format("%d %d %06X %d %d %d\n", n, frame, pending + 8,
-    s["masterClock"], s["ppu.scanline"], late))
+  meta:write(string.format("%d %d %06X %d %d %d %d\n", n, frame, pending + 8,
+    s["masterClock"], s["ppu.scanline"], late, inputlog.mark()))
   n, late, pending, dumped = n + 1, 0, nil, dumped + 1
   if dumped >= N then finish() end
 end, emu.callbackType.write, 0x0036, 0x0037)
@@ -142,7 +143,7 @@ emu.addEventCallback(function()
       emu.removeMemoryCallback(id, emu.callbackType.exec, 0, 0xFFFFFF)
       emu.loadSavestate(data)
       inputlog.start(LOAD)
-      n, pending = inputlog.mark(), nil
+      pending = nil
       loaded = true
     end, emu.callbackType.exec, 0, 0xFFFFFF)
     return

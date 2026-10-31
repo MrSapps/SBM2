@@ -37,3 +37,6 @@ CC:1926 CheckPassword       ; digits $7F0028.. vs table CC:0000 -> PasswordIndex
 001C6A PasswordIndex
 7F0028 PasswordDigits
 C1:5028 EnemyDie            ; +4 |= $A000, y = 0
+7E5DEE ScoreHundreds        ; score / 100 (binary); decimal digits at $5DF4..
+7E5E10 TimerMinutes
+7E5E12 TimerSeconds

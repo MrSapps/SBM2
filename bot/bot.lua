@@ -364,6 +364,7 @@ local ambushStart = false -- think() wants to bomb for an enemy
 local ambushHold = 0      -- no enemy-only bombs before this frame
 local ambushes, ambushHits = 0, 0
 local function liveEnemies() return #enemyTiles() end
+local function score() return r16(0x5DEE) end  -- score / 100
 
 local function think()
   input = {}
@@ -618,7 +619,7 @@ local function onFrame()
     end)
   end
   if ambush and frame >= ambush[1] + AMBUSH_FRAMES then
-    if liveEnemies() < ambush[3] then
+    if liveEnemies() < ambush[3] or score() > ambush[5] then
       ambushHits = ambushHits + 1
       log(string.format("%6d ambush hit (try %d; %d/%d)", frame, ambush[4], ambushHits, ambushes))
       ambush = nil
@@ -642,7 +643,7 @@ local function onFrame()
     ambushStart = false
     if not ambush then
       ambushes = ambushes + 1
-      local a = { frame, nil, liveEnemies(), 0 }
+      local a = { frame, nil, liveEnemies(), 0, score() }
       ambush = a
       onNextInstruction(function() a[2] = emu.createSavestate() end)
     end

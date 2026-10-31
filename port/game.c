@@ -22,6 +22,9 @@
 #define PasswordDigits   0x7F0028   /* 4 digits, one per word */
 #define PasswordResult   0x7F0030
 #define PasswordIndex    0x001C6A
+#define ScoreHundreds    0x7E5DEE   /* score / 100 */
+#define Exit_Blocked     0x7E5D70
+#define ExitGateCell     0x7E5D72
 
 /* Direct page (all hooks run with D = 0). */
 #define dp_TileX     0x4A
@@ -54,7 +57,7 @@ static uint8_t cmp8(uint8_t a, uint8_t b) { fc = a >= b; return a - b; }
 
 /* C0:BFE2  Cell index of pixel ($4A, $4C) + stage origin -> $4E; returns
  * the tile in A, the wrapped index in X. */
-static void MapTileAtXY(void)
+static uint16_t MapTileAtXY_core(void)
 {
     uint16_t row = (uint16_t)((ram16(dp_TileY) + ram16(StageOriginY)) & 0x3F0) << 3;
     uint16_t col = ((ram16(dp_TileX) + ram16(StageOriginX)) & 0x3F0) >> 3;
@@ -65,10 +68,16 @@ static void MapTileAtXY(void)
     if (fc) x = index & 0xFFBF;     /* columns 32-63 fold onto 0-31 */
     x &= 0x0FFF;
     g_cpu->x = x;
-    g_cpu->a = PeekLong16(TileMap + x);
+    g_cpu->a = ram16(TileMap + x);
     SetNZ16(g_cpu->a);
-    SetFlag(FC, fc);
-    SetFlag(FV, fv);
+    return g_cpu->a;
+}
+
+static void MapTileAtXY(void)
+{
+    load_cv();
+    MapTileAtXY_core();
+    store_cv();
     Ret_RTL();
 }
 
@@ -607,35 +616,284 @@ static void DrawObjectSprite(void)
     Ret_RTL();
 }
 
-/* C0:F117  With M = 8-bit: if neither byte $7F6000[$46] nor [$44] has a
- * bit of mask $42, ors the object's bytes +[$7C] / +[$79] (masked) into
- * them. (Purpose unclear; called a lot.) */
+/* C0:F117  If neither $7F6000[$46] nor [$44] has a bit of mask $42, ors the
+ * object's +[$7C] / +[$79] (masked) into them. Works at either width (the
+ * callers use 16-bit A, mask $0101 shifted per call: two bytes at a time).
+ * (Purpose unclear: a per-cell bit map at $7F6000.) */
+static uint16_t rdw(uint32_t a, int m16) { return m16 ? ReadLong16(a) : ReadLong8(a); }
+static void wrw(uint32_t a, uint16_t v, int m16) { if (m16) WriteLong16(a, v); else WriteLong8(a, v); }
+
 static void MergeCellMask(void)
 {
     Cpu *c = g_cpu;
-    int x16 = !GetFlag(FX);
+    int x16 = !GetFlag(FX), m16 = !GetFlag(FM);
+    uint16_t keep = m16 ? 0 : c->a & 0xFF00;
     uint16_t i46 = x16 ? ram16(0x46) : ram8(0x46);
     uint16_t i44 = x16 ? ram16(0x44) : ram8(0x44);
-    uint8_t mask = ram8(0x42);
-    uint8_t b46 = ReadLong8(0x7F6000 + i46);
-    ram8_set(0x76, b46);
+    uint16_t mask = m16 ? ram16(0x42) : ram8(0x42);
+    uint32_t obj = dp_ptr(0x6A);
+    uint16_t b46 = rdw(0x7F6000 + i46, m16);
+    wrw(0x76, b46, m16);
     c->x = i46;
-    if (b46 & mask) { c->a = (c->a & 0xFF00) | (b46 & mask); SetNZ8(b46 & mask); goto out; }
-    uint8_t b44 = ReadLong8(0x7F6000 + i44);
-    ram8_set(0x73, b44);
-    c->x = i44;
-    if (b44 & mask) { c->a = (c->a & 0xFF00) | (b44 & mask); SetNZ8(b44 & mask); goto out; }
-    uint16_t y7c = x16 ? ram16(0x7C) : ram8(0x7C);
-    uint16_t y79 = x16 ? ram16(0x79) : ram8(0x79);
-    WriteLong8(0x7F6000 + i46, (ind8(0x6A, y7c) & mask) | b46);
-    uint8_t v = (ind8(0x6A, y79) & mask) | b44;
-    WriteLong8(0x7F6000 + i44, v);
-    c->a = (c->a & 0xFF00) | v;
-    c->y = y79;
-    c->x = i44;
-    if (x16) SetNZ16(i44); else SetNZ8(i44);
-out:
+    uint16_t t = b46 & mask;
+    if (!t) {
+        uint16_t b44 = rdw(0x7F6000 + i44, m16);
+        wrw(0x73, b44, m16);
+        c->x = i44;
+        t = b44 & mask;
+        if (!t) {
+            uint16_t y7c = x16 ? ram16(0x7C) : ram8(0x7C);
+            uint16_t y79 = x16 ? ram16(0x79) : ram8(0x79);
+            wrw(0x7F6000 + i46, (rdw(obj + y7c, m16) & mask) | b46, m16);
+            uint16_t v = (rdw(obj + y79, m16) & mask) | b44;
+            wrw(0x7F6000 + i44, v, m16);
+            c->a = keep | v;
+            c->y = y79;
+            if (x16) SetNZ16(i44); else SetNZ8(i44);
+            SetM8(0);
+            Ret_RTL();
+            return;
+        }
+    }
+    c->a = keep | t;
+    if (m16) SetNZ16(t); else SetNZ8(t);
     SetM8(0);
+    Ret_RTL();
+}
+
+
+/* --- map scans (stage setup) --- */
+
+/* C0:A515  Graphics-map index of pixel ($4A, $4C) + stage origin -> $46
+ * (and A); $4E/$48 = the wrapped y/x. */
+static uint16_t TileGfxIndexAtXY_core(void)
+{
+    uint16_t y = adc16(ram16(StageOriginY), ram16(dp_TileY), 0) & 0x3F0;
+    ram16_set(0x4E, y);
+    uint16_t x = adc16(ram16(StageOriginX), ram16(dp_TileX), 0) & 0x3F0;
+    ram16_set(0x48, x);
+    uint16_t row = (y & 0x1F0) << 2;
+    ram16_set(0x46, row);
+    uint16_t idx = adc16((x & 0x1F0) >> 3, row, 0) & 0x7FF;
+    ram16_set(0x46, idx);
+    g_cpu->a = idx;
+    SetNZ16(idx);
+    return idx;
+}
+
+static void TileGfxIndexAtXY(void)
+{
+    load_cv();
+    TileGfxIndexAtXY_core();
+    store_cv();
+    Ret_RTL();
+}
+
+/* C0:37E2 (map = TileMap) / C0:3778 (map = CellItems)  Lists every cell
+ * of the 32 x 32 map whose code is $94 into [$97] as {cell, gfx index}
+ * pairs, $FFFF-terminated; $50 = list size in bytes. */
+static void FindInMap_core(uint32_t map)
+{
+    Cpu *c = g_cpu;
+    uint16_t want = ram16(0x94), n = 0;
+    ram16_set(0x5E, 0x20);
+    ram16_set(0x58, 0x20);
+    ram16_set(0x5C, 0);
+    ram16_set(0x5A, 0);
+    for (uint16_t rows = 0x20; rows; ) {
+        for (uint16_t cols = 0x20; cols; ) {
+            ram16_set(dp_TileY, ram16(0x5C));
+            ram16_set(dp_TileX, ram16(0x5A));
+            MapTileAtXY_core();
+            ram16_set(0x48, c->x);
+            if (ram16(map + c->x) == want) {
+                ind16_set(0x97, n, ram16(0x48));
+                n += 2;
+                ram16_set(dp_TileY, ram16(0x5C));
+                ram16_set(dp_TileX, ram16(0x5A));
+                TileGfxIndexAtXY_core();
+                ind16_set(0x97, n, ram16(0x46));
+                n += 2;
+            }
+            ram16_set(0x5A, adc16(ram16(0x5A), 0x10, 0));
+            ram16_set(0x58, --cols);
+        }
+        ram16_set(0x58, 0x20);
+        ram16_set(0x5C, adc16(ram16(0x5C), 0x10, 0));
+        ram16_set(0x5A, 0);
+        ram16_set(0x5E, --rows);
+    }
+    ram16_set(0x50, n);
+    c->a = 0xFFFF;
+    c->y = n;
+    ind16_set(0x97, n, 0xFFFF);
+    SetNZ16(n);
+}
+
+static void FindTileInMap(void) { load_cv(); FindInMap_core(TileMap); store_cv(); Ret_RTL(); }
+static void FindItemInMap(void) { load_cv(); FindInMap_core(CellItems); store_cv(); Ret_RTL(); }
+
+/* C1:2558  Gold panels are tile $69 cells (mode 0) or $74 (mode 1); their
+ * list goes to $7F6000, then C1:25B3 builds GoldPanels. None: both $FFFF. */
+static void FindGoldPanels(void)
+{
+    Cpu *c = g_cpu;
+    load_cv();
+    static const uint16_t kTiles[2] = { 0x69, 0x74 };
+    for (int mode = 0; mode < 2; mode++) {
+        ram16_set(0x94, kTiles[mode]);
+        ram16_set(0x97, 0x6000);
+        ram8_set(0x99, 0x7F);
+        FindInMap_core(TileMap);
+        c->a = 0x607F;
+        SetNZ8(0x7F);
+        uint16_t first = ram16(0x7F6000);
+        cmp16(first, 0xFFFF);
+        if (first != 0xFFFF) {
+            c->a = mode;
+            ram16_set(Exit_PanelState, mode);
+            SetNZ16(mode);
+            store_cv();
+            CallLong(0xC125B3);
+            Ret_RTL();
+            return;
+        }
+    }
+    c->a = 0xFFFF;
+    ram16_set(GoldPanels, 0xFFFF);
+    ram16_set(Exit_PanelState, 0xFFFF);
+    SetNZ16(0xFFFF);
+    store_cv();
+    Ret_RTL();
+}
+
+/* C1:2A9C  The exit gate is the CellItems $C9 cell; its object: C0:EE1C. */
+static void FindExitGate(void)
+{
+    Cpu *c = g_cpu;
+    load_cv();
+    ram16_set(0x94, 0xC9);
+    ram16_set(0x97, 0x30F0);
+    ram8_set(0x99, 0x7E);
+    FindInMap_core(CellItems);
+    c->a = ram16(0x7E30F0);
+    ram16_set(ExitGateCell, c->a);
+    SetNZ16(c->a);
+    store_cv();
+    CallLong(0xC0EE1C);
+    Ret_RTL();
+}
+
+/* --- enemies --- */
+
+/* C1:5028  Enemy [$6A] dies: state/anim reset, +4 |= $A000, y = 0. Gives
+ * the score from table C5:D412 indexed by +$44, except for types $90/$98,
+ * which instead restore the item under them (CellItems -> TileMap). */
+static void EnemyDie(void)
+{
+    Cpu *c = g_cpu;
+    load_cv();
+    ind16_set(0x6A, 0x50, 0);
+    ind16_set(0x6A, 0x6A, 0x0C);
+    ind16_set(0x6A, 0x68, ind16(0x6A, 0x68) & 0xFFF0);
+    ind16_set(0x6A, 0x04, ind16(0x6A, 0x04) & 0xFFDF);
+    ind16_set(0x6A, 0x06, ind16(0x6A, 0x2A));
+    ind16_set(0x6A, 0x88, ind16(0x6A, 0x8A));
+    ind16_set(0x6A, 0x04, ind16(0x6A, 0x04) | 0xA000);
+    ind16_set(0x6A, 0x18, 0);
+    uint16_t type = ind16(0x6A, 0x7E);
+    if (type == 0x90 || type == 0x98) {
+        fc = 1;
+        c->y = 0xA8;
+        c->x = ind16(0x6A, 0xA8);
+        c->a = ram16(CellItems + c->x);
+        ram16_set(TileMap + c->x, c->a);
+        SetNZ16(c->a);
+    } else {
+        c->y = 0x44;
+        c->x = ind16(0x6A, 0x44);
+        c->a = adc16(PeekLong16(0xC5D412 + c->x), ram16(ScoreHundreds), 0);
+        ram16_set(ScoreHundreds, c->a);
+        SetNZ16(c->a);
+    }
+    store_cv();
+    Ret_RTL();
+}
+
+/* --- exit --- */
+
+/* C1:41A8  Player [$6A] on the open gate: if it may leave (not already
+ * leaving or locked, C1:9BFB agrees, exit not blocked, all panels done),
+ * starts the stage-clear sequence. */
+static void PlayerOnExitTile(void)
+{
+    Cpu *c = g_cpu;
+    c->y = 2;
+    c->a = ind16(0x6A, 2);
+    SetNZ16(c->a);
+    if (c->a & 0xC000) { SetFlag(FZ, 0); Ret_RTL(); return; }
+    SetFlag(FZ, 1);
+    c->y = 0x52;
+    c->a = ind16(0x6A, 0x52);
+    SetNZ16(c->a);
+    SetFlag(FZ, !(c->a & 1));
+    if (c->a & 1) { Ret_RTL(); return; }
+    c->a = 4;
+    ram16_set(0x52, 4);
+    SetNZ16(4);
+    CallLong(0xC19BFB);
+    if (!GetFlag(FC)) { Ret_RTL(); return; }
+    c->a = ram16(Exit_Blocked);
+    SetNZ16(c->a);
+    if (c->a & 0x8000) { Ret_RTL(); return; }
+    c->a = ram16(Exit_PanelState);
+    SetNZ16(c->a);
+    if (!(c->a & 0x8000)) { Ret_RTL(); return; }
+    c->y = 2;
+    c->a = ind16(0x6A, 2) | 0xC000;
+    ind16_set(0x6A, 2, c->a);
+    c->a = 0x100;
+    ram16_set(0x7E5E5C, 0x100);
+    SetNZ16(0x100);
+    CallLong(0xC08D52);
+    CallLong(0xC08D3A);
+    CallLong(0xC163E8);
+    c->a = ram16(0x7E8060);
+    SetNZ16(c->a);
+    if (!(c->a & 0x8000)) {
+        ram16_set(0x7E8050, 0x0004);
+        ram16_set(0x7E8052, 0x0801);
+        ram16_set(0x7E806A, 0x0012);
+        ram16_set(0x7E800E, (ram16(0x7E800E) | 0x3000) & 0x3FFF);
+        c->a = 0x0FFF;
+        ram16_set(0x7E800C, 0x0FFF);
+        SetNZ16(0x0FFF);
+    }
+    ram16_set(0x7E5E20, 0x8000);
+    uint16_t scene = ram16(0x1A) & 0x0F;
+    load_cv();
+    cmp16(scene, 6);
+    c->a = scene;
+    SetNZ16(scene - 6);
+    if (fc) {
+        ram8_set(0x70, 0x73);
+        ram8_set(0x71, 0xA2);
+        ram8_set(0x72, 0xC3);
+        c->a = (scene & 0xFF00) | 0xC3;
+        SetNZ8(0xC3);
+        store_cv();
+        CallLong(0xC3A385);
+        SetM8(0);
+    } else store_cv();
+    c->a = 2;
+    ram16_set(0x40, 2);
+    ram16_set(0x42, 0);
+    SetNZ16(2);
+    CallLong(0xC3A4B5);
+    c->a = 0xFFFF;
+    ram16_set(0x7E5E38, 0xFFFF);
+    ram16_set(0x7E5E3A, 0xFFFF);
+    SetNZ16(0xFFFF);
     Ret_RTL();
 }
 
@@ -657,6 +915,13 @@ const Hook g_hooks[] = {
     { 0xC0A02D, "SpritePieceAttr",   SpritePieceAttr,   FX,      0, 0 },
     { 0xC0A0B8, "SpriteHighBits",    SpriteHighBits,    FM | FX, 0, 0 },
     { 0xC14E1E, "DrawObjectSprite",  DrawObjectSprite,  FM | FX, 0, 0 },
-    { 0xC0F117, "MergeCellMask",     MergeCellMask,     0,       FM, 0 },
+    { 0xC0F117, "MergeCellMask",     MergeCellMask,     0,       0,  0 },
+    { 0xC0A515, "TileGfxIndexAtXY",  TileGfxIndexAtXY,  FM | FX, 0, 0 },
+    { 0xC037E2, "FindTileInMap",     FindTileInMap,     FM | FX, 0, 0 },
+    { 0xC03778, "FindItemInMap",     FindItemInMap,     FM | FX, 0, 0 },
+    { 0xC12558, "FindGoldPanels",    FindGoldPanels,    FM | FX, 0, 0 },
+    { 0xC12A9C, "FindExitGate",      FindExitGate,      FM | FX, 0, 0 },
+    { 0xC15028, "EnemyDie",          EnemyDie,          FM | FX, 0, 0 },
+    { 0xC141A8, "PlayerOnExitTile",  PlayerOnExitTile,  FM | FX, 0, 0 },
 };
 const int g_nhooks = sizeof g_hooks / sizeof *g_hooks;

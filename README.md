@@ -53,6 +53,13 @@ with the C routines, and compares them after every logic frame;
 `HYBRID_FLAGS=-c` also checks every native call against the interpreter
 (registers, flags, WRAM), `-N` disables the hooks, `-o/-x NAME` picks them.
 
+Mesen runs can be replayed there: `bot/inputlog.lua` logs every pad read and
+NMI from power-on (`.inputs`; savestates get a sidecar with the log up to
+them, as `bot/harness.lua`, `port/trace.lua` and `bot/world_states.py` do;
+`SBM2_WATCH_LUA=bot/inputlog_wrap.lua` adds it to bot.lua). Then
+`build/port/hybrid baserom.sfc run.inputs [-R trace.bin] [-c]` replays it;
+frame-step WRAM then equals Mesen's at every logic frame.
+
 ## Notes so far
 
 - HiROM + FastROM, 8 Mbit, no SRAM. RESET $00:FA00, NMI $00:FD84.

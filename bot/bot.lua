@@ -377,11 +377,11 @@ local noBombUntil, bombTry = {}, nil  -- bombTry = { key, since }
 local STALL, visits = 1500, {}
 local progressSig, progressAt = nil, 0
 local stallUntil = 0      -- explore overrides seek/hunt/item until then
-local ASSIST, lastProgress = 6000, 0
+local ASSIST, lastProgress = tonumber(os.getenv("SBM2_ASSIST") or "") or 6000, 0
 local ticks = 0           -- frames run, rollbacks included (frame rewinds)
 local HEART_DEATHS, deathsAtProgress, heartStage = 20, 0, nil
 local seenSigs = {}
-local forceStage = nil    -- stage being cleared by assists
+local forceStage, forceTicks = nil, 0  -- stage being cleared by assists
 local deaths, rollbacks = 0, 0
 -- Ambush search: a bomb placed only for an enemy is tried from a savestate;
 -- if nobody died AMBUSH_FRAMES later, reload and retry with a random delay
@@ -542,8 +542,31 @@ local function think()
   -- Once stuck that long the stage is marked, and both this and the panel
   -- bit are reapplied every frame, since a rollback undoes them.
   if ticks - lastProgress > 2 * ASSIST and forceStage ~= stage then
-    forceStage = stage
+    forceStage, forceTicks = stage, ticks
     local msg = string.format("frame %d stage %02X: forced clear (%s)", frame, stage, sig)
+    log("ASSIST " .. msg)
+    local fh = io.open(OUT .. "/assists.txt", "a"); if fh then fh:write(msg .. "\n"); fh:close() end
+  end
+  -- Gate assist (logged): forced, no enemies left, gate still shut 600
+  -- frames on (the game opens it from a real last kill, which the kill assist
+  -- skips): write the open-gate tile $49 and clear Exit_Blocked.
+  if forceStage == stage and #enemies == 0 and not gateOpen and gate ~= 0
+      and ticks - forceTicks > 600 then
+    inputlog.write16(MAP + gate, (r16(MAP + gate) & 0xFF00) | 0x49)
+    inputlog.write16(0x5D70, 0)   -- Exit_Blocked, cleared when the gate really opens
+    gateOpen, forceTicks = true, ticks - 1201
+    local msg = string.format("frame %d stage %02X: gate opened (%d,%d)", frame, stage, gc, gr)
+    log("ASSIST " .. msg)
+    local fh = io.open(OUT .. "/assists.txt", "a"); if fh then fh:write(msg .. "\n"); fh:close() end
+  end
+  -- Warp assist (logged): a forced-clear stage whose open gate we still
+  -- haven't reached 1200 frames later (walled off by switch blocks) puts P1
+  -- on the gate cell.
+  if forceStage == stage and gateOpen and ticks - forceTicks > 1200 and (c ~= gc or r ~= gr) then
+    local wx, wy = tileCentre(gc, gr)
+    inputlog.write16(P1 + P_X, wx); inputlog.write16(P1 + P_Y, wy)
+    forceTicks = ticks
+    local msg = string.format("frame %d stage %02X: warped to gate (%d,%d)", frame, stage, gc, gr)
     log("ASSIST " .. msg)
     local fh = io.open(OUT .. "/assists.txt", "a"); if fh then fh:write(msg .. "\n"); fh:close() end
   end

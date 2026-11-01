@@ -381,6 +381,7 @@ local ASSIST, lastProgress = 6000, 0
 local ticks = 0           -- frames run, rollbacks included (frame rewinds)
 local HEART_DEATHS, deathsAtProgress, heartStage = 20, 0, nil
 local seenSigs = {}
+local forceStage = nil    -- stage being cleared by assists
 local deaths, rollbacks = 0, 0
 -- Ambush search: a bomb placed only for an enemy is tried from a savestate;
 -- if nobody died AMBUSH_FRAMES later, reload and retry with a random delay
@@ -538,7 +539,19 @@ local function think()
   -- Kill assist (logged): still stuck after 2*ASSIST frames, or under 20 s
   -- left: each live enemy (not the gate, not item-holders $90/$98) gets
   -- EnemyDie's (C1:5028) struct writes, without the score.
-  if #enemies > 0 and (ticks - lastProgress > 2 * ASSIST or timeLeft() < 20) then
+  -- Once stuck that long the stage is marked, and both this and the panel
+  -- bit are reapplied every frame, since a rollback undoes them.
+  if ticks - lastProgress > 2 * ASSIST and forceStage ~= stage then
+    forceStage = stage
+    local msg = string.format("frame %d stage %02X: forced clear (%s)", frame, stage, sig)
+    log("ASSIST " .. msg)
+    local fh = io.open(OUT .. "/assists.txt", "a"); if fh then fh:write(msg .. "\n"); fh:close() end
+  end
+  if forceStage == stage then
+    local st2 = r16(0x5D94)
+    if st2 ~= 0xFFFF and (st2 & 0x8000) == 0 then inputlog.write16(0x5D94, st2 | 0x8000) end
+  end
+  if #enemies > 0 and (forceStage == stage or timeLeft() < 20) then
     for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
       local t = r16(base + 0x7E)
       if (r16(base) & 0xF000) == 0x9000 and (r16(base + 4) & 0x8000) == 0 and t ~= 0x90 and t ~= 0x98 then

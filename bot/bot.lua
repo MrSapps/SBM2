@@ -441,6 +441,14 @@ local function think()
     return
   end
   offStage = 0
+  -- Lives assist (logged): a game over restarts the whole world, so keep
+  -- lives ($1C6C) topped up; deaths are still retried by rollback first.
+  if emu.read(0x1C6C, WRAM, false) < 2 then
+    inputlog.write16(0x1C6C, (r16(0x1C6C) & 0xFF00) | 3)
+    local msg = string.format("frame %d stage %02X: lives assisted", frame, emu.read(0x1A, WRAM, false))
+    log("ASSIST " .. msg)
+    local fh = io.open(OUT .. "/assists.txt", "a"); if fh then fh:write(msg .. "\n"); fh:close() end
+  end
   lastWorld = (emu.read(0x1A, WRAM, false) >> 4) - 1  -- $1A = world<<4 | stage-1
   local g = readMap()
   -- Exit gate: map index at $7E5D72; open once $7E5D94 bit 15 (all gold

@@ -379,6 +379,7 @@ local progressSig, progressAt = nil, 0
 local stallUntil = 0      -- explore overrides seek/hunt/item until then
 local ASSIST, lastProgress = 6000, 0
 local HEART_DEATHS, deathsAtProgress, heartStage = 20, 0, nil
+local seenSigs = {}
 local deaths, rollbacks = 0, 0
 -- Ambush search: a bomb placed only for an enemy is tried from a savestate;
 -- if nobody died AMBUSH_FRAMES later, reload and retry with a random delay
@@ -490,7 +491,9 @@ local function think()
   -- Assist (logged): a stage whose panels we can't finish (unsolved gimmick)
   -- gets the game's own "all panels lit" bit ($5D94 bit 15, as C1:2335
   -- sets it) after ASSIST frames without progress or when time is short.
-  if sig ~= progressSig then lastProgress, deathsAtProgress = frame, deaths end
+  -- Progress for the assists = a state not seen before (a rollback brings
+  -- back an older score, which isn't progress).
+  if not seenSigs[sig] then seenSigs[sig] = true; lastProgress, deathsAtProgress = frame, deaths end
   -- Heart assist (logged): after HEART_DEATHS deaths without progress, keep
   -- P1 at one heart (+$EF; C0:A5C9 spends it on a hit for brief
   -- invincibility) for the rest of the stage, rollbacks included.
@@ -524,6 +527,27 @@ local function think()
           inputlog.write16(base + 0x43, (r16(base + 0x43) & 0xFF00) | 1)
           local msg = string.format("frame %d stage %02X: enemy %04X hp %02X assisted", frame,
             emu.read(0x1A, WRAM, false), base, hp)
+          log("ASSIST " .. msg)
+          local fh = io.open(OUT .. "/assists.txt", "a"); if fh then fh:write(msg .. "\n"); fh:close() end
+        end
+      end
+    end
+  end
+  -- Kill assist (logged): still stuck after 2*ASSIST frames, or under 20 s
+  -- left: each live enemy (not the gate, not item-holders $90/$98) gets
+  -- EnemyDie's (C1:5028) struct writes, without the score.
+  if #enemies > 0 and (frame - lastProgress > 2 * ASSIST or timeLeft() < 20) then
+    for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
+      local t = r16(base + 0x7E)
+      if (r16(base) & 0xF000) == 0x9000 and (r16(base + 4) & 0x8000) == 0 and t ~= 0x90 and t ~= 0x98 then
+        local ec, er = toTile(r16(base + P_X), r16(base + P_Y))
+        if ec ~= gc or er ~= gr then
+          local w = function(o, v) inputlog.write16(base + o, v) end
+          w(0x50, 0); w(0x6A, 0x0C); w(0x68, r16(base + 0x68) & 0xFFF0)
+          w(0x06, r16(base + 0x2A)); w(0x88, r16(base + 0x8A))
+          w(0x04, (r16(base + 4) & 0xFFDF) | 0xA000); w(0x18, 0)
+          local msg = string.format("frame %d stage %02X: enemy %04X type %02X killed (assist)", frame,
+            emu.read(0x1A, WRAM, false), base, t)
           log("ASSIST " .. msg)
           local fh = io.open(OUT .. "/assists.txt", "a"); if fh then fh:write(msg .. "\n"); fh:close() end
         end

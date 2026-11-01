@@ -7,6 +7,10 @@ CC:003C MainLoop            ; waits on NmiCount, dispatches the scene
 CC:0054 MainLoopFrame       ; after the wait: mode 7 regs, input, task list $7F0000 (+6 next)
 C0:FC95 StageLoop           ; normal-game stage loop (NMI wait)
 C0:FCA4 StageFrame          ; after the wait: one frame of stage logic (jsl list)
+C0:FB11 StageLoopB          ; the other stage loop (another mode)
+C0:FB20 StageFrameB
+C0:A5C9 PlayerHitCheck      ; flame under player: heart (+$EF, $80+ endless) or death
+C0:BEA6 ObjTileUpdate       ; +$B4 tile, +$A8 cell (+$3A previous)
 C0:1797 ReadJoypads
 C0:1602 InputUpdate         ; pads, multitap, scripted pad, P1 filter (+P2-4 in battle)
 C0:1625 FilterPlayer1Pad    ; drop L+R / U+D -> $C3 and P1 +$6E

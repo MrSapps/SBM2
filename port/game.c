@@ -1997,6 +1997,50 @@ static void StageFrame(void)
     PT_END(st);
 }
 
+
+/* C0:FB20  The other stage loop (C0:FB11; used where the gold-panel/exit
+ * logic of C0:FC95 is not), from the exit of its NMI wait: its jsl list,
+ * then the next wait, or C0:FBA6 when the stage ends ($B9 bit 14 and $BE
+ * clear). */
+static const uint32_t kStageFrameBCalls[] = {  /* jsl at C0:FB39 + 4 n */
+    0xC00C36, 0xC00000, 0xC01602 /* InputUpdate */, 0xC0D8E8, 0xC10C3C,
+    0xC0D843, 0xC036E6, 0xC01E1D, 0xC10CAF, 0xC0DCB4,
+    0xC0E0AA /* BombsUpdate */, 0xC0E076, 0xC0DA42, 0xC00617, 0xC005EA,
+    0xC1334B, 0xC09615, 0xC11C1A /* StageTimer */, 0xC10971, 0xC00CAA,
+    0xC00A38,
+};
+
+static void StageFrameB(void)
+{
+    Cpu *c = g_cpu;
+    static int st;
+    static unsigned i;
+    g_driver = StageFrameB;
+    PT_BEGIN(st);
+    if (--c->x) { SetNZ16(c->x); JumpLong(0xC0FB18); return; }
+    c->a = Pull16();
+    c->x = Pull16();
+    ram16_set(0x16, 0);
+    c->a = 0;
+    SetNZ16(0);
+    for (i = 0; i < sizeof kStageFrameBCalls / sizeof *kStageFrameBCalls; i++)
+        PT_CALL(st, kStageFrameBCalls[i], 0xC0FB3D + 4 * i);
+    ram16_set(0x16, ram16(0x16) + 1);
+    c->a = ram16(0xB9);
+    if (c->a & 0x4000) {
+        c->a = ram16(0xBE);
+        SetNZ16(c->a);
+        JumpLong(c->a ? 0xC0FB11 : 0xC0FBA6);
+        st = 0;
+        return;
+    }
+    SetFlag(FN, c->a & 0x8000);
+    SetFlag(FZ, 1);
+    PT_CALL(st, 0xC100BD, 0xC0FB9A);
+    JumpLong(0xC0FB11);
+    PT_END(st);
+}
+
 /* CC:0054  MainLoop (CC:003C) after its NMI wait: the scene/task driver for
  * everything outside the stage loop. Mode 7 registers from $7F400C-$7F4019,
  * frame counter $7F4006 (also $1C7A), input, then the task list at $7F0000
@@ -2082,6 +2126,87 @@ static void MainLoopFrame(void)
     PT_END(st);
 }
 
+/* C0:BEA6  Object [$6A]'s cell from its x/y (+$10/+$18): tile code -> +$B4
+ * (soft block $C2 reads $40 with +$FB set; $41 while $1C78 is set), cell ->
+ * +$A8 (the old one -> +$3A when it changes). Returns A = X = cell. */
+static void ObjTileUpdate_core(void)
+{
+    Cpu *c = g_cpu;
+    ram16_set(dp_TileY, ind16(0x6A, 0x18));
+    ram16_set(dp_TileX, ind16(0x6A, 0x10));
+    uint16_t tile = MapTileAtXY_core();
+    if (tile == 0xC2 && ind8(0x6A, 0xFB)) tile = 0x40;
+    ram16_set(dp_PlayerCell, tile);
+    ind8_set(0x6A, 0xB4, tile);
+    if (ram16(0x001C78)) ind8_set(0x6A, 0xB4, 0x41);
+    uint16_t cell = c->x, old = ind16(0x6A, OBJ_CELL);
+    cmp16(cell, old);
+    if (cell != old) ind16_set(0x6A, 0x3A, old);
+    ind16_set(0x6A, OBJ_CELL, cell);
+    c->a = cell;
+    c->y = OBJ_CELL;
+    SetNZ16(cell);
+    SetM8(0);
+}
+
+static void ObjTileUpdate(void) { load_cv(); ObjTileUpdate_core(); store_cv(); Ret_RTL(); }
+
+/* C0:A5C9  Player [$6A] hit check (not while leaving/locked/flashing): on a
+ * flame tile it loses a heart (+$EF; $80+ = endless) and flashes for $C0
+ * frames, or dies (C0:A743 first when +$52 bit 1); a $B9 < 0 special case
+ * goes to C1:29E0/2A3F. Its callers follow with other calls and ignore its
+ * registers. */
+static void PlayerHitCheck(void)
+{
+    if (ind16(0x6A, 2) & 0x8000) { Ret_RTL(); return; }
+    if (ind16(0x6A, 0) & 0x0400) { Ret_RTL(); return; }
+    if (ind16(0x6A, 2) & 0x0200) { Ret_RTL(); return; }
+    load_cv();
+    ObjTileUpdate_core();
+    if (ind16(0x6A, 4) & 0x20) { Ret_RTL(); return; }
+    ram16_set(0x7E5D5A, 0);
+    uint16_t t = ind8(0x6A, 0xB4) & 0x3F;
+    if (t != 1) {                       /* ($C8/$D0 cases can't match) */
+        Ret_RTL();
+        return;
+    }
+    if (!(ram16(0xB9) & 0x8000) && (ind16(0x6A, 0x60) & 0x8000)) {
+        CallLong(0xC129E0);
+        CallLong(0xC12A3F);
+        Ret_RTL();
+        return;
+    }
+    uint8_t hearts = ind8(0x6A, 0xEF);
+    if (hearts) {
+        if (hearts < 0x80) ind8_set(0x6A, 0xEF, hearts - 1);
+        ind16_set(0x6A, 4, ind16(0x6A, 4) | 0x20);
+        ind8_set(0x6A, 0xB9, 0xC0);
+        SetM8(0);
+        Ret_RTL();
+        return;
+    }
+    if (ind16(0x6A, 0x52) & 2) {
+        ram16_set(0x85, ram16(0x6A));
+        ram8_set(0x87, ram8(0x6C));
+        CallLong(0xC0A743);
+        ram16_set(0x6A, ram16(0x85));
+        ram8_set(0x6C, ram8(0x87));
+    }
+    SetM8(0);
+    ind8_set(0x6A, 0xF5, 0);
+    ind16_set(0x6A, 4, ind16(0x6A, 4) & 0xFFBF);
+    ind16_set(0x6A, 0, ind16(0x6A, 0) | 0x0800);
+    ind16_set(0x6A, 0x52, 0x0801);
+    uint16_t kind = ram16(0x7E5D5A);
+    uint16_t x = kind ? 7 : 0;
+    ind16_set(0x6A, 0x50, x);
+    ind16_set(0x6A, 0x56, x);
+    ind16_set(0x6A, 0x6A, kind == 1 ? 0x1C : 0x1E);
+    ind16_set(0x6A, 0x0E, (ind16(0x6A, 0x0E) | 0x3000) & 0x3FFF);
+    Ret_RTL();
+}
+
+
 const Hook g_hooks[] = {
     { 0xC0BFE2, "MapTileAtXY",       MapTileAtXY,       FM | FX, 0, 0 },
     { 0xC14031, "PlayerTileHandler", PlayerTileHandler, FX,      0, 0 },
@@ -2112,6 +2237,10 @@ const Hook g_hooks[] = {
     { 0xC11E6F, "EnemyStun",         EnemyStun,         FM | FX, 0, 0 },
     { 0xC11EE2, "EnemyHit",          EnemyHit,          FX,      0, 0 },
     { 0xC0FCA4, "StageFrame",        StageFrame,        FM | FX, 0, NO_SHADOW },
+    { 0xC0BEA6, "ObjTileUpdate",     ObjTileUpdate,     FM | FX, 0, 0 },
+    { 0xC0A5C9, "PlayerHitCheck",    PlayerHitCheck,    FM | FX, 0,
+      IGN_A | IGN_X | IGN_Y | IGN_NZ | IGN_C | IGN_V },
+    { 0xC0FB20, "StageFrameB",       StageFrameB,       FM | FX, 0, NO_SHADOW },
     { 0xCC0054, "MainLoopFrame",     MainLoopFrame,     FM | FX, 0, NO_SHADOW },
     { 0xC14ED5, "EnemyTimerDone",    EnemyTimerDone,    FM | FX, 0, 0 },
     { 0xC03082, "BombButton",        BombButton,        FM | FX, 0,

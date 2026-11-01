@@ -441,7 +441,7 @@ local function think()
     return
   end
   offStage = 0
-  lastWorld = emu.read(0x1C6A, WRAM, false)  -- password index = world - 1
+  lastWorld = (emu.read(0x1A, WRAM, false) >> 4) - 1  -- $1A = world<<4 | stage-1
   local g = readMap()
   -- Exit gate: map index at $7E5D72; open once $7E5D94 bit 15 (all gold
   -- panels blasted, or no panels: $FFFF) is set (checked at C1:41xx).

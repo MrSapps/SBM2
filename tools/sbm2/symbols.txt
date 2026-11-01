@@ -91,6 +91,11 @@ C0:E7E2 FlameDrawRight
 C0:DEEE BombListRebuild
 C0:DF30 BombsOnItems        ; bombs on CellItems $17-$1E -> C0:DF87
 C0:34C0 BombPlace           ; player [$6A] -> first free bomb slot [$7C]
+C0:3082 BombButton          ; +$6E bit 7 (edge via +$0E bit 10): place + extend blast
+C0:31EB BombAtPlayer        ; carry: a bomb is already on the player's cell
+C0:319A ObjectOnPlayerCell  ; carry: an object ($7E2620 list) blocks placement
+C0:3163 TooManyBombs        ; carry: 9 bombs out
+C1:4ED5 EnemyTimerDone      ; +$0C = $0FFF: die / C1:4FFB / 4F6A / 4F25
 C0:3583 BombSetRange
 C1:22F3 SwitchPanelToggle
 C0:A570 ObjFlashTick        ; +4 bit 5: palette 7 <-> +$2A, +$B9 countdown

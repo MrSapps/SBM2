@@ -315,7 +315,7 @@ typedef struct BlastDir {
     uint8_t top_check;    /* stop at cells >= $2000 (wrapped above row 0) */
 } BlastDir;
 
-static void BlastExtend(const BlastDir *dir)
+static void BlastExtend_core(const BlastDir *dir)
 {
     Cpu *c = g_cpu;
     load_cv();
@@ -372,8 +372,9 @@ static void BlastExtend(const BlastDir *dir)
     c->y = 4;
     SetNZ16(c->a);
     store_cv();
-    Ret_RTL();
 }
+
+static void BlastExtend(const BlastDir *dir) { BlastExtend_core(dir); Ret_RTL(); }
 
 static const BlastDir kBlastUp    = { 0x10, -0x40, -0x80, 5, 1, 0, 1 };
 static const BlastDir kBlastDown  = { 0x4C, 0x40, 0x80, 5, 2, 1, 0 };
@@ -1165,6 +1166,7 @@ static void InputUpdate(void)
     Ret_RTL();
 }
 
+
 /* --- exit --- */
 
 /* C1:41A8  Player [$6A] on the open gate: if it may leave (not already
@@ -1725,7 +1727,7 @@ static void BombSetRange(void)
  * +$F3 (0 when bit 1 is set and a bomb is already out), fuse $48, owner
  * (player index), attr, range, serial +$F6, its cell gets tile $43. Its one
  * caller does not look at registers or flags afterwards. */
-static void BombPlace(void)
+static void BombPlace_core(void)
 {
     ram8_set(0x7C, 0x00);
     ram8_set(0x7D, 0x20);
@@ -1733,7 +1735,7 @@ static void BombPlace(void)
     for (int n = 0x28;; ) {
         if (!(ind16(0x7C, 0) & 0x8000)) break;
         ram16_set(0x7C, ram16(0x7C) + 0x100);
-        if (!--n) { Ret_RTL(); return; }
+        if (!--n) return;
     }
     uint8_t f3 = ind8(0x6A, 0xF3);
     uint16_t kind = ((f3 & 2) && ind8(0x6A, 0xF8)) ? 0 : f3;
@@ -1753,9 +1755,9 @@ static void BombPlace(void)
     ind16_set(0x7C, BOMB_CELL, cell);
     WriteLong16(TileMap + cell, 0x43);
     if (ind16(0x7C, 0) & 2) ind8_set(0x7C, BOMB_RANGE, 9);
-    SetM8(0);
-    Ret_RTL();
 }
+
+static void BombPlace(void) { BombPlace_core(); SetM8(0); Ret_RTL(); }
 
 /* C0:E0AA  Every other frame ($32 even): bomb list upkeep (C0:DF30 when
  * $7E5D60 < 0, C0:DEE7), then each bomb in BombList; stops after the first
@@ -1783,6 +1785,162 @@ static void BombsUpdate(void)
     SetM8(0);
     Ret_RTL();
 }
+
+/* --- bomb button --- */
+
+/* C0:31EB  A bomb already lies under player [$6A] (or its tile is $11). */
+static int BombAtPlayer(void)
+{
+    uint16_t t = ind8(0x6A, 0xB4) & 0x3F;
+    if (t == 0x11) return 1;
+    if (t == 0x01) return 0;
+    ram8_set(0x7C, 0x00); ram8_set(0x7D, 0x20); ram8_set(0x7E, 0x7F);
+    for (uint16_t i = 0;; i += 2) {
+        ram16_set(0x1E, i);
+        uint16_t b = ram16(BombList + i);
+        if (b == 0xFFFF) return 0;
+        ram16_set(0x7C, b);
+        if (!(ind16(0x7C, 0) & 0x5000) && ind16(0x7C, BOMB_POS) == ind16(0x6A, 0xAA)) return 1;
+    }
+}
+
+/* C0:319A  An object ($7E2620 list, $8400+ only: type bit 8 or type $29)
+ * stands on the player's cell, by $7E2720 or its own +$A8. */
+static int ObjectOnPlayerCell(void)
+{
+    ram8_set(0x6F, 0x7E);
+    for (uint16_t i = 0;; i += 2) {
+        ram16_set(0x5C, i);
+        uint16_t o = ram16(0x7E2620 + i);
+        if (o == 0xFFFF) return 0;
+        if (o < 0x8400) continue;
+        ram16_set(0x6D, o);
+        uint16_t t = ind16(0x6D, 0x7E);
+        if (!(t & 0x100) && (t & 0x3F) != 0x29) continue;
+        uint16_t cell = ind16(0x6A, OBJ_CELL);
+        ram16_set(0x5E, cell);
+        if (ram16(0x7E2720 + i) == cell || ind16(0x6D, OBJ_CELL) == cell) return 1;
+    }
+}
+
+/* C0:3163  Nine bombs out already (not in battle mode). */
+static int TooManyBombs(void)
+{
+    if (ram16(0xB9) & 0x8000) return 0;
+    uint16_t n = 0;
+    while (ram16(BombList + 2 * n) != 0xFFFF) n++;
+    return n >= 9;
+}
+
+/* C0:3082  Player [$6A]'s bomb button (+$6E bit 7, edge via +$0E bit 10):
+ * places a bomb if allowed and works out its blast (BlastExtend*, BlastMap
+ * incl. C1:07CB's extra cells). Kick/remote/line-bomb cases stay in asm
+ * (C0:2CAF, C0:3055, C0:2F6E). Its caller ignores registers. */
+static void BombButton(void)
+{
+    int place = 0;
+    if (!(ind16(0x6A, 0x6E) & 0x80)) {
+        if (ind16(0x6A, 0x52) & 4) { CallLong(0xC02CAF); Ret_RTL(); return; }
+        if (ind8(0x6A, 0xF5) == 2) {
+            SetM8(0);
+            CallLong(0xC03055);
+            if (!GetFlag(FC)) { Ret_RTL(); return; }
+            place = 1;
+        } else {
+            ind16_set(0x6A, 0x0E, ind16(0x6A, 0x0E) & 0xFBFF);
+            SetM8(0); Ret_RTL(); return;
+        }
+    }
+    if (!place) {
+        uint16_t e = ind16(0x6A, 0x0E);
+        if (e & 0x400) { SetM8(0); Ret_RTL(); return; }
+        ind16_set(0x6A, 0x0E, e | 0x400);
+        uint8_t b4 = ind8(0x6A, 0xB4);
+        g_cpu->x = b4;
+        if (b4 & 0x40) {
+            if (ind8(0x6A, 0xFE) && (b4 & 0x3F) == 3 && ind16(0x6A, 0x50) != 8) {
+                SetM8(0);
+                CallLong(0xC02F6E);
+            }
+            SetM8(0); Ret_RTL(); return;
+        }
+    }
+    SetM8(0);
+    if (BombAtPlayer() || ObjectOnPlayerCell() || TooManyBombs()) { SetM8(0); Ret_RTL(); return; }
+    uint8_t left = ind8(0x6A, 0xF1);
+    if (!left) { SetM8(0); Ret_RTL(); return; }
+    ind8_set(0x6A, 0xF1, left - 1);
+    BombPlace_core();
+    SetM8(0);
+    ram16_set(0x40, 0x48);
+    ram16_set(0x42, 0);
+    g_cpu->a = 0x48;
+    CallLong(0xC3A4B5);
+    SetM8(0);
+    ind8_set(0x6A, 0xF8, ind8(0x6A, 0xF8) + 1);
+    ram16_set(BlastHitSpecial, 0);
+    WriteLong16(BlastMap + ind16(0x7C, BOMB_CELL), 0xFFFF);   /* C0:3185 */
+    BlastExtend_core(&kBlastUp);
+    BlastExtend_core(&kBlastDown);
+    BlastExtend_core(&kBlastLeft);
+    BlastExtend_core(&kBlastRight);
+    if (ram16(BlastHitSpecial)) {                              /* C1:07CB */
+        uint16_t i = 0, c;
+        while ((c = PeekLong16(0xC5E55C + i)) != 0xFFFF) {
+            ram16_set(0x5A, i);
+            WriteLong16(BlastMap + c, 0xFFFF);
+            i += 2;
+        }
+        ram16_set(0x5A, i);
+    }
+    SetM8(0);
+    Ret_RTL();
+}
+
+
+/* C1:4ED5  Enemy [$6A] whose timer +$0C reached $0FFF: dies (+$68 bit 3,
+ * type $96, or types $90/$98 with +$BE < 0), or goes on to C1:4FFB (bit 2),
+ * C1:4F6A (bit 1) or C1:4F25. Each case is a tail call. */
+static void EnemyTimerDone(void)
+{
+    Cpu *c = g_cpu;
+    c->y = 0x0C;
+    c->a = ind16(0x6A, 0x0C);
+    uint16_t d = cmp16(c->a, 0x0FFF);
+    SetNZ16(d);
+    SetFlag(FC, fc);
+    if (c->a != 0x0FFF) { Ret_RTL(); return; }
+    c->y = 0x68;
+    uint16_t f = ind16(0x6A, 0x68);
+    c->a = f;
+    SetFlag(FN, f & 0x8000);
+    if (f & 8) { SetFlag(FZ, 0); EnemyDie(); return; }
+    if (f & 4) {
+        c->y = 0x7E;
+        uint16_t t = ind16(0x6A, 0x7E);
+        c->a = t;
+        if (t == 0x96) { SetNZ16(0); SetFlag(FC, 1); EnemyDie(); return; }
+        if (t == 0x90 || t == 0x98) {
+            SetFlag(FC, 1);
+            c->y = 0xBE;
+            c->a = ind16(0x6A, 0xBE);
+            SetNZ16(c->a);
+            if (c->a & 0x8000) { EnemyDie(); return; }
+            CallLong(0xC14FFB);
+            Ret_RTL();
+            return;
+        }
+        SetNZ16(cmp16(t, 0x98));
+        SetFlag(FC, fc);
+        CallLong(0xC14FFB);
+        Ret_RTL();
+        return;
+    }
+    SetFlag(FZ, !(f & 2));
+    CallLong(f & 2 ? 0xC14F6A : 0xC14F25);
+    Ret_RTL();
+}
+
 
 const Hook g_hooks[] = {
     { 0xC0BFE2, "MapTileAtXY",       MapTileAtXY,       FM | FX, 0, 0 },
@@ -1813,6 +1971,9 @@ const Hook g_hooks[] = {
     { 0xC0A570, "ObjFlashTick",      ObjFlashTick,      FM | FX, 0, 0 },
     { 0xC11E6F, "EnemyStun",         EnemyStun,         FM | FX, 0, 0 },
     { 0xC11EE2, "EnemyHit",          EnemyHit,          FX,      0, 0 },
+    { 0xC14ED5, "EnemyTimerDone",    EnemyTimerDone,    FM | FX, 0, 0 },
+    { 0xC03082, "BombButton",        BombButton,        FM | FX, 0,
+      IGN_A | IGN_X | IGN_Y | IGN_NZ | IGN_C | IGN_V },
     { 0xC034C0, "BombPlace",         BombPlace,         FM | FX, 0,
       IGN_A | IGN_X | IGN_Y | IGN_NZ | IGN_C | IGN_V },
     { 0xC01797, "ReadJoypads",       ReadJoypads,       0,       0, 0 },

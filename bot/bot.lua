@@ -509,7 +509,8 @@ local function think()
   end
   local st = r16(0x5D94)
   if st ~= 0xFFFF and (st & 0x8000) == 0 and next(panelTodo) ~= nil
-      and (frame - lastProgress > ASSIST or timeLeft() < 30) and #walkers == 0 then
+      and (frame - lastProgress > ASSIST or timeLeft() < 30)
+      and (#walkers == 0 or frame - lastProgress > 2 * ASSIST) then
     inputlog.write16(0x5D94, st | 0x8000)   -- logged: replays can't infer it
     local msg = string.format("frame %d world %d: panels assisted (%s)", frame, lastWorld + 1, sig)
     log("ASSIST " .. msg)

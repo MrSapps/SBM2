@@ -497,6 +497,24 @@ local function think()
     log("ASSIST " .. msg)
     local fh = io.open(OUT .. "/assists.txt", "a"); if fh then fh:write(msg .. "\n"); fh:close() end
   end
+  -- Enemy assist (logged): enemies we can't wear down (high or immune $7F
+  -- hit points, +$43, see EnemyHit C1:1EE2) drop to one hit point under the
+  -- same conditions, so the next blast kills them. The gate object is left.
+  if #enemies > 0 and (frame - lastProgress > ASSIST or timeLeft() < 60) then
+    for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
+      local hp = emu.read(base + 0x43, WRAM, false)
+      if (r16(base) & 0xF000) == 0x9000 and (r16(base + 4) & 0x8000) == 0 and hp > 1 then
+        local ec, er = toTile(r16(base + P_X), r16(base + P_Y))
+        if ec ~= gc or er ~= gr then
+          inputlog.write16(base + 0x43, (r16(base + 0x43) & 0xFF00) | 1)
+          local msg = string.format("frame %d stage %02X: enemy %04X hp %02X assisted", frame,
+            emu.read(0x1A, WRAM, false), base, hp)
+          log("ASSIST " .. msg)
+          local fh = io.open(OUT .. "/assists.txt", "a"); if fh then fh:write(msg .. "\n"); fh:close() end
+        end
+      end
+    end
+  end
   if sig ~= progressSig then progressSig, progressAt = sig, frame
   elseif frame - progressAt > STALL then
     progressAt = frame

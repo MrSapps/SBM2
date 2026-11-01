@@ -5,6 +5,9 @@
 # --- code ---
 CC:003C MainLoop            ; waits on NmiCount, dispatches the scene
 C0:1797 ReadJoypads
+C0:1602 InputUpdate         ; pads, multitap, scripted pad, P1 filter (+P2-4 in battle)
+C0:1625 FilterPlayer1Pad    ; drop L+R / U+D -> $C3 and P1 +$6E
+C0:1862 MultitapCheck       ; $C2: $80/$40 = tap on port 1/2
 C0:BFE2 MapTileAtXY         ; $4A/$4C = x/y (+ stage origin) -> A = tile, $4E = index
 C1:4031 PlayerTileHandler   ; dispatches on (tile & $3F) under P1 via table C1:58DE
 C1:41A8 PlayerOnExitTile    ; tile $49 (open gate): clear if Exit_PanelState bit 15

@@ -21,7 +21,10 @@ typedef struct Hook {
     uint8_t ignore;           /* outputs the shadow check skips (IGN_*) */
 } Hook;
 
-enum { IGN_A = 1, IGN_X = 2, IGN_Y = 4, IGN_NZ = 8, IGN_C = 16, IGN_V = 32 };
+enum { IGN_A = 1, IGN_X = 2, IGN_Y = 4, IGN_NZ = 8, IGN_C = 16, IGN_V = 32,
+       /* frame drivers: no shadow check of the whole call (NMIs fall inside
+        * it); the hooks it reaches are still checked one by one */
+       NO_SHADOW = 64 };
 
 extern Snes *g_snes;
 extern Cpu *g_cpu;
@@ -76,6 +79,23 @@ void Ret_RTS(void);
 void JumpLong(uint32_t addr);
 /* JSL into ROM code (interpreted, hooks still active) and wait for its RTL. */
 void CallLong(uint32_t addr);
+
+/* Frame drivers (hooks that run a whole frame of calls) must not run past a
+ * frame boundary (an NMI wait loop inside something they call). They are
+ * written as resumable functions: CallLongR(addr, ret) is a jsl from the
+ * original code whose next instruction is at ret (so the stack looks the
+ * same); it returns 0 when the callee reached a frame boundary; the driver
+ * then returns at once, and is called again (g_resuming set) when the callee
+ * finally returns to ret. PT_* keep its place:
+ *   static int st; PT_BEGIN(st); ... PT_CALL(st, addr, ret); ... PT_END(st);
+ * (locals that live across PT_CALL must be static). */
+int CallLongR(uint32_t addr, uint32_t ret);
+extern void (*g_driver)(void);
+extern int g_resuming;
+#define PT_BEGIN(st) if (!g_resuming) st = 0; switch (st) { case 0:
+#define PT_CALL(st, addr, ret) do { st = __LINE__; if (!CallLongR(addr, ret)) return; \
+                               if (0) { case __LINE__:; } } while (0)
+#define PT_END(st) } st = 0
 
 /* Table of all hooks (game.c). */
 extern const Hook g_hooks[];

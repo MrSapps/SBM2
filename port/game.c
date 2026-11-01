@@ -1942,6 +1942,146 @@ static void EnemyTimerDone(void)
 }
 
 
+/* --- frame drivers --- */
+
+/* C0:FCA4  The normal-game stage loop, from the exit of its NMI wait (the
+ * wait itself, C0:FC95-FCA2, stays in asm so frame boundaries are where
+ * they were): one frame of game logic as a list of calls (ported routines
+ * run natively through their hooks), then on to the next wait, or C0:FD42
+ * when the stage ends. */
+static const uint32_t kStageFrameCalls[] = {   /* jsl at C0:FCBD + 4 n */
+    0xC00C36, 0xC1368C, 0xC00000, 0xC0D8E8, 0xC01602 /* InputUpdate */,
+    0xC13CE7, 0xC152C5, 0xC10F10, 0xCCEAC4, 0xC0DCB4,
+    0xC0E0AA /* BombsUpdate */, 0xC0DA42, 0xC00617, 0xC005EA, 0xC1334B,
+    0xC1232C, 0xC11C1A /* StageTimer */, 0xC11BA3 /* ScoreDigits */,
+    0xC10971, 0xC137EF, 0xC00CAA, 0xC15B3E,
+};
+
+static uint16_t Pull16(void) { uint16_t lo = Pull8(); return lo | Pull8() << 8; }
+
+static void StageFrame(void)
+{
+    Cpu *c = g_cpu;
+    static int st;
+    static unsigned i;
+    g_driver = StageFrame;
+    PT_BEGIN(st);
+    if (--c->x) { SetNZ16(c->x); JumpLong(0xC0FC9C); return; }   /* dex / bne */
+    c->a = Pull16();
+    c->x = Pull16();
+    ram16_set(0x16, 0);                 /* LogicDone */
+    c->a = 0;
+    SetNZ16(0);
+    for (i = 0; i < sizeof kStageFrameCalls / sizeof *kStageFrameCalls; i++)
+        PT_CALL(st, kStageFrameCalls[i], 0xC0FCC1 + 4 * i);
+    {
+        uint16_t want = ram16(0x7E5D42), stage = ram16(0x1A);
+        if (want != stage) {            /* stage change requested */
+            SetFlag(FC, want >= stage);
+            ram16_set(0x1A, want - 1);
+            c->a = ram16(0x7E8002) | 0x4000;
+            ram16_set(0x7E8002, c->a);
+            SetNZ16(c->a);
+            JumpLong(0xC0FD42);
+            st = 0;
+            return;
+        }
+    }
+    PT_CALL(st, 0xC1363E, 0xC0FD31);
+    ram16_set(0x16, ram16(0x16) + 1);
+    c->a = ram16(0xB9);
+    SetFlag(FN, c->a & 0x8000);
+    if (c->a & 0x4000) { SetFlag(FZ, 0); JumpLong(0xC0FD42); st = 0; return; }
+    PT_CALL(st, 0xC100BD, 0xC0FD3E);
+    JumpLong(0xC0FC95);
+    PT_END(st);
+}
+
+/* CC:0054  MainLoop (CC:003C) after its NMI wait: the scene/task driver for
+ * everything outside the stage loop. Mode 7 registers from $7F400C-$7F4019,
+ * frame counter $7F4006 (also $1C7A), input, then the task list at $7F0000
+ * ($40 bytes each, +$00 entry point (24-bit), +$06 next index, $FFFF end;
+ * the first entry is run before CC:7241), then CC:E7AF; $7F003C/$7F003E,
+ * if set, is the next scene (jml), else back to the wait. */
+static void SceneTaskSetup(uint16_t x)
+{
+    Cpu *c = g_cpu;
+    c->x = x;
+    ram16_set(0x6A, ram16(0x7F0000 + x));
+    ram16_set(0x6B, ram16(0x7F0001 + x));
+    c->a = ram16(0x7F0001 + x);
+}
+
+static void MainLoopFrame(void)
+{
+    Cpu *c = g_cpu;
+    static int st;
+    static uint16_t x;
+    g_driver = MainLoopFrame;
+    PT_BEGIN(st);
+    if (--c->x) { SetNZ16(c->x); JumpLong(0xCC004C); return; }
+    c->a = Pull16();
+    c->x = Pull16();
+    SetM8(0);
+    c->a &= 0xFF00;
+    WriteLong8(0x00420C, 0);
+    PT_CALL(st, 0xCC7235, 0xCC0066);
+    {
+        static const struct { uint16_t reg, src; uint8_t two; } kMode7[] = {
+            { 0x211B, 0x4012, 1 }, { 0x211C, 0x4014, 1 }, { 0x211D, 0x4016, 1 },
+            { 0x211E, 0x4018, 1 }, { 0x211F, 0x400C, 1 }, { 0x2120, 0x400E, 1 },
+            { 0x211A, 0x4010, 0 },
+        };
+        for (int k = 0; k < 7; k++) {
+            WriteLong8(kMode7[k].reg, ram8(0x7F0000 | kMode7[k].src));
+            if (kMode7[k].two) WriteLong8(kMode7[k].reg, ram8(0x7F0001 | kMode7[k].src));
+        }
+        SetM8(0);
+        uint16_t f = ram16(0x7F4006) + 1;
+        ram16_set(0x7F4006, f);
+        ram16_set(0x001C7A, f);
+        c->a = f;
+        SetNZ16(f);
+    }
+    PT_CALL(st, 0xCC779A, 0xCC00E3);
+    PT_CALL(st, 0xCC77CF, 0xCC00E7);
+    SetM8(0);
+    ram16_set(0x7F4000, 0x2200);
+    ram8_set(0x7F4002, 0x7E);
+    c->a = 0x227E;
+    SetNZ8(0x7E);
+    SetM8(1);
+    PT_CALL(st, 0xCC7731, 0xCC00FC);
+    PT_CALL(st, 0xC01602, 0xCC0100);              /* InputUpdate */
+    PT_CALL(st, 0xCC75EB, 0xCC0104);
+    SetM8(0);
+    SceneTaskSetup(0);
+    PT_CALL(st, 0xCC03E1, 0xCC0119);    /* jml [$006A] */
+    PT_CALL(st, 0xCC7241, 0xCC011D);
+    x = 0x40;
+    for (;;) {
+        SceneTaskSetup(x);
+        PT_CALL(st, 0xCC03E1, 0xCC0132);
+        SetM8(0);
+        x = ram16(0x7F0006 + c->x);
+        c->x = x;
+        c->a = x + 1;
+        SetNZ16(c->a);
+        if (x == 0xFFFF) break;
+    }
+    PT_CALL(st, 0xCCE7AF, 0xCC0140);
+    SetM8(0);
+    c->a = ram16(0x7F003C);
+    SetNZ16(c->a);
+    if (!c->a) { JumpLong(0xCC003C); st = 0; return; }
+    ram16_set(0x6A, c->a);
+    c->a = ram16(0x7F003E);
+    ram16_set(0x6C, c->a);
+    SetNZ16(c->a);
+    JumpLong(ram16(0x6A) | (uint32_t)ram8(0x6C) << 16);   /* jml [$006A] */
+    PT_END(st);
+}
+
 const Hook g_hooks[] = {
     { 0xC0BFE2, "MapTileAtXY",       MapTileAtXY,       FM | FX, 0, 0 },
     { 0xC14031, "PlayerTileHandler", PlayerTileHandler, FX,      0, 0 },
@@ -1971,6 +2111,8 @@ const Hook g_hooks[] = {
     { 0xC0A570, "ObjFlashTick",      ObjFlashTick,      FM | FX, 0, 0 },
     { 0xC11E6F, "EnemyStun",         EnemyStun,         FM | FX, 0, 0 },
     { 0xC11EE2, "EnemyHit",          EnemyHit,          FX,      0, 0 },
+    { 0xC0FCA4, "StageFrame",        StageFrame,        FM | FX, 0, NO_SHADOW },
+    { 0xCC0054, "MainLoopFrame",     MainLoopFrame,     FM | FX, 0, NO_SHADOW },
     { 0xC14ED5, "EnemyTimerDone",    EnemyTimerDone,    FM | FX, 0, 0 },
     { 0xC03082, "BombButton",        BombButton,        FM | FX, 0,
       IGN_A | IGN_X | IGN_Y | IGN_NZ | IGN_C | IGN_V },

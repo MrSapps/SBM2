@@ -71,10 +71,42 @@ void CallLong(uint32_t addr)
     Push8(0xFF);
     Push8(0xFE);
     JumpLong(addr);
-    s_depth++;
+    /* (s_depth is left alone: inside a shadow-checked call it is already
+     * up; under a NO_SHADOW driver the hooks reached here get checked.) */
     while (!(c->pb == 0x7F && c->pc == 0xFFFF && c->sp == sp0)) snes_step(s);
-    s_depth--;
     g_snes = s; g_cpu = c; g_ram = ram;
+}
+
+void (*g_driver)(void);
+int g_resuming;
+static void (*s_resume_fn)(void);
+static uint16_t s_resume_sp;
+static uint32_t s_resume_pc;
+
+int CallLongR(uint32_t addr, uint32_t ret)
+{
+    Snes *s = g_snes;
+    Cpu *c = g_cpu;
+    uint8_t *ram = g_ram;
+    uint16_t sp0 = c->sp;
+    void (*driver)(void) = g_driver;
+    Push8(ret >> 16);
+    Push8((ret - 1) >> 8);
+    Push8(ret - 1);
+    JumpLong(addr);
+    while (!(c->pb == (uint8_t)(ret >> 16) && c->pc == (uint16_t)ret && c->sp == sp0)) {
+        snes_step(s);
+        uint32_t pc = (uint32_t)c->pb << 16 | c->pc;
+        if (s->wait_at[pc & 0xFFFF] && snes_wait_point(s, pc) == WAIT_EXIT) {
+            s_resume_fn = driver;      /* resumed when the callee returns */
+            s_resume_sp = sp0;
+            s_resume_pc = ret;
+            g_snes = s; g_cpu = c; g_ram = ram;
+            return 0;
+        }
+    }
+    g_snes = s; g_cpu = c; g_ram = ram;
+    return 1;
 }
 
 int hook_find(const char *name)
@@ -145,6 +177,17 @@ static int dispatch(Snes *s)
 {
     Cpu *c = &s->cpu;
     uint32_t pc = (uint32_t)c->pb << 16 | c->pc;
+    if (s_resume_fn && pc == s_resume_pc && c->sp == s_resume_sp) {
+        void (*fn)(void) = s_resume_fn;
+        s_resume_fn = NULL;
+        Snes *ps = g_snes; Cpu *pc_ = g_cpu; uint8_t *pr = g_ram;
+        g_snes = s; g_cpu = c; g_ram = s->wram;
+        g_resuming = 1;
+        fn();
+        g_resuming = 0;
+        g_snes = ps; g_cpu = pc_; g_ram = pr;
+        return 1;
+    }
     if (!s_at[pc & 0xFFFF]) return 0;
     int i;
     for (i = 0; i < g_nhooks; i++) if (g_hooks[i].addr == pc && s_enabled[i]) break;
@@ -158,7 +201,8 @@ static int dispatch(Snes *s)
     g_snes = s; g_cpu = c; g_ram = s->wram;
     g_hook_calls[i]++;
     g_last_hook = i;
-    if (g_hook_check && !s_depth) check_call(s, i);
+    if (h->ignore & NO_SHADOW) { g_resuming = 0; h->fn(); }
+    else if (g_hook_check && !s_depth) check_call(s, i);
     else { s_depth++; h->fn(); s_depth--; }
     g_snes = ps; g_cpu = pc_; g_ram = pr;
     return 1;

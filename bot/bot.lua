@@ -378,6 +378,7 @@ local STALL, visits = 1500, {}
 local progressSig, progressAt = nil, 0
 local stallUntil = 0      -- explore overrides seek/hunt/item until then
 local ASSIST, lastProgress = 6000, 0
+local HEART_DEATHS, deathsAtProgress, heartStage = 20, 0, nil
 local deaths, rollbacks = 0, 0
 -- Ambush search: a bomb placed only for an enemy is tried from a savestate;
 -- if nobody died AMBUSH_FRAMES later, reload and retry with a random delay
@@ -484,11 +485,25 @@ local function think()
   local soft, todo = 0, 0
   for rr = 0, MAP_H - 1 do for cc = 0, MAP_W - 1 do if SOFT[g[rr][cc]] then soft = soft + 1 end end end
   for _ in pairs(panelTodo) do todo = todo + 1 end
-  local sig = string.format("%d/%d/%d/%d", score(), soft, todo, #enemies)
+  -- Not the enemy count: spawners (the 2-1 furnace) keep adding enemies.
+  local sig = string.format("%d/%d/%d", score(), soft, todo)
   -- Assist (logged): a stage whose panels we can't finish (unsolved gimmick)
   -- gets the game's own "all panels lit" bit ($5D94 bit 15, as C1:2335
   -- sets it) after ASSIST frames without progress or when time is short.
-  if sig ~= progressSig then lastProgress = frame end
+  if sig ~= progressSig then lastProgress, deathsAtProgress = frame, deaths end
+  -- Heart assist (logged): after HEART_DEATHS deaths without progress, keep
+  -- P1 at one heart (+$EF; C0:A5C9 spends it on a hit for brief
+  -- invincibility) for the rest of the stage, rollbacks included.
+  local stage = emu.read(0x1A, WRAM, false)
+  if heartStage ~= stage and deaths - deathsAtProgress >= HEART_DEATHS then
+    heartStage = stage
+    local msg = string.format("frame %d stage %02X: heart assisted (%s)", frame, stage, sig)
+    log("ASSIST " .. msg)
+    local fh = io.open(OUT .. "/assists.txt", "a"); if fh then fh:write(msg .. "\n"); fh:close() end
+  end
+  if heartStage == stage and emu.read(P1 + 0xEF, WRAM, false) == 0 then
+    inputlog.write16(P1 + 0xEF, (r16(P1 + 0xEF) & 0xFF00) | 1)
+  end
   local st = r16(0x5D94)
   if st ~= 0xFFFF and (st & 0x8000) == 0 and next(panelTodo) ~= nil
       and (frame - lastProgress > ASSIST or timeLeft() < 30) and #walkers == 0 then

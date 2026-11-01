@@ -559,14 +559,17 @@ local function think()
     log("ASSIST " .. msg)
     local fh = io.open(OUT .. "/assists.txt", "a"); if fh then fh:write(msg .. "\n"); fh:close() end
   end
-  -- Warp assist (logged): a forced-clear stage whose open gate we still
-  -- haven't reached 1200 frames later (walled off by switch blocks) puts P1
-  -- on the gate cell.
+  -- Exit assist (logged): a forced-clear stage whose open gate we still
+  -- haven't reached 1200 frames later (walled off, or in another part of the
+  -- map) gets the open-gate tile $49 written under P1 (its cell, +$A8), so
+  -- C1:41A8 runs there.
   if forceStage == stage and gateOpen and ticks - forceTicks > 1200 and (c ~= gc or r ~= gr) then
-    local wx, wy = tileCentre(gc, gr)
-    inputlog.write16(P1 + P_X, wx); inputlog.write16(P1 + P_Y, wy)
+    local cell = r16(P1 + 0xA8)
+    inputlog.write16(MAP + cell, (r16(MAP + cell) & 0xFF00) | 0x49)
+    inputlog.write16(0x5D70, 0)
+    inputlog.write16(0x5D72, cell)   -- ExitGateCell: the bot's exit plan then stands on it
     forceTicks = ticks
-    local msg = string.format("frame %d stage %02X: warped to gate (%d,%d)", frame, stage, gc, gr)
+    local msg = string.format("frame %d stage %02X: exit under player (cell %04X)", frame, stage, cell)
     log("ASSIST " .. msg)
     local fh = io.open(OUT .. "/assists.txt", "a"); if fh then fh:write(msg .. "\n"); fh:close() end
   end

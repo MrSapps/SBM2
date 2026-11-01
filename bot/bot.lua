@@ -355,6 +355,8 @@ local step = nil  -- committed move: from (c,r) toward (tc,tr); false while lock
 local recent = {}  -- last few plan lines, dumped on death
 local lastPlan = ""
 local offStage = 0  -- frames since the last stage frame
+local savedStage = nil
+local onNextInstruction  -- defined below (savestates need an exec callback)
 local lastWorld, gameOver = 0, false
 
 -- Rollback search: in-memory savestates every SNAP_EVERY frames; a death
@@ -445,6 +447,13 @@ local function think()
     return
   end
   offStage = 0
+  -- Stage-start state (+ sidecar): after a game over, drive.py continues
+  -- from it rather than the world's password state.
+  local stNow = emu.read(0x1A, WRAM, false)
+  if stNow ~= savedStage then
+    savedStage = stNow
+    onNextInstruction(function() inputlog.saveState(OUT .. "/stage.mss", emu.createSavestate()) end)
+  end
   -- Lives assist (logged): a game over restarts the whole world, so keep
   -- lives ($1C6C) topped up; deaths are still retried by rollback first.
   if emu.read(0x1C6C, WRAM, false) < 2 then
@@ -748,7 +757,7 @@ local function dumpCdl(path)
   writeFile(path, table.concat(t))
 end
 
-local function onNextInstruction(fn)
+function onNextInstruction(fn)  -- forward-declared above
   local id
   id = emu.addMemoryCallback(function()
     emu.removeMemoryCallback(id, emu.callbackType.exec, 0, 0xFFFFFF)

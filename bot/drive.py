@@ -60,10 +60,13 @@ def main():
         frame0, state = reached, os.path.join(out, 'ckpt.mss')
         over = os.path.join(out, 'gameover.txt')
         if os.path.exists(over):
-            # Continue: restart the world from its password state.
+            # Continue: restart the stage (or else the world) we were on.
             world = int(open(over).read())
             os.remove(over)
             state = os.path.join(ROOT, 'build', 'states', f'world{world}.mss')
+            # Prefer the start of the stage we were on (bot.lua saves it).
+            if os.path.exists(os.path.join(out, 'stage.mss')):
+                state = os.path.join(out, 'stage.mss')
             print(f'game over: continuing world {world} from {state}', flush=True)
         elif not os.path.exists(state):
             frame0, state = 0, start

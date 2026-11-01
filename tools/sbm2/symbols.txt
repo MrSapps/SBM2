@@ -107,4 +107,4 @@ C1:5028 EnemyDie            ; +4 |= $A000, y = 0
 00B9 GameModeFlags          ; bit 15 = battle mode (tested with lda $B9 / bmi)
 00BC NormalGameFlag         ; 1 in normal-game stages, 0 in battle (observed)
 001A CurrentStage          ; world<<4 | (stage-1)
-7E1C6C Lives                 ; lives left (game over below 1)
+001C6C Lives                 ; lives left (game over below 1)

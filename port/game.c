@@ -1018,6 +1018,153 @@ static void StageTimer(void)
     Ret_RTL();
 }
 
+
+/* --- input ---
+ * $C3/$C4 pad 1 ($C3 word), $C5-$C8 pads 2-4 low/high, $CD-$CF pad present
+ * bits, $C9/$CB multitap pads 3/4 serial, $D0/$D1 their present bits, $C2
+ * multitap flags ($80 port 1, $40 port 2). Player +$6E = filtered pad. */
+
+/* C0:1797  Reads the auto-joypad registers and the multitap serial lines.
+ * Saves/restores P; returns A = $0080, X = X & $FF, Y = 0. */
+static void ReadJoypads_core(void)
+{
+    Cpu *c = g_cpu;
+    ram8_set(0xC2, 0);
+    while (ReadLong8(0x4212) & 1) {}
+    ram8_set(0xC4, ReadLong8(0x4219));
+    uint8_t p1 = ReadLong8(0x4218);
+    ram8_set(0xC3, p1);
+    ram8_set(0xCD, (uint8_t)((p1 & 0x0F) << 1 | (ReadLong8(0x4016) & 1)));
+    ram8_set(0xC6, ReadLong8(0x421B));
+    uint8_t p2 = ReadLong8(0x421A);
+    ram8_set(0xC5, p2);
+    uint8_t ce = p2 & 0x0F;
+    ram8_set(0xC8, ReadLong8(0x421F));
+    uint8_t p4 = ReadLong8(0x421E);
+    ram8_set(0xC7, p4);
+    uint8_t cf = p4 & 0x0F;
+    uint8_t v = ReadLong8(0x4017);
+    ram8_set(0xCE, (uint8_t)(ce << 1 | (v & 1)));
+    ram8_set(0xCF, (uint8_t)(cf << 1 | (v >> 1 & 1)));
+    WriteLong8(0x4201, 0);
+    uint16_t c9 = ram16(0xC9), cb = ram16(0xCB);
+    for (int i = 0; i < 16; i++) {
+        v = ReadLong8(0x4017);
+        c9 = c9 << 1 | (v & 1);
+        cb = cb << 1 | (v >> 1 & 1);
+    }
+    ram16_set(0xC9, c9);
+    ram16_set(0xCB, cb);
+    v = ReadLong8(0x4017);
+    ram8_set(0xD0, (uint8_t)((c9 & 0x0F) << 1 | (v & 1)));
+    ram8_set(0xD1, (uint8_t)((cb & 0x0F) << 1 | (v >> 1 & 1)));
+    WriteLong8(0x4201, 0x80);
+    c->a = 0x0080;
+    c->x &= 0xFF;
+    c->y = 0;
+}
+
+static void ReadJoypads(void) { ReadJoypads_core(); Ret_RTL(); }
+
+/* C0:1862  Multitap detection: strobes the pads and reads 16 bits of the
+ * data-2 lines of both ports; all 1s then not = a tap. Saves/restores P. */
+static void MultitapCheck_core(void)
+{
+    Cpu *c = g_cpu;
+    ram8_set(0xC2, 0);
+    while (ReadLong8(0x4212) & 1) {}
+    WriteLong8(0x4016, 0);
+    WriteLong8(0x4016, 1);
+    uint8_t d3 = ram8(0xD3), d5 = ram8(0xD5), d2 = ram8(0xD2), d4 = ram8(0xD4);
+    for (int i = 0; i < 8; i++) {
+        d3 = (uint8_t)(d3 << 1 | (ReadLong8(0x4016) >> 1 & 1));
+        d5 = (uint8_t)(d5 << 1 | (ReadLong8(0x4017) >> 1 & 1));
+    }
+    WriteLong8(0x4016, 0);
+    for (int i = 0; i < 8; i++) {
+        d2 = (uint8_t)(d2 << 1 | (ReadLong8(0x4016) >> 1 & 1));
+        d4 = (uint8_t)(d4 << 1 | (ReadLong8(0x4017) >> 1 & 1));
+    }
+    ram8_set(0xD3, d3); ram8_set(0xD5, d5); ram8_set(0xD2, d2); ram8_set(0xD4, d4);
+    uint8_t a;
+    if (d3 == 0xFF && d2 != 0xFF) ram8_set(0xC2, 0x80);
+    if (d5 != 0xFF) a = d5;
+    else if (d4 == 0xFF) a = d4;
+    else { a = 0x40 | ram8(0xC2); ram8_set(0xC2, a); }
+    c->a = (c->a & 0xFF00) | a;
+    c->x = 0;
+    c->y &= 0xFF;
+}
+
+static void MultitapCheck(void) { MultitapCheck_core(); Ret_RTL(); }
+
+/* C0:1625  Player 1's pad (when it can move and pad 1 alone is plugged in)
+ * minus opposite directions held together -> $C3 and +$6E. */
+static void FilterPlayer1Pad_core(void)
+{
+    Cpu *c = g_cpu;
+    uint16_t v;
+    if ((v = ram16(Player1)) & 0x0800) { c->a = v; SetFlag(FN, v & 0x8000); SetFlag(FZ, 0); return; }
+    if ((v = ram16(Player1 + 4)) & 1) { c->a = v; SetFlag(FN, v & 0x8000); SetFlag(FZ, 0); return; }
+    if ((v = ram16(Player1 + 0x52)) & 1) { c->a = v; SetFlag(FN, v & 0x8000); SetFlag(FZ, 0); return; }
+    uint8_t cd = ram8(0xCD) & 0x1F;
+    if (cd != 1) {
+        c->a = (v & 0xFF00) | cd;
+        SetNZ8(cmp8(cd, 1));
+        SetFlag(FC, fc);
+        return;
+    }
+    uint16_t pad = ram16(0xC3);
+    ram16_set(0x40, pad);
+    if ((pad & 0x0300) == 0x0300) pad &= 0xFCFF;   /* left + right */
+    ram16_set(0x40, pad);
+    cmp16(pad & 0x0C00, 0x0C00);
+    if (fc) pad &= 0xF3FF;                         /* up + down */
+    ram16_set(0x40, pad);
+    ram16_set(0xC3, pad);
+    ram16_set(Player1 + 0x6E, pad);
+    c->a = pad;
+    SetNZ16(pad);
+    SetFlag(FC, fc);
+}
+
+static void FilterPlayer1Pad(void) { FilterPlayer1Pad_core(); SetM8(0); Ret_RTL(); }
+
+/* C0:1602  Per-frame input: pads, multitap, CC:96BB (a scripted pad value
+ * from $1C76 while $1000 is set), player 1 filter; players 2-4 in battle
+ * mode ($B9 < 0: C0:167C/16D3/172A). */
+static void InputUpdate(void)
+{
+    Cpu *c = g_cpu;
+    uint8_t p = c->p;
+    ReadJoypads_core();
+    c->p = p;
+    MultitapCheck_core();
+    c->p = p;
+    SetM8(0);
+    c->a = ram16(0x001000);
+    if (c->a) {
+        uint16_t sc = ram16(0x001C76);
+        c->a = sc;
+        if (sc) {
+            ram16_set(0xC3, sc & 0xFFF0);
+            c->a = 0;
+            ram16_set(0x001C76, 0);
+        }
+    }
+    SetX8(0);
+    FilterPlayer1Pad_core();
+    SetM8(0);
+    c->a = ram16(0xB9);
+    SetNZ16(c->a);
+    if (c->a & 0x8000) {
+        CallLong(0xC0167C);
+        CallLong(0xC016D3);
+        CallLong(0xC0172A);
+    }
+    Ret_RTL();
+}
+
 /* --- exit --- */
 
 /* C1:41A8  Player [$6A] on the open gate: if it may leave (not already
@@ -1668,6 +1815,10 @@ const Hook g_hooks[] = {
     { 0xC11EE2, "EnemyHit",          EnemyHit,          FX,      0, 0 },
     { 0xC034C0, "BombPlace",         BombPlace,         FM | FX, 0,
       IGN_A | IGN_X | IGN_Y | IGN_NZ | IGN_C | IGN_V },
+    { 0xC01797, "ReadJoypads",       ReadJoypads,       0,       0, 0 },
+    { 0xC01862, "MultitapCheck",     MultitapCheck,     0,       0, 0 },
+    { 0xC01625, "FilterPlayer1Pad",  FilterPlayer1Pad,  FX,      0, 0 },
+    { 0xC01602, "InputUpdate",       InputUpdate,       0,       0, 0 },
     { 0xC11C1A, "StageTimer",        StageTimer,        FM | FX, 0,
       IGN_A | IGN_X | IGN_Y | IGN_NZ | IGN_C | IGN_V },
     { 0xC11BA3, "ScoreDigits",       ScoreDigits,       FM | FX, 0,

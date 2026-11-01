@@ -82,6 +82,7 @@ typedef struct Snes {
     uint8_t fs_seen16, fs_in_nmi;   /* pad-log NMI events, see snes.c */
     uint16_t fs_nmi_sp;
     uint8_t pad_markers;            /* the pad log has NMI event markers */
+    uint8_t fs_hold;                /* no frame-step NMIs (hook shadow check) */
     uint32_t pad_desync;            /* log entries that did not fit */
 
     /* Called before each instruction (not before taking an interrupt); if it

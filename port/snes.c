@@ -738,6 +738,7 @@ static void framestep_nmi(Snes *s)
 {
     uint32_t pc = (uint32_t)s->cpu.pb << 16 | s->cpu.pc;
     int k = s->wait_at[pc & 0xFFFF] ? snes_wait_point(s, pc) : 0;
+    if (s->fs_hold) return;
     if (k == WAIT_EXIT) {   /* the frame boundary itself: nothing raised here */
         s->fs_raised = 0;
         s->fs_seen16 = 0;

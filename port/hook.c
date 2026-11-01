@@ -100,10 +100,15 @@ static void check_call(Snes *s, int i)
     memcpy(&s_shadow, s, sizeof s_shadow);
     s_shadow.cpu.ctx = &s_shadow;
     s_shadow.hook = NULL;
+    /* Native code cannot take an NMI halfway; keep both sides NMI-free. */
+    s_shadow.fs_hold = 1;
+    uint8_t hold = s->fs_hold;
+    s->fs_hold = 1;
 
     s_depth++;
     h->fn();
     s_depth--;
+    s->fs_hold = hold;
 
     Cpu *n = &s->cpu, *r = &s_shadow.cpu;
     long steps = 0;

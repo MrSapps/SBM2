@@ -378,6 +378,7 @@ local STALL, visits = 1500, {}
 local progressSig, progressAt = nil, 0
 local stallUntil = 0      -- explore overrides seek/hunt/item until then
 local ASSIST, lastProgress = 6000, 0
+local ticks = 0           -- frames run, rollbacks included (frame rewinds)
 local HEART_DEATHS, deathsAtProgress, heartStage = 20, 0, nil
 local seenSigs = {}
 local deaths, rollbacks = 0, 0
@@ -493,7 +494,7 @@ local function think()
   -- sets it) after ASSIST frames without progress or when time is short.
   -- Progress for the assists = a state not seen before (a rollback brings
   -- back an older score, which isn't progress).
-  if not seenSigs[sig] then seenSigs[sig] = true; lastProgress, deathsAtProgress = frame, deaths end
+  if not seenSigs[sig] then seenSigs[sig] = true; lastProgress, deathsAtProgress = ticks, deaths end
   -- Heart assist (logged): after HEART_DEATHS deaths without progress, keep
   -- P1 at one heart (+$EF; C0:A5C9 spends it on a hit for brief
   -- invincibility) for the rest of the stage, rollbacks included.
@@ -509,8 +510,8 @@ local function think()
   end
   local st = r16(0x5D94)
   if st ~= 0xFFFF and (st & 0x8000) == 0 and next(panelTodo) ~= nil
-      and (frame - lastProgress > ASSIST or timeLeft() < 30)
-      and (#walkers == 0 or frame - lastProgress > 2 * ASSIST) then
+      and (ticks - lastProgress > ASSIST or timeLeft() < 30)
+      and (#walkers == 0 or ticks - lastProgress > 2 * ASSIST) then
     inputlog.write16(0x5D94, st | 0x8000)   -- logged: replays can't infer it
     local msg = string.format("frame %d world %d: panels assisted (%s)", frame, lastWorld + 1, sig)
     log("ASSIST " .. msg)
@@ -519,7 +520,7 @@ local function think()
   -- Enemy assist (logged): enemies we can't wear down (high or immune $7F
   -- hit points, +$43, see EnemyHit C1:1EE2) drop to one hit point under the
   -- same conditions, so the next blast kills them. The gate object is left.
-  if #enemies > 0 and (frame - lastProgress > ASSIST or timeLeft() < 60) then
+  if #enemies > 0 and (ticks - lastProgress > ASSIST or timeLeft() < 60) then
     for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
       local hp = emu.read(base + 0x43, WRAM, false)
       if (r16(base) & 0xF000) == 0x9000 and (r16(base + 4) & 0x8000) == 0 and hp > 1 then
@@ -537,7 +538,7 @@ local function think()
   -- Kill assist (logged): still stuck after 2*ASSIST frames, or under 20 s
   -- left: each live enemy (not the gate, not item-holders $90/$98) gets
   -- EnemyDie's (C1:5028) struct writes, without the score.
-  if #enemies > 0 and (frame - lastProgress > 2 * ASSIST or timeLeft() < 20) then
+  if #enemies > 0 and (ticks - lastProgress > 2 * ASSIST or timeLeft() < 20) then
     for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
       local t = r16(base + 0x7E)
       if (r16(base) & 0xF000) == 0x9000 and (r16(base + 4) & 0x8000) == 0 and t ~= 0x90 and t ~= 0x98 then
@@ -834,7 +835,7 @@ local function onFrame()
     writeFile(string.format("%s/f%06d.png", OUT, frame), emu.takeScreenshot())
     logMap()
   end
-  frame = frame + 1
+  frame, ticks = frame + 1, ticks + 1
   if gameOver then
     -- Stop here; drive.py restarts from the world's start state.
     flushLog()

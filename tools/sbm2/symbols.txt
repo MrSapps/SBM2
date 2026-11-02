@@ -123,3 +123,93 @@ C1:5028 EnemyDie            ; +4 |= $A000, y = 0
 00BC NormalGameFlag         ; 1 in normal-game stages, 0 in battle (observed)
 001A CurrentStage          ; world<<4 | (stage-1)
 001C6C Lives                 ; lives left (game over below 1)
+
+# --- enemies (docs/enemies.md) ---
+C1:52C5 ObjectsUpdate       ; $7E2620 list from index 8: enemies -> EnemyDispatch, anim, wrap, timer
+C1:61E8 EnemyDispatch       ; only at full brightness; jml via EnemyTypeTable[type & $3F]
+C1:62D7 EnemyGeneric        ; types 83/84/8D/8F/94: straight until blocked, wait $20, random dir
+C1:64FE EnemyNoteCells      ; $7E26A0[i] = +$A8, $7E2720[i] = +$4C (0 when hidden)
+C1:6554 CellHasEnemy        ; carry: $46 is another enemy's current or target cell
+C1:6571 EnemyReadNeighbours ; +$C2..C8 cells / +$D2..D8 tiles (up, down, left, right)
+C1:6466 EnemyPickRandomDir  ; +$4E wait, then dir = $0400 & 3; carry = no move
+C1:6366 EnemyMoveStep       ; stop if target solid/$43; at centre continue straight or stop
+C1:63BB EnemyTryContinue    ; next cell along +$4A free -> new +$4C
+C1:63F6 EnemyStartMove      ; +$C0 bit 15, velocity from +$46.+$48 and +$6C
+C1:640A EnemySetVelocity
+C1:63E8 ObjClearFracXY
+C1:6315 EnemyFinishStep     ; reach +$4C centre then stop (+$4E = $20)
+C1:65D2 EnemyCommonTick     ; timer, ObjMove, ObjFlashTick, ObjTileUpdate
+C1:50A4 EnemyFlameCheck     ; +$B4 = 1 (flame): EnemyHurt, hp--; 0 -> dying
+C1:5110 EnemyHurt           ; stop, anim $10, +$68 bit 0, +$C0 bit 12
+C1:4F25 EnemyHurtDone       ; clears +4 bit 5, +$C0 bit 11 (restart)
+C1:77AD EnemySnapCrossAxis  ; cross-axis coordinate = cell centre
+C1:8074 EnemyStopAtCentre   ; x/y = centre of +$A8, velocity 0
+C1:9BFB NearCellCentre      ; carry: |x-cx| and |y-cy| < $52
+C0:EE1C CellCentreXY        ; cell -> $42 = col*16-orgX+8, $44 = row*16-orgY+7
+C0:A380 ObjMove             ; x += +$14.+$16, y += +$1C.+$1E (sign from +0 bits 0/1)
+C0:0CAA RandomPerFrame      ; $000400 = Random each frame
+C1:5518 PlayerEnemyContact  ; P1 shares a cell with a harmful enemy -> heart or death
+C1:558E EnemyOnPlayerCell   ; carry: harmful enemy with +$A8 == P1 +$A8
+C1:5624 HarmlessTypeCheck   ; carry: (type & $7F) in list C5:D850
+C1:2C52 EnemyInitFromRecord ; record C2:DAC6[+4]: +$40 type, +$41, +$43 hp, +$46/+$48 speed
+C1:2413 KillAllType8F       ; all tile-$68 cells became $6F -> every $8F dies
+C1:239D Check8FPanels       ; $7E5AD4 list (tile $68 cells)
+C1:2609 InitSwitchFlag      ; $7E5AAC = 1 if tile $64/$6E in map else $FFFF
+C1:8843 ChaseUpdate         ; shared chaser, +$D0: b7 on, b6 stopped, b5 leg, b15 detour, b14 init
+C1:906D ChaseDirToP1        ; +$D0 low nibble 1 R, 2 L, 4 D, 8 U (x/y & $1F8 vs P1)
+C1:8F58 ChaseStartLeg       ; axis with larger |delta| (ties horizontal)
+C1:8FB3 ChaseStartHoriz
+C1:9010 ChaseStartVert
+C1:8EA9 ChaseStep           ; straight on; stop -> detour if blocked or nibble changed
+C1:8BA2 ChaseDetour         ; up to 3 cells (+$CC), perpendicular first
+C1:8D0E ChaseDetourInit
+C1:8E05 ChaseDetourPrefs    ; +$DC/+$DE: reverse on current axis, random on the other
+C1:8D29 ChaseDetourFirst
+C1:8BC1 ChaseDetourStep
+C1:8C18 ChaseDetourTurn
+C1:8AEB SeesP1XRay          ; same 8px band row/col, <= 8 cells, ignores walls
+C1:8AF9 SeesP1              ; range $7E5D96, $7E5D98 bit 15 = ignore walls; $50 = dir bit
+C1:937D SightScanVert
+C1:942A SightScanHoriz
+C1:8B35 Enemy82             ; generic; after a non-lethal hit: chaser at 1 px/f
+C1:8A8F Enemy85             ; generic until it sees P1 through walls, then chaser
+C1:664B Enemy86             ; waits 64 f, walks <= 4 cells, rests 128 f; aims at P1 in LOS
+C1:66B1 Enemy86Move
+C1:6751 Enemy86PickDir
+C1:CD70 Enemy87             ; generic, drops a soft block every 3rd fresh start
+C1:CDB2 Enemy87DropBlock
+C1:86EB Enemy89             ; chaser, self-centred blast every $1C0 frames
+C1:87BB Enemy88             ; same, every $140 frames
+C1:8777 Enemy89Attack
+C1:8962 EnemySpawnBlast     ; bomb pool slot, fuse 1, range 3 (DP $1A < $40) else 9
+C1:278C AllocBombSlot       ; $7F2000 pool, carry = full
+C1:892D EnemyResetAI        ; clears +$C0..+$DF
+C1:B85A Enemy8A             ; $7E5AAC even: 1.25 px/f x-ray chaser; odd: 0.5 wanderer
+C1:B81B Enemy97             ; mirror of Enemy8A
+C1:B9D1 Enemy8ASwitchMode
+C1:B937 Enemy97SwitchMode
+C1:BD92 ChaseAnimFromDir
+C1:CBE7 Enemy8E             ; passes soft blocks; only $C5/$C6/$43/$01 block
+C1:CC87 Enemy8EPickDir      ; LOS to P1 else random
+C1:C091 Enemy90             ; shooter ($B2 shots); after a blast hit becomes a mount
+C1:C186 Enemy90TryShoot     ; every $40 f at a centre, P1 within 10 cells in LOS
+C1:C1D1 Enemy90SpawnShot    ; type $B2, 1.5 px/f horizontal, 2.0 vertical
+C1:BFD5 EnemyShotB2         ; vanishes on solid/$43
+C1:BA6B Enemy91             ; x-ray chaser; flames the adjacent P1 cell
+C1:BC12 Enemy91TryAttack    ; P1 within 4 cells in LOS
+C1:BAF2 Enemy91AttackHit    ; P1 in a neighbour cell -> tile $01 there
+C1:BDD9 Enemy92             ; lunge every $C0 f: 3 cells ahead, no wall check
+C1:BF59 Enemy92StartAttack  ; hp $FF for the 160-frame attack
+C1:BE71 Enemy92AttackHit    ; attack frames $3E-$54
+C1:CAEF Enemy93             ; generic + x-ray sight -> chaser; faster after a hit
+C1:CB92 Enemy93SpeedUp      ; 1.0 then 1.5 px/f
+C1:B347 Enemy95             ; bomb eater: walks onto bombs, removes them unexploded
+C1:B3F7 Enemy95SeekBomb     ; turns toward the nearest bomb within 5 cells
+C1:B389 Enemy95EatBomb
+C1:C473 Enemy98             ; teleporter: hides every $1C0 f, reappears $C0 f later
+C1:C59E Enemy98PickCell     ; random cell from the list at $7FE100
+C1:A8CE Furnace9F           ; type $DF: bomb below it -> $E3 object carries it 1 cell down
+C1:AAC0 BombCarrierE3      ; 16 frames at 1 px/f down, then a real bomb
+C1:9C66 ShuttleDC           ; rideable platform on a solid lane, harmless
+C1:A1ED PusherDD            ; block on a $4D track, stamps $CD, pushes P1
+C1:A4FE JumpPad             ; types $E0 (8 cells right) / $A0 (left)

@@ -44,15 +44,21 @@ return function(env)
         local c, r = cellOf(r16(base + 0xA8))
         if r < MAP_H and c < MAP_W then
           local e = { base = base, type = typ, c = c, r = r }
-          e.gadget = typ >= 0xC0 or (typ & 0x80) == 0
+          e.gadget = (typ >= 0xC0 or (typ & 0x80) == 0) and typ ~= 0xDD
           local hidden = (f4 & 0x60) ~= 0 or (rd8(base + 0x41) & 0x80) ~= 0
             or (r16(base + 0x68) & 2) ~= 0
             or ((typ == 0x98 or typ == 0x90) and (r16(base + 0xBE) & 0x8000) ~= 0)
-          e.harmful = not e.gadget and not hidden and not SAFE_TYPES[typ & 0x7F]
+          -- $DD track blocks never kill by contact but crush P1 ahead of them.
+          e.harmful = not e.gadget and not hidden and (not SAFE_TYPES[typ & 0x7F] or typ == 0xDD)
           local hp = rd8(base + 0x43)
-          e.killable = not e.gadget and (hp & 0x7F) ~= 0x7F and (f4 & 0x40) == 0
+          e.killable = not e.gadget and typ ~= 0xDD and (hp & 0x7F) ~= 0x7F and (f4 & 0x40) == 0
           e.immune = (hp & 0x7F) == 0x7F
           e.chaser = CHASERS[typ] and ((rd8(base + 0xD0) & 0x80) ~= 0 or typ == 0x89)
+          -- $8A/$97: x-ray chasers by the light switch $7E5AAC ($8A even, $97 odd).
+          local light = r16(0x5AAC)
+          if (typ == 0x8A or typ == 0x97) and light ~= 0xFFFF then
+            e.chaser = (light & 1) == (typ == 0x97 and 1 or 0)
+          end
           e.moving = (r16(base + 0xC0) & 0x8000) ~= 0
           local step = r16(base + 0x4A)
           if step >= 0x8000 then step = step - 0x10000 end

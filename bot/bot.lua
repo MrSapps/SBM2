@@ -139,6 +139,13 @@ local function readMap()
   return g
 end
 
+local SPRING = 0x4C  -- spring pad (world 3): launches P1 in the held direction
+-- Where a jump from a pad in a direction landed: springLand[padKey .. dir]
+-- = {c, r}. Until seen, assume 5 cells on, again from any pad landed on
+-- (docs/mechanics.md section 5).
+local springLand = {}
+local springDir, springFrom  -- direction to hold on the pad; jump in flight
+local lastAir = -100  -- last frame P1 was in the air ($52 = $1801)
 local function walkable(g, c, r)
   if r < 0 or r >= MAP_H or c < 0 or c >= MAP_W then return false end
   local t = g[r][c]
@@ -146,9 +153,8 @@ local function walkable(g, c, r)
   -- stood on (C1:58DE table): conveyors/warps, not hazards as far as known.
   -- $40-$7F are the same floor codes with flag bits (the tile handler only
   -- looks at tile & $3F); $40-$43 are bombs.
-  -- $4C spring pad: launches P1 5 cells in the held direction
-  -- (docs/mechanics.md); off limits until jumps are planned.
-  if t == 0x4C then return false end
+  -- $4C spring pad: not a cell to stand on; bfs uses it as a jump edge.
+  if t == SPRING then return false end
   -- $4B/$63 traps cost a heart or a life (world 5).
   if t == 0x4B or t == 0x63 then return false end
   return EMPTY[t] == true or (t >= 0x04 and t < 0x80 and not isBomb(t))
@@ -387,6 +393,23 @@ local function bfs(g, c0, r0, goal, avoid, windows, t0)
           and not (windows and hit(windows, k, arrive - FPT, arrive + FPT)) then
         seen[k] = true
         q[#q + 1] = { cc, rr, first or dir[3], n + 1 }
+      elseif g[rr] and g[rr][cc] == SPRING and not (avoid and avoid[k]) then
+        local land = springLand[k .. dir[3]]
+        if land == nil then
+          local lc, lr = cc, rr
+          for _ = 1, 3 do
+            lc, lr = lc + 5 * dir[1], lr + 5 * dir[2]
+            if not (g[lr] and g[lr][lc] == SPRING) then break end
+          end
+          land = { lc, lr }
+        end
+        local lk = land and land[2] * KEY_W + land[1]
+        local t = t0 + (n + 6) * FPT  -- ~20 frames on the pad + ~70 in the air
+        if land and not seen[lk] and walkable(g, land[1], land[2])
+            and not (windows and hit(windows, lk, t - FPT, t + FPT)) then
+          seen[lk] = true
+          q[#q + 1] = { land[1], land[2], first or dir[3], n + 6 }
+        end
       end
     end
   end
@@ -484,6 +507,33 @@ local function think()
   -- Locked ($52 bit 0): dying, on the exit, warping, a boss's freeze, ...
   -- Only a death is a death: C0:A675 sets $52 = $0801 (docs/enemies.md).
   local lockv = r16(P1 + P_LOCK)
+  -- On a pad by pixel position: +$A8 still names the previous cell for a
+  -- few frames after a landing.
+  local pc0, pr0 = playerTile()
+  local onPad = emu.read(MAP + pr0 * ROW + pc0 * 2, WRAM, false) == SPRING
+  if (lockv & 0xF801) == 0x1801 then lastAir = frame end
+  if (lockv & 1) ~= 0 and (onPad or (frame >= lastAir and frame - lastAir <= 6)) then
+    -- On a spring pad ($0801 there is the pad's lock, not a death) or in
+    -- the air ($1801): hold the planned direction through the launch.
+    if onPad and not springDir then springDir = DIRS[math.random(4)][3] end  -- not planned: any way off
+    if onPad and not springFrom and springDir then
+      springFrom = (pr0 * KEY_W + pc0) .. springDir
+    end
+    if springDir then input[springDir] = true end
+    step = false
+    return
+  end
+  if springFrom and (lockv & 1) == 0 then
+    local c1, r1 = playerTile()
+    if not springLand[springFrom] then
+      log(string.format("%6d spring %s landed (%d,%d)", frame, springFrom, c1, r1))
+    end
+    springLand[springFrom] = { c1, r1 }
+  elseif springFrom then
+    log(string.format("%6d spring %s ended in a death; not again", frame, springFrom))
+    springLand[springFrom] = false
+  end
+  springFrom = nil
   if (lockv & 1) ~= 0 then
     if playing and (lockv & 0xF801) == 0x0801 then  -- not $1801 (spring jump)
       playing = false
@@ -556,7 +606,7 @@ local function think()
   local stNow = emu.read(0x1A, WRAM, false)
   if stNow ~= savedStage then
     savedStage = stNow
-    softSeen, softGone = {}, {}
+    softSeen, softGone, springLand = {}, {}, {}
     log(string.format("%6d STAGE %02X", frame, stNow))
     onNextInstruction(function()
       local data = emu.createSavestate()
@@ -923,6 +973,7 @@ local function think()
   if dir and not (step and plan ~= "flee" and plan ~= "dodge") then
     local d = ({ up = { 0, -1 }, down = { 0, 1 }, left = { -1, 0 }, right = { 1, 0 } })[dir]
     step = { c = c, r = r, tc = c + d[1], tr = r + d[2], dir = dir }
+    springDir = g[step.tr] and g[step.tr][step.tc] == SPRING and dir or nil
   end
   if step then
     local tx, ty = tileCentre(step.tc, step.tr)

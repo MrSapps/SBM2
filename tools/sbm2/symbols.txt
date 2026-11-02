@@ -213,3 +213,46 @@ C1:AAC0 BombCarrierE3      ; 16 frames at 1 px/f down, then a real bomb
 C1:9C66 ShuttleDC           ; rideable platform on a solid lane, harmless
 C1:A1ED PusherDD            ; block on a $4D track, stamps $CD, pushes P1
 C1:A4FE JumpPad             ; types $E0 (8 cells right) / $A0 (left)
+
+# --- stage mechanics (docs/mechanics.md) ---
+C1:408C PlayerOnCrumble     ; tile type $25: flags the CrumbleList entry under P1 (bit 15)
+C1:40B9 PlayerOnTrap        ; types $0B/$23 ($4B/$63): break anim, PlayerTakeHit, death if no heart
+C1:4134 TrapSprung          ; $63 under P1 -> TrapList entry bit 0
+C1:415A PlayerTakeHit       ; uses a heart (+$EF) and flashes; carry = no heart (caller kills)
+C1:427C PlayerOnSpring      ; tile type $0C ($4C) -> SpringTile
+C0:46E3 SpringTile          ; spring pad: lock P1, then SpringLaunch in the held direction
+C0:4937 SpringLaunch        ; ballistic jump, ~5 cells
+C0:53E1 ConveyorRight       ; type $17 (battle table too); $7E5CBE bit 0 fast, bit 1 reversed
+C0:5461 ConveyorLeft        ; type $18
+C0:54E1 ConveyorUp          ; type $19
+C0:5561 ConveyorDown        ; type $1A
+C0:5288 BattleLeverReverse  ; battle type $12: $7E5CC4 = 0 -> conveyors reverse
+C0:52B6 BattleLeverSpeed    ; battle type $13: $7E5CC6 = 0 -> conveyor speed toggles
+C0:4337 BattleTileHandler   ; battle-mode per-object tile handler, table C5:EBBF
+C1:4281 WorldStageUpdate    ; per-world routine from table C5:D452 (world 1-5)
+C1:4474 World1Update        ; magnets
+C1:486A World2Update        ; furnace/fuse, hidden push block
+C1:4A02 World3Update
+C1:4A16 World4Update        ; spawns a $DC platform once the $6A cell is bombed
+C1:4B06 World5Update        ; crumble floor, traps
+C1:4897 World2ButtonCheck   ; $6B cell art = $1CC8 (bombed) -> $F5 cell becomes $E2
+C1:499B World2BombInFurnace ; a bomb exploding on an $E7 cell -> $7E5D5C bit 0
+C1:4922 World2FuseIgnite    ; every $280 f: fuse cells ($7E30F0) -> tile/item $01
+C1:4B43 CrumbleUpdate       ; P1 left a flagged $25 cell -> CrumbleStep
+C1:4B8B CrumbleStep         ; $25 -> $65 (cracked), then $65 -> $D3 (hole)
+C1:4C4A TrapUpdate          ; traps next to P1 blink
+C1:4D5E FindTraps           ; tile $63 cells -> TrapList
+C1:46E9 MagnetBlastRotate   ; blast on a magnet: dir += 2 (clockwise), new tile/art
+C1:2811 PushBlockStart      ; blast hit $E2: spawn the sliding block object (+$7E = $E2)
+C1:27D5 PushBlockTargetOk   ; carry clear = target is $D3, or $00 without bomb/enemy
+C1:A6F3 PushBlockObject     ; slides one cell; target $D3 -> $00 (filled), else $E2
+C1:26AA BarrelExplode       ; blast on type $16 ($D6): 5 range-1 blasts (centre, +-2 cells)
+C0:3761 FindPowerSpots      ; world 1: tile $14 cells -> $7E2FF0 (bombs placed there get range 9)
+7E59AA CrumbleList          ; 8-byte entries: +0 state (bit 15 stepped, 14 cracked, 0 done), +2 cell, +4 gfx
+7E5928 TrapList             ; 8-byte entries: +0 bit 0 sprung, bit 15 blinking, +2 cell, +4 gfx
+7E5AAC SwitchState          ; light switch: bit 0 (flipped by flames), $FFFF none; +2 cell, +4 gfx
+7E5AB4 W2ButtonList         ; $6B cell: +2 cell, +4 gfx index
+7E5ABC W2HiddenBlockList    ; $F5 cell: +2 cell, +4 gfx index
+7E5D5C World2MachineState   ; bit 0 = a bomb went off in the furnace
+7E30F0 FuseCells            ; world 2: CellItems $0E cells {cell, gfx}
+7E5CBE ConveyorMode         ; bit 0 fast, bit 1 reversed (battle levers only)

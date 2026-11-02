@@ -149,7 +149,10 @@ life: the trap stays `$00` after the death.
   toggles it** (`GoldPanelToggle` C1:2282, called from the flame cleanup
   loop): state bit 0 flips, gfx `$1246` <-> `$1248`. The exit opens when
   every entry has bit 0 set. Bombing the same panel twice undoes it. Two
-  bombs whose flames both cover a panel toggle it twice.
+  bombs whose flames both cover a panel toggle it twice. So which spots
+  to bomb is a parity puzzle (XOR over the panels each spot's blast
+  covers). In 4-2 every spot next to (26,12) also covers a finished
+  panel, but (26,9) and (28,9) each reach only one.
 * Light switch `$64` (or `$6E`), world 5: `InitSwitchFlag` C1:2609 sets
   `$7E5AAC` = 1 (for either tile), or `$FFFF` when there is none. Each flame
   cleanup over the switch cell (`$7E5AAE`) flips bit 0
@@ -223,8 +226,13 @@ What looks like conveyors in world 4 is the following:
   under the exit (3,17)). The `$DC` platform runs along those lanes, and
   P1 can ride it (`docs/enemies.md`). The `$36` cells are
   the boarding points that join otherwise unconnected areas: they are
-  the "warp rooms" of 4-2. This is an inference: no code compares a tile
-  with `$36`, and the ride itself was not probed. `World4Update`
+  the "warp rooms" of 4-2. No code compares a tile with `$36`.
+  **[probe]** 4-2 (`stage_41.mss`, bot log): standing on the `$36` does
+  nothing. Stepping toward the lane while the `$DC` waits on the first
+  lane cell boards it. P1 `+2` bit 15 is set while riding, and P1 goes
+  where the platform goes (back and forth) until it steps off onto the
+  far `$36` while the platform waits there. (12,9) to (16,9) and (17,8)
+  to (17,4) took 100 frames each. `World4Update`
   C1:4A16 spawns one more `$DC` when the `$6A` cell's art becomes
   `$0B26` (after bombing `$6A`, position per stage from table C1:CEC6).
 

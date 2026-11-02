@@ -96,7 +96,11 @@ return function(env)
     local c, r, t = e.c, e.r, 0
     local dc, dr = e.dc, e.dr
     local half = e.cpf / 2
-    local function free(cc, rr) return not blocked(g, cc, rr) and not occupied[rr * KEY_W + cc] end
+    local function free(cc, rr)
+      -- $DD track blocks only move along the $4D track (docs/mechanics.md section 7).
+      if e.type == 0xDD then return g[rr] ~= nil and g[rr][cc] == 0x4D end
+      return not blocked(g, cc, rr) and not occupied[rr * KEY_W + cc]
+    end
     local function chooseDir()
       if e.chaser then
         local ddc, ddr = pc - c, pr - r

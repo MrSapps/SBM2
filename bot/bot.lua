@@ -382,11 +382,40 @@ end
 -- Timed BFS from (c0,r0). Moving one tile takes FPT frames; a cell is entered
 -- only if no blast window overlaps the time spent in it. t0 offsets the clock
 -- (for plans that start later). Returns first step direction and length.
+-- World 4 platform lanes (docs/mechanics.md section 7): a $36 cell joins
+-- the $36 across a straight run of solid cells; the $DC platform shuttling
+-- along it carries P1 (+2 bit 15 while riding). rideFail["k>k2"]: we waited
+-- there and no ride came.
+local BOARD = 0x36
+local rideFail, rideWait, rideFrom = {}, nil, nil
+-- Rides come when the platform does: never count on one to escape a blast.
+local allowRide = true
+local function laneEnds(g, c, r)
+  local ends = {}
+  for _, d in ipairs({ { 0, -1 }, { 0, 1 }, { -1, 0 }, { 1, 0 } }) do
+    for i = 1, 12 do
+      local cc, rr = c + i * d[1], r + i * d[2]
+      local t = g[rr] and g[rr][cc]
+      if t == BOARD and i > 1 then ends[#ends + 1] = { cc, rr, i }; break end
+      if t == nil or t < 0x80 then break end
+    end
+  end
+  return ends
+end
+
 local lastBfs  -- {g, goal, avoid}: the last route found, replanned on a pad
 local function bfs(g, c0, r0, goal, avoid, windows, t0)
   t0 = t0 or 0
-  local q, head = { { c0, r0, nil, 0 } }, 1
-  local seen = { [r0 * KEY_W + c0] = true }
+  -- Bucket queue by steps taken: jumps and rides cost several steps.
+  local buckets, dist = { [0] = { { c0, r0, nil } } }, { [r0 * KEY_W + c0] = 0 }
+  local function push(c, r, first, n)
+    local k = r * KEY_W + c
+    if dist[k] and dist[k] <= n then return end
+    dist[k] = n
+    local b = buckets[n]
+    if not b then b = {}; buckets[n] = b end
+    b[#b + 1] = { c, r, first }
+  end
   -- A pad is a node P1 can only leave by a jump, in any direction; where
   -- it lands is learnt (springLand), else assumed 5 cells on.
   local function jump(pc, pr, dir, first, n)
@@ -395,29 +424,45 @@ local function bfs(g, c0, r0, goal, avoid, windows, t0)
     if not land then return end
     local lk = land[2] * KEY_W + land[1]
     local t = t0 + (n + 6) * FPT  -- ~20 frames on the pad + ~70 in the air
-    if not seen[lk] and (walkable(g, land[1], land[2]) or (g[land[2]] and g[land[2]][land[1]] == SPRING))
+    if (walkable(g, land[1], land[2]) or (g[land[2]] and g[land[2]][land[1]] == SPRING))
         and not (windows and hit(windows, lk, t - FPT, t + FPT)) then
-      seen[lk] = true
-      q[#q + 1] = { land[1], land[2], first or dir[3], n + 6 }
+      push(land[1], land[2], first or dir[3], n + 6)
     end
   end
-  while q[head] do
-    local c, r, first, n = table.unpack(q[head]); head = head + 1
-    if g[r][c] == SPRING then
-      for _, dir in ipairs(DIRS) do jump(c, r, dir, first, n) end
-    else
-      if goal(c, r, n) then lastBfs = { g, goal, avoid }; return first, n end
-      for _, dir in ipairs(DIRS) do
-        local cc, rr = c + dir[1], r + dir[2]
-        local k = rr * KEY_W + cc
-        local arrive = t0 + (n + 1) * FPT
-        if not seen[k] and not (avoid and avoid[k]) and (walkable(g, cc, rr) or (g[rr] and g[rr][cc] == SPRING))
-            and not (windows and hit(windows, k, arrive - FPT, arrive + FPT)) then
-          seen[k] = true
-          q[#q + 1] = { cc, rr, first or dir[3], n + 1 }
+  local n, last = 0, 0
+  while n <= last + 20 do
+    local b = buckets[n]
+    local i = 1
+    while b and b[i] do
+      local c, r, first = b[i][1], b[i][2], b[i][3]; i = i + 1
+      if dist[r * KEY_W + c] == n then
+        last = n
+        if g[r][c] == SPRING then
+          for _, dir in ipairs(DIRS) do jump(c, r, dir, first, n) end
+        else
+          if goal(c, r, n) then lastBfs = { g, goal, avoid }; return first, n end
+          if g[r][c] == BOARD and allowRide then
+            local k0 = r * KEY_W + c
+            for _, e in ipairs(laneEnds(g, c, r)) do
+              if not rideFail[k0 .. ">" .. (e[2] * KEY_W + e[1])] then
+                push(e[1], e[2], first or "ride", n + 3 * e[3] + 8)
+              end
+            end
+          end
+          for _, dir in ipairs(DIRS) do
+            local cc, rr = c + dir[1], r + dir[2]
+            local k = rr * KEY_W + cc
+            local arrive = t0 + (n + 1) * FPT
+            if not (avoid and avoid[k]) and (walkable(g, cc, rr) or (g[rr] and g[rr][cc] == SPRING))
+                and not (windows and hit(windows, k, arrive - FPT, arrive + FPT)) then
+              push(cc, rr, first or dir[3], n + 1)
+            end
+          end
         end
       end
     end
+    buckets[n] = nil
+    n = n + 1
   end
   return nil
 end
@@ -517,6 +562,28 @@ local function think()
   -- Locked ($52 bit 0): dying, on the exit, warping, a boss's freeze, ...
   -- Only a death is a death: C0:A675 sets $52 = $0801 (docs/enemies.md).
   local lockv = r16(P1 + P_LOCK)
+  -- Riding a world 4 platform (+2 bit 15): hands off until it drops us.
+  if (r16(P1 + 2) & 0x8000) ~= 0 and (lockv & 1) == 0 then
+    if not rideFrom then
+      local rc, rr = playerTile(); rideFrom = { rc, rr }
+      log(string.format("%6d ride from (%d,%d)", frame, rc, rr))
+    end
+    -- Step off onto the far end's $36 when the platform stops beside it.
+    local rc, rr = playerTile()
+    for _, d in ipairs(DIRS) do
+      local cc, r2 = rc + d[1], rr + d[2]
+      if (cc ~= rideFrom[1] or r2 ~= rideFrom[2]) and r2 >= 0 and cc >= 0
+          and emu.read(MAP + r2 * ROW + cc * 2, WRAM, false) == BOARD then
+        input[d[3]] = true
+      end
+    end
+    step = nil
+    return
+  elseif rideFrom then
+    local rc, rr = playerTile()
+    log(string.format("%6d ride from (%d,%d) ended at (%d,%d)", frame, rideFrom[1], rideFrom[2], rc, rr))
+    rideFrom = nil
+  end
   -- On a pad by pixel position: +$A8 still names the previous cell for a
   -- few frames after a landing.
   local pc0, pr0 = playerTile()
@@ -623,7 +690,7 @@ local function think()
   local stNow = emu.read(0x1A, WRAM, false)
   if stNow ~= savedStage then
     savedStage = stNow
-    softSeen, softGone, springLand, springTry = {}, {}, {}, nil
+    softSeen, softGone, springLand, springTry, rideFail = {}, {}, {}, nil, {}
     stageTicks = ticks
     log(string.format("%6d STAGE %02X", frame, stNow))
     onNextInstruction(function()
@@ -712,6 +779,53 @@ local function think()
     end
   end
   local panelTodo, panelDone = panels()
+  -- Mode 1 panels (worlds 3-5) flip on every blast, so which spots to bomb
+  -- is a parity puzzle: find reachable spots whose blasts together flip
+  -- exactly the unfinished panels (Gaussian elimination over GF(2)).
+  local panelPlan
+  if next(panelTodo) and (r16(0x5D94) & 1) ~= 0 then
+    local idx, np, target = {}, 0, 0
+    for k in pairs(panelTodo) do idx[k] = np; target = target | (1 << np); np = np + 1 end
+    for k in pairs(panelDone) do idx[k] = np; np = np + 1 end
+    local reach, list, head = { [r * KEY_W + c] = true }, { { c, r } }, 1
+    while list[head] do
+      local cc, rr = list[head][1], list[head][2]; head = head + 1
+      for _, d in ipairs(DIRS) do
+        local c2, r2 = cc + d[1], rr + d[2]
+        local k = r2 * KEY_W + c2
+        if not reach[k] and walkable(g, c2, r2) then reach[k] = true; list[#list + 1] = { c2, r2 } end
+      end
+    end
+    local basis = {}  -- pivot bit -> {mask, set of spot keys}
+    local function xorSet(a, b)
+      local o = {}
+      for k in pairs(a) do o[k] = true end
+      for k in pairs(b) do o[k] = not o[k] or nil end
+      return o
+    end
+    for _, cell in ipairs(list) do
+      local m = 0
+      for _, bc in ipairs(blastCells(g, cell[1], cell[2], rangeAt(g, cell[1], cell[2]))) do
+        local i = idx[bc[2] * KEY_W + bc[1]]
+        if i then m = m | (1 << i) end
+      end
+      local set = { [cell[2] * KEY_W + cell[1]] = true }
+      for bit = np - 1, 0, -1 do
+        if m & (1 << bit) ~= 0 then
+          if basis[bit] then m, set = m ~ basis[bit][1], xorSet(set, basis[bit][2])
+          else basis[bit] = { m, set }; break end
+        end
+      end
+    end
+    local t, sol = target, {}
+    for bit = np - 1, 0, -1 do
+      if t & (1 << bit) ~= 0 then
+        if not basis[bit] then sol = nil; break end
+        t, sol = t ~ basis[bit][1], xorSet(sol, basis[bit][2])
+      end
+    end
+    if sol and next(sol) then panelPlan = sol end
+  end
   local here = r * KEY_W + c
   -- Remote bombs: cells their blasts would cover, and whether setting them
   -- off now would hit anything worth it.
@@ -913,6 +1027,7 @@ local function think()
     progressAt = frame
     exploreUntil, stallUntil = frame + 600, frame + 600
     local es = {}
+    for k in pairs(panelTodo) do es[#es + 1] = string.format("panel@(%d,%d)", k % KEY_W, k // KEY_W) end
     for _, d in ipairs(dormant) do es[#es + 1] = string.format("dormant@(%d,%d)", d[1], d[2]) end
     for _, e in ipairs(elist) do
       es[#es + 1] = string.format("%02X@(%d,%d)%s%s%s", e.type, e.c, e.r, e.killable and "k" or "",
@@ -938,6 +1053,7 @@ local function think()
     end
   end
 
+  allowRide = not danger[here]
   if danger[here] then
     plan = "flee"
     dir = bfs(g, c, r, safeGoal(windows), nearEnemy, cw)
@@ -960,8 +1076,11 @@ local function think()
       local why, cells, near = nil, {}, false
       for _, cell in ipairs(blastCells(g, cc, rr, rangeAt(g, cc, rr))) do
         local k = cell[2] * KEY_W + cell[1]
-        if panelDone[k] then return nil end
         local tt = g[cell[2]][cell[1]]
+        if panelPlan and (panelDone[k] or panelTodo[k]) then
+          if not panelPlan[rr * KEY_W + cc] then return nil end
+          why = "obj"
+        elseif panelDone[k] then return nil end
         -- $68: lighting it ($6F) is what kills 3-1's immune $8F enemies.
         if panelTodo[k] or (SOFT[tt] and not softGone[k]) or tt == BARREL or isSwitchOff(tt) or tt == 0x68 or tt == 0x6B then why = "obj" end
         -- A blast pushes an $E2 block one cell on; into a $D3 hole it fills
@@ -993,7 +1112,10 @@ local function think()
       local goal = remoteOn and function(c2, r2, n)
         return safe(c2, r2, n) and not remoteCells[r2 * KEY_W + c2]
       end or safe
-      return bfs(g, cc, rr, goal, nil, combine(w, eWin), t) ~= nil
+      allowRide = false
+      local ok = bfs(g, cc, rr, goal, nil, combine(w, eWin), t) ~= nil
+      allowRide = true
+      return ok
     end
     -- With the remote, one bomb at a time: a remote bomb is never danger, so
     -- a second one placed nearby can seal us in between them.
@@ -1112,6 +1234,30 @@ local function think()
     end
   end
 
+  -- A route over a platform lane starts here: wait on the $36 for the ride.
+  if dir == "ride" then
+    plan, dir, step = "ride", nil, nil
+    if not rideWait or rideWait[1] ~= here then rideWait = { here, frame } end
+    if frame - rideWait[2] > 600 then
+      for _, e in ipairs(laneEnds(g, c, r)) do rideFail[here .. ">" .. (e[2] * KEY_W + e[1])] = true end
+      log(string.format("%6d no ride came at (%d,%d); not again", frame, c, r))
+      rideWait = nil
+    end
+    local tx, ty = tileCentre(c, r)
+    if x < tx - 1 then input.right = true elseif x > tx + 1 then input.left = true end
+    if y < ty - 1 then input.down = true elseif y > ty + 1 then input.up = true end
+    -- Board: step onto the platform while it waits at our end of the lane.
+    for _, ln in ipairs(laneEnds(g, c, r)) do
+      local dc, dr = (ln[1] - c) // ln[3], (ln[2] - r) // ln[3]
+      for _, e in ipairs(elist) do
+        if e.type == 0xDC and e.c == c + dc and e.r == r + dr then
+          input = { [(dc == 1 and "right") or (dc == -1 and "left") or (dr == 1 and "down") or "up"] = true }
+        end
+      end
+    end
+  else
+    rideWait = nil
+  end
   -- Commit to the next tile until its centre is reached, so the plan can't
   -- flip back and forth on a tile boundary.
   if dir and not (step and plan ~= "flee" and plan ~= "dodge") then

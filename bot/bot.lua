@@ -225,6 +225,7 @@ end
 -- stops at solid tiles ($80+); soft blocks, the gate, push blocks ($E2) are
 -- reached (destroyed / pushed) and stop it; so do items, traps and stairs
 -- (floor types $04, $0B, $26).
+local BARREL = 0xD6  -- world 1 barrel ($D6): blown up by a blast
 local BLAST_HITS = { [0xC2] = true, [0xC9] = true, [0xE2] = true }
 local BLAST_ENDS = { [0x04] = true, [0x0B] = true, [0x26] = true }
 local function blastCells(g, c, r, p)
@@ -236,6 +237,25 @@ local function blastCells(g, c, r, p)
       local t = g[rr][cc]
       if t >= 0x80 and t ~= GATE_OPEN then
         if BLAST_HITS[t] then cells[#cells + 1] = { cc, rr, dir } end
+        if t == BARREL then
+          -- BarrelExplode C1:26AA: range-1 blasts on the barrel and on the
+          -- cells 2 away (not where the tile has bit 6 set).
+          cells[#cells + 1] = { cc, rr }
+          for _, d in ipairs(DIRS) do
+            local bc, br = cc + 2 * d[1], rr + 2 * d[2]
+            local centres = { { cc, rr } }
+            if g[br] and g[br][bc] and (g[br][bc] & 0x40) == 0 then centres[2] = { bc, br } end
+            for _, ctr in ipairs(centres) do
+              for _, d2 in ipairs(DIRS) do
+                local nc, nr = ctr[1] + d2[1], ctr[2] + d2[2]
+                if g[nr] and g[nr][nc] and (g[nr][nc] < 0x80 or BLAST_HITS[g[nr][nc]]) then
+                  cells[#cells + 1] = { nc, nr }
+                end
+              end
+              cells[#cells + 1] = ctr
+            end
+          end
+        end
         break
       end
       cells[#cells + 1] = { cc, rr, dir }
@@ -800,7 +820,7 @@ local function think()
         if panelDone[k] then return nil end
         local tt = g[cell[2]][cell[1]]
         -- $68: lighting it ($6F) is what kills 3-1's immune $8F enemies.
-        if panelTodo[k] or (SOFT[tt] and not softGone[k]) or isSwitchOff(tt) or tt == 0x68 or tt == 0x6B then why = "obj" end
+        if panelTodo[k] or (SOFT[tt] and not softGone[k]) or tt == BARREL or isSwitchOff(tt) or tt == 0x68 or tt == 0x6B then why = "obj" end
         -- A blast pushes an $E2 block one cell on; into a $D3 hole it fills
         -- it and opens the way (docs/mechanics.md, push blocks).
         if tt == 0xE2 and cell[3] then

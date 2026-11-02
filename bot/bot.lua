@@ -146,6 +146,9 @@ local function walkable(g, c, r)
   -- stood on (C1:58DE table): conveyors/warps, not hazards as far as known.
   -- $40-$7F are the same floor codes with flag bits (the tile handler only
   -- looks at tile & $3F); $40-$43 are bombs.
+  -- $4C spring pad: launches P1 5 cells in the held direction
+  -- (docs/mechanics.md); off limits until jumps are planned.
+  if t == 0x4C then return false end
   return EMPTY[t] == true or (t >= 0x04 and t < 0x80 and not isBomb(t))
 end
 
@@ -369,7 +372,6 @@ local triesAt = {}        -- rollbacks per snapshot frame (survives re-snapshots
 local function timeLeft() return r16(0x5E10) * 60 + r16(0x5E12) end  -- stage timer
 local playing = false     -- unlocked in a stage since the last lock
 local rollback = false    -- set by think() on a death
-local LOCK_DEATH, lockCount = 60, 0
 local exploreUntil = 0    -- after a rollback, "wait" becomes a random move
 -- Cells where pressing A placed no bomb (stairs, gate cells, ...): no bomb
 -- attempts there until noBombUntil[key].
@@ -399,34 +401,47 @@ local ambushes, ambushHits = 0, 0
 local function liveEnemies() return #enemyTiles() end
 local function score() return r16(0x5DEE) end  -- score / 100
 
+-- Enemy prediction (bot/enemies.lua, rules in docs/enemies.md).
+local Enemies = dofile(BOT_DIR .. "/enemies.lua")({ r16 = r16, rd8 = function(a) return emu.read(a, WRAM, false) end,
+  MAP_W = MAP_W, MAP_H = MAP_H, KEY_W = KEY_W, tileCentre = tileCentre })
+local ROLLOUTS, HORIZON = 12, 420  -- sampled paths per enemy, frames ahead
+local KILL_P = 0.3                 -- bomb for an enemy at this kill chance
+local ENEMY_MARGIN = 6             -- frames of slack around predicted contact
+
+-- a and b both map cell -> list of windows; the overlay looks up both.
+local function combine(a, b)
+  return setmetatable({}, { __index = function(_, k)
+    local x, y = a[k], b[k]
+    if not x then return y elseif not y then return x end
+    local l = {}
+    for i, v in ipairs(x) do l[i] = v end
+    for _, v in ipairs(y) do l[#l + 1] = v end
+    return l
+  end })
+end
+
 local function think()
   input = {}
-  -- A death locks P1 ($52 bit 0) for its whole animation; shorter locks
-  -- (a boss's freeze, warps) aren't deaths, so wait LOCK_DEATH frames.
-  if (r16(P1 + P_LOCK) & 1) ~= 0 then lockCount = lockCount + 1 else lockCount = 0 end
-  if lockCount > 0 and lockCount < LOCK_DEATH and playing then
-    input = {}
-    return
-  end
-  if (r16(P1 + P_LOCK) & 1) ~= 0 then
-    if playing then
+  -- Locked ($52 bit 0): dying, on the exit, warping, a boss's freeze, ...
+  -- Only a death is a death: C0:A675 sets $52 = $0801 (docs/enemies.md).
+  local lockv = r16(P1 + P_LOCK)
+  if (lockv & 1) ~= 0 then
+    if playing and (lockv & 0xF801) == 0x0801 then  -- not $1801 (spring jump)
       playing = false
       if r16(P1 + 0xA8) ~= r16(0x5D72) then
         deaths = deaths + 1
         -- A time-up can't be fixed by replaying the last few seconds.
         rollback = timeLeft() > 1
       end
-    end
-    if step ~= false then
       local es = {}
       for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
         if (r16(base) & 0xF000) == 0x9000 then
-          es[#es + 1] = string.format("%04X(%d,%d)", base, r16(base + P_X), r16(base + P_Y))
+          es[#es + 1] = string.format("%04X:%02X(%d,%d)", base, r16(base + 0x7E) & 0xFF, r16(base + P_X), r16(base + P_Y))
         end
       end
       local st = {}
       for o = 0xE0, 0xFF do st[#st + 1] = string.format("%02X", emu.read(P1 + o, WRAM, false)) end
-      log(string.format("%6d DEATH/lock at px(%d,%d) enemies %s stats[E0..FF] %s after: %s", frame,
+      log(string.format("%6d DEATH at px(%d,%d) enemies %s stats[E0..FF] %s after: %s", frame,
         r16(P1 + P_X), r16(P1 + P_Y), table.concat(es, " "), table.concat(st, " "), table.concat(recent, " | ")))
       writeFile(string.format("%s/death_%06d.png", OUT, frame), emu.takeScreenshot())
     end
@@ -493,21 +508,39 @@ local function think()
   local windows = blastWindows(g)
   local danger = {}
   for k in pairs(windows) do danger[k] = true end
-  -- All live enemies are bomb targets; ones parked on hard tiles (the castle
-  -- gate) can't be walked up to, so hunting only considers the rest.
+  -- Enemies: predicted paths give contact windows (eWin) and kill chances.
+  -- enemies/walkers (cells) still drive the exit and hunt plans.
+  local elist = Enemies.read(g)
+  local samples = Enemies.rollouts(g, elist, c, r, ROLLOUTS, HORIZON)
+  local eWin = Enemies.windows(samples, elist, HORIZON, ENEMY_MARGIN)
+  local cw = combine(windows, eWin)   -- blasts + enemies, for routes
   local enemies, walkers = {}, {}
-  for _, e in ipairs(enemyTiles()) do
-    -- The object parked in the gate cell is the gate itself (C1:2ABF).
-    if e[1] ~= gc or e[2] ~= gr then
-      enemies[#enemies + 1] = e
-      if not HARD[g[e[2]][e[1]]] then walkers[#walkers + 1] = e end
+  local reach = {}                    -- cells a killable enemy may pass through
+  for i, e in ipairs(elist) do
+    if not e.gadget and (e.c ~= gc or e.r ~= gr) then
+      enemies[#enemies + 1] = { e.c, e.r }
+      if not HARD[g[e.r][e.c]] then walkers[#walkers + 1] = { e.c, e.r } end
+    end
+    if e.killable then
+      for _, path in ipairs(samples[i]) do
+        for _, iv in ipairs(path) do reach[iv[1]] = true end
+      end
     end
   end
-  -- Enemy tiles and their neighbours: never path through them.
+  -- Cells harmful enemies hold now (or are entering): fallback routes avoid them.
+  local enemyNow = {}
+  for _, e in ipairs(elist) do
+    if e.harmful then
+      enemyNow[e.r * KEY_W + e.c] = true
+      if e.moving then enemyNow[e.tr * KEY_W + e.tc] = true end
+    end
+  end
+  -- Cells an enemy may be in within the next 1.5 tiles' walk: never step there.
   local nearEnemy = {}
-  for _, e in ipairs(enemies) do
-    nearEnemy[e[2] * KEY_W + e[1]] = true
-    for _, d in ipairs(DIRS) do nearEnemy[(e[2] + d[2]) * KEY_W + e[1] + d[1]] = true end
+  for k, l in pairs(eWin) do
+    for _, win in ipairs(l) do
+      if win[1] <= FPT * 1.5 and win[2] >= 0 then nearEnemy[k] = true; break end
+    end
   end
   local panelTodo, panelDone = panels()
   local here = r * KEY_W + c
@@ -629,41 +662,47 @@ local function think()
     log(string.format("%6d stalled (%s); exploring", frame, sig))
   end
   local plan, dir
-  local function safeGoal(w)
-    return function(cc, rr) return not w[rr * KEY_W + cc] end
+  local function safeGoal(w, t0)
+    return function(cc, rr, n)
+      local k = rr * KEY_W + cc
+      local t = (t0 or 0) + n * FPT
+      return not w[k] and not hit(eWin, k, t - FPT, t + 90)
+    end
   end
 
   if danger[here] then
     plan = "flee"
-    dir = bfs(g, c, r, safeGoal(windows), nearEnemy, windows)
-      or bfs(g, c, r, safeGoal(windows), nil, windows)
-      or bfs(g, c, r, safeGoal(windows))
+    dir = bfs(g, c, r, safeGoal(windows), nearEnemy, cw)
+      or bfs(g, c, r, safeGoal(windows), enemyNow, windows)
+      or bfs(g, c, r, function(cc, rr) return not windows[rr * KEY_W + cc] end, enemyNow)
   elseif nearEnemy[here] then
     plan = "dodge"
-    dir = bfs(g, c, r, function(cc, rr)
-      return not nearEnemy[rr * KEY_W + cc] and not danger[rr * KEY_W + cc]
-    end, nil, windows)
+    dir = bfs(g, c, r, safeGoal(windows), nil, cw)
+      or bfs(g, c, r, function(cc, rr)
+        return not nearEnemy[rr * KEY_W + cc] and not danger[rr * KEY_W + cc]
+      end, nil, windows)
   else
     -- Is bombing here useful (a soft block or enemy in reach)?
     -- Is bombing at (cc,rr) useful? "obj" (soft block, switch, panel),
     -- "enemy" (an enemy on or next to the blast), or nil. A blast that would
     -- re-toggle a finished panel is never useful.
-    local function targetsInReach(cc, rr)
+    local function targetsInReach(cc, rr, t)
       if g[rr][cc] == 0x66 then return nil end  -- no bombs on stairs
       if (noBombUntil[rr * KEY_W + cc] or 0) > frame then return nil end
-      local why = nil
+      local why, cells, near = nil, {}, false
       for _, cell in ipairs(blastCells(g, cc, rr, RANGE)) do
         local k = cell[2] * KEY_W + cell[1]
         if panelDone[k] then return nil end
-        local t = g[cell[2]][cell[1]]
-        if panelTodo[k] or SOFT[t] or isSwitchOff(t) then why = "obj" end
-        -- Enemies wander, so one tile off the blast is close enough to try.
-        if not why then
-          -- All enemies, including ones built into walls (2-1's furnace).
-          for _, e in ipairs(enemies) do
-            if math.abs(e[1] - cell[1]) + math.abs(e[2] - cell[2]) <= 1 then why = "enemy" end
-          end
-        end
+        local tt = g[cell[2]][cell[1]]
+        -- $68: lighting it ($6F) is what kills 3-1's immune $8F enemies.
+        if panelTodo[k] or SOFT[tt] or isSwitchOff(tt) or tt == 0x68 then why = "obj" end
+        cells[k] = true
+        if reach[k] then near = true end
+      end
+      if not why and near then
+        local t0 = (t or 0) + NEW_FUSE
+        local _, best = Enemies.killChance(samples, elist, cells, t0 - 4, t0 + FLAME_FRAMES)
+        if best >= KILL_P then why = "enemy" end
       end
       return why
     end
@@ -671,10 +710,10 @@ local function think()
     -- will ever touch, without being in any blast on the way?
     local function canEscape(cc, rr, t)
       local w = withBomb(g, windows, cc, rr, NEW_FUSE + t)
-      return bfs(g, cc, rr, safeGoal(w), nearEnemy, w, t) ~= nil
+      return bfs(g, cc, rr, safeGoal(w, t), nil, combine(w, eWin), t) ~= nil
     end
     local haveBomb = emu.read(P1 + P_BOMBS_LEFT, WRAM, false) > 0
-    local why = haveBomb and targetsInReach(c, r)
+    local why = haveBomb and targetsInReach(c, r, 0)
     if why == "enemy" and frame < ambushHold then why = nil end
     if why and canEscape(c, r, 0) then
       plan = "bomb"
@@ -689,23 +728,24 @@ local function think()
       input.a = frame % 2 == 0
     else
       plan = "item"
-      dir = bfs(g, c, r, function(cc, rr) return g[rr][cc] == ITEM end, nearEnemy, windows)
+      dir = bfs(g, c, r, function(cc, rr) return g[rr][cc] == ITEM end, nearEnemy, cw)
       if not dir and haveBomb then
         -- Objectives (blocks, panels) first; enemy-only spots after.
         plan = "seek"
         for _, want in ipairs({ "obj", "enemy" }) do
           dir = bfs(g, c, r, function(cc, rr, n)
             if (cc == c and rr == r) or danger[rr * KEY_W + cc] then return false end
-            local why = targetsInReach(cc, rr)
+            local why = targetsInReach(cc, rr, n * FPT)
             return why == want and (want == "obj" or frame >= ambushHold)
               and canEscape(cc, rr, n * FPT)
-          end, nearEnemy, windows)
+          end, nearEnemy, cw)
           if dir then break end
         end
       end
       if not dir and gateOpen and #walkers == 0 then
         plan = "exit"
-        dir = bfs(g, c, r, function(cc, rr) return g[rr][cc] == GATE_OPEN end, nil, windows)
+        dir = bfs(g, c, r, function(cc, rr) return g[rr][cc] == GATE_OPEN end, nil, cw)
+          or bfs(g, c, r, function(cc, rr) return g[rr][cc] == GATE_OPEN end, nil, windows)
       end
       if not dir and #walkers > 0 and haveBomb then
         -- Nothing to bomb from here: close in on the nearest enemy.
@@ -715,7 +755,7 @@ local function think()
             if math.abs(e[1] - cc) + math.abs(e[2] - rr) <= 3 then return true end
           end
           return false
-        end, nearEnemy, windows)
+        end, nearEnemy, cw)
       end
       if frame < stallUntil and plan ~= "bomb" then dir = nil end
       if not dir and frame < exploreUntil then
@@ -910,6 +950,8 @@ local function onFrame()
     inputlog.save(OUT .. "/run.inputs")
     emu.stop(6)
   elseif frame >= FRAMES then
+    -- For bot/bench.py: stage, score/soft blocks/panels left, live enemies.
+    log(string.format("%6d END %02X %s %d", frame, emu.read(0x1A, WRAM, false), progressSig or "-", liveEnemies()))
     flushLog()
     dumpCdl(string.format("%s/seg_%06d.cdl", OUT, FRAME0))
     writeFile(OUT .. "/ckpt.txt", tostring(frame))

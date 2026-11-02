@@ -381,6 +381,8 @@ local STALL, visits = 1500, {}
 local progressSig, progressAt = nil, 0
 local stallUntil = 0      -- explore overrides seek/hunt/item until then
 local ASSIST, lastProgress = tonumber(os.getenv("SBM2_ASSIST") or "") or 6000, 0
+local NOASSIST = os.getenv("SBM2_NOASSIST") == "1"  -- benchmarks: the bot on its own
+if NOASSIST then ASSIST = math.huge end
 local ticks = 0           -- frames run, rollbacks included (frame rewinds)
 local HEART_DEATHS, deathsAtProgress, heartStage = 20, 0, nil
 local seenSigs = {}
@@ -460,7 +462,15 @@ local function think()
   local stNow = emu.read(0x1A, WRAM, false)
   if stNow ~= savedStage then
     savedStage = stNow
-    onNextInstruction(function() inputlog.saveState(OUT .. "/stage.mss", emu.createSavestate()) end)
+    log(string.format("%6d STAGE %02X", frame, stNow))
+    onNextInstruction(function()
+      local data = emu.createSavestate()
+      inputlog.saveState(OUT .. "/stage.mss", data)
+      -- A library of stage starts (bot/bench.py collects them).
+      local lib = string.format("%s/stage_%02X.mss", OUT, stNow)
+      local fh = io.open(lib, "rb")
+      if fh then fh:close() else inputlog.saveState(lib, data) end
+    end)
   end
   -- Lives assist (logged): a game over restarts the whole world, so keep
   -- lives ($1C6C) topped up; deaths are still retried by rollback first.
@@ -517,7 +527,7 @@ local function think()
   -- P1 at one heart (+$EF; C0:A5C9 spends it on a hit for brief
   -- invincibility) for the rest of the stage, rollbacks included.
   local stage = emu.read(0x1A, WRAM, false)
-  if heartStage ~= stage and deaths - deathsAtProgress >= HEART_DEATHS then
+  if not NOASSIST and heartStage ~= stage and deaths - deathsAtProgress >= HEART_DEATHS then
     heartStage = stage
     local msg = string.format("frame %d stage %02X: heart assisted (%s)", frame, stage, sig)
     log("ASSIST " .. msg)
@@ -528,7 +538,7 @@ local function think()
   end
   local st = r16(0x5D94)
   if st ~= 0xFFFF and (st & 0x8000) == 0 and next(panelTodo) ~= nil
-      and (ticks - lastProgress > ASSIST or timeLeft() < 30)
+      and not NOASSIST and (ticks - lastProgress > ASSIST or timeLeft() < 30)
       and (#walkers == 0 or ticks - lastProgress > 2 * ASSIST) then
     inputlog.write16(0x5D94, st | 0x8000)   -- logged: replays can't infer it
     local msg = string.format("frame %d world %d: panels assisted (%s)", frame, lastWorld + 1, sig)
@@ -538,7 +548,7 @@ local function think()
   -- Enemy assist (logged): enemies we can't wear down (high or immune $7F
   -- hit points, +$43, see EnemyHit C1:1EE2) drop to one hit point under the
   -- same conditions, so the next blast kills them. The gate object is left.
-  if #enemies > 0 and (ticks - lastProgress > ASSIST or timeLeft() < 60) then
+  if not NOASSIST and #enemies > 0 and (ticks - lastProgress > ASSIST or timeLeft() < 60) then
     for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
       local hp = emu.read(base + 0x43, WRAM, false)
       if (r16(base) & 0xF000) == 0x9000 and (r16(base + 4) & 0x8000) == 0 and hp > 1 then
@@ -594,7 +604,7 @@ local function think()
     local st2 = r16(0x5D94)
     if st2 ~= 0xFFFF and (st2 & 0x8000) == 0 then inputlog.write16(0x5D94, st2 | 0x8000) end
   end
-  if #enemies > 0 and (forceStage == stage or timeLeft() < 20) then
+  if not NOASSIST and #enemies > 0 and (forceStage == stage or timeLeft() < 20) then
     for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
       local t = r16(base + 0x7E)
       if (r16(base) & 0xF000) == 0x9000 and (r16(base + 4) & 0x8000) == 0 and t ~= 0x90 and t ~= 0x98 then

@@ -149,6 +149,8 @@ local function walkable(g, c, r)
   -- $4C spring pad: launches P1 5 cells in the held direction
   -- (docs/mechanics.md); off limits until jumps are planned.
   if t == 0x4C then return false end
+  -- $4B/$63 traps cost a heart or a life (world 5).
+  if t == 0x4B or t == 0x63 then return false end
   return EMPTY[t] == true or (t >= 0x04 and t < 0x80 and not isBomb(t))
 end
 
@@ -173,6 +175,11 @@ local FPT = 20                -- frames per tile walked (measured 17-23 at base 
 -- without a fuse change, treat them as obstacles that only a chain reaction
 -- can set off.
 local FROZEN, fuseSeen = 120, {}
+local softSeen, softGone = {}, {}  -- world 2 regrowth (think)
+-- Remote control (P1 +$F3 bit 0): bombs never time out; each B press sets off
+-- the oldest (docs/mechanics.md). They count as far-off until we press B.
+local REMOTE_T, remoteOn = 100000, false
+local stallSig  -- progress signature at the last stall (think)
 
 -- Live bombs from the bomb table: {c, r, t (frames to explosion), power}.
 local function readBombs(g)
@@ -193,17 +200,19 @@ local function readBombs(g)
       elseif (now - seen[2]) & 0xFFFF > FROZEN and t > 0 then
         t = 100000
       end
+      if remoteOn and t > 0 then t = REMOTE_T end
       -- Blast length = +7 + 1 (C0:3386).
-      local b = { c, r, t, emu.read(base + 7, WRAM, false) + 1 }
+      local b = { c, r, t, emu.read(base + 7, WRAM, false) + 1, remoteOn and t == REMOTE_T }
       list[#list + 1] = b
       byCell[r * KEY_W + c] = b
     end
   end
-  -- Bombs drawn on the map but missing from the table: assume they're close.
+  -- Bombs drawn on the map but missing from the table (world 2's grey cubes)
+  -- never go off by themselves: obstacles a chain blast may still set off.
   for r = 0, MAP_H - 1 do
     for c = 0, MAP_W - 1 do
       if isBomb(g[r][c]) and not byCell[r * KEY_W + c] then
-        local b = { c, r, 30, RANGE }
+        local b = { c, r, 100000, RANGE }
         list[#list + 1] = b
         byCell[r * KEY_W + c] = b
       end
@@ -212,7 +221,12 @@ local function readBombs(g)
   return list, byCell
 end
 
--- Cells a bomb at (c,r) with power p reaches.
+-- Cells a bomb at (c,r) with power p reaches (docs/mechanics.md): a blast
+-- stops at solid tiles ($80+); soft blocks, the gate, push blocks ($E2) are
+-- reached (destroyed / pushed) and stop it; so do items, traps and stairs
+-- (floor types $04, $0B, $26).
+local BLAST_HITS = { [0xC2] = true, [0xC9] = true, [0xE2] = true }
+local BLAST_ENDS = { [0x04] = true, [0x0B] = true, [0x26] = true }
 local function blastCells(g, c, r, p)
   local cells = { { c, r } }
   for _, dir in ipairs(DIRS) do
@@ -220,9 +234,12 @@ local function blastCells(g, c, r, p)
       local cc, rr = c + dir[1] * k, r + dir[2] * k
       if rr < 0 or rr >= MAP_H or cc < 0 or cc >= MAP_W then break end
       local t = g[rr][cc]
-      if HARD[t] and not BLAST_STOP[t] then break end
-      cells[#cells + 1] = { cc, rr }
-      if SOFT[t] or BLAST_STOP[t] then break end
+      if t >= 0x80 and t ~= GATE_OPEN then
+        if BLAST_HITS[t] then cells[#cells + 1] = { cc, rr, dir } end
+        break
+      end
+      cells[#cells + 1] = { cc, rr, dir }
+      if t < 0x80 and BLAST_ENDS[t & 0x3F] then break end
     end
   end
   return cells
@@ -260,13 +277,30 @@ local function blastWindows(g, extra)
     w[k][#w[k] + 1] = { t0, t1 }
   end
   for i, b in ipairs(bombs) do
-    for _, cell in ipairs(blastCells(g, b[1], b[2], b[4])) do
-      add(cell[2] * KEY_W + cell[1], times[i] - 4, times[i] + FLAME_FRAMES)
+    -- Remote and frozen bombs only go off when B is pressed or a blast
+    -- reaches them (chained above); until then they are just obstacles.
+    if times[i] < REMOTE_T then
+      for _, cell in ipairs(blastCells(g, b[1], b[2], b[4])) do
+        add(cell[2] * KEY_W + cell[1], times[i] - 4, times[i] + FLAME_FRAMES)
+      end
     end
   end
   for r = 0, MAP_H - 1 do
     for c = 0, MAP_W - 1 do
       if isFlame(g[r][c]) then add(r * KEY_W + c, -FLAME_FRAMES, FLAME_FRAMES // 2) end
+    end
+  end
+  -- World 2 fuse lines: once a bomb has gone off in the furnace ($5D5C bit
+  -- 0), every $0E cell turns to flame when $5D5E (counted down each frame)
+  -- runs out, and again every $280 frames (C1:4922).
+  if emu.read(0x1A, WRAM, false) >> 4 == 2 and (r16(0x5D5C) & 1) ~= 0 then
+    local t = r16(0x5D5E)
+    if t <= 240 then
+      for r = 0, MAP_H - 1 do
+        for c = 0, MAP_W - 1 do
+          if g[r][c] == 0x0E then add(r * KEY_W + c, t - 8, t + FLAME_FRAMES) end
+        end
+      end
     end
   end
   lastBombs, lastTimes = bombs, times
@@ -276,6 +310,10 @@ end
 -- windows (from blastWindows(g) this frame) plus a bomb placed at (c,r)
 -- going off at tfire, or earlier if an existing blast reaches it. Bombs it
 -- reaches go off with it. Returns an overlay; windows is not modified.
+-- Blast length of a bomb P1 places at (c,r): standing on $14 gives 9
+-- (world 1, docs/mechanics.md).
+local function rangeAt(g, c, r) return g[r][c] == 0x14 and math.max(RANGE, 9) or RANGE end
+
 local function withBomb(g, windows, c, r, tfire)
   for _, win in ipairs(windows[r * KEY_W + c] or {}) do
     if win[2] >= 0 and win[1] + 4 < tfire then tfire = math.max(0, win[1] + 4) end
@@ -287,7 +325,7 @@ local function withBomb(g, windows, c, r, tfire)
     l[#l + 1] = { tfire - 4, tfire + FLAME_FRAMES }
     rawset(w, k, l)
   end
-  local cells = blastCells(g, c, r, RANGE)
+  local cells = blastCells(g, c, r, rangeAt(g, c, r))
   for _, cell in ipairs(cells) do add(cell[2] * KEY_W + cell[1]) end
   for i, b in ipairs(lastBombs) do
     if lastTimes[i] > tfire then
@@ -420,6 +458,7 @@ local function combine(a, b)
   end })
 end
 
+local nextDetonate = 0
 local function think()
   input = {}
   -- Locked ($52 bit 0): dying, on the exit, warping, a boss's freeze, ...
@@ -441,8 +480,28 @@ local function think()
       end
       local st = {}
       for o = 0xE0, 0xFF do st[#st + 1] = string.format("%02X", emu.read(P1 + o, WRAM, false)) end
-      log(string.format("%6d DEATH at px(%d,%d) enemies %s stats[E0..FF] %s after: %s", frame,
-        r16(P1 + P_X), r16(P1 + P_Y), table.concat(es, " "), table.concat(st, " "), table.concat(recent, " | ")))
+      -- Cause: flame under P1, or an enemy in P1's cell (contact), else other.
+      local pcell = r16(P1 + 0xA8)
+      local cause = isFlame(emu.read(MAP + pcell, WRAM, false)) and "blast" or "other"
+      for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
+        if (r16(base) & 0xF000) == 0x9000 and r16(base + 0xA8) == pcell then
+          cause = string.format("contact:%02X", r16(base + 0x7E) & 0xFF)
+        end
+      end
+      local bs = {}
+      for i = 0, BOMB_SLOTS - 1 do
+        local base = BOMBS + i * BOMB_STRIDE
+        if (emu.read(base + 1, WRAM, false) & 0x80) ~= 0 then
+          local cell = r16(base + 2)
+          bs[#bs + 1] = string.format("(%d,%d)f%d/%02X", (cell & 0x3F) // 2, cell >> 6,
+            emu.read(base + 4, WRAM, false), emu.read(base + 1, WRAM, false))
+        end
+      end
+      for _, b in ipairs(lastBombs or {}) do bs[#bs + 1] = string.format("seen(%d,%d)t%d", b[1], b[2], b[3]) end
+      cause = cause .. " bombs " .. table.concat(bs, ",")
+      log(string.format("%6d DEATH %s at px(%d,%d) enemies %s", frame, cause,
+        r16(P1 + P_X), r16(P1 + P_Y), table.concat(es, " ")) .. string.format(" stats[E0..FF] %s after: %s",
+        table.concat(st, " "), table.concat(recent, " | ")))
       writeFile(string.format("%s/death_%06d.png", OUT, frame), emu.takeScreenshot())
     end
     step = false
@@ -477,6 +536,7 @@ local function think()
   local stNow = emu.read(0x1A, WRAM, false)
   if stNow ~= savedStage then
     savedStage = stNow
+    softSeen, softGone = {}, {}
     log(string.format("%6d STAGE %02X", frame, stNow))
     onNextInstruction(function()
       local data = emu.createSavestate()
@@ -504,6 +564,7 @@ local function think()
   local gateOpen = g[gr] ~= nil and gate ~= 0 and g[gr][gc] == 0x49  -- open gate tile (C1:41A8 via $09)
   if gateOpen then g[gr][gc] = GATE_OPEN end
   RANGE = emu.read(P1 + P_FIRE, WRAM, false) + 1
+  remoteOn = (emu.read(P1 + 0xF3, WRAM, false) & 1) ~= 0
   local c, r, x, y = playerTile()
   local windows = blastWindows(g)
   local danger = {}
@@ -544,7 +605,43 @@ local function think()
   end
   local panelTodo, panelDone = panels()
   local here = r * KEY_W + c
+  -- Remote bombs: cells their blasts would cover, and whether setting them
+  -- off now would hit anything worth it.
+  local remoteCells, remoteWorth = {}, false
+  for _, b in ipairs(lastBombs) do
+    if b[5] then
+      for _, cell in ipairs(blastCells(g, b[1], b[2], b[4])) do
+        local k = cell[2] * KEY_W + cell[1]
+        remoteCells[k] = true
+        local t = g[cell[2]][cell[1]]
+        if (SOFT[t] and not softGone[k]) or panelTodo[k] or t == 0x68 or t == 0x6B or t == 0xE2 then remoteWorth = true end
+      end
+    end
+  end
+  if next(remoteCells) then
+    for _, e in ipairs(elist) do
+      if e.killable and (remoteCells[e.r * KEY_W + e.c] or (e.moving and remoteCells[e.tr * KEY_W + e.tc])) then
+        remoteWorth = true
+      end
+    end
+    if emu.read(P1 + P_BOMBS_LEFT, WRAM, false) == 0 then remoteWorth = true end
+    if remoteWorth and not remoteCells[here] and not nearEnemy[here] and frame >= nextDetonate then
+      input.b = true
+      nextDetonate = frame + 20
+      log(string.format("%6d detonate", frame))
+    end
+  end
   visits[here] = (visits[here] or 0) + 1
+  -- World 2 soft blocks grow back (docs/mechanics.md): one already blown
+  -- up is not worth bombing again.
+  if emu.read(0x1A, WRAM, false) >> 4 == 2 then
+    for rr = 0, MAP_H - 1 do
+      for cc = 0, MAP_W - 1 do
+        local k = rr * KEY_W + cc
+        if SOFT[g[rr][cc]] then softSeen[k] = true elseif softSeen[k] then softGone[k] = true end
+      end
+    end
+  end
   local soft, todo = 0, 0
   for rr = 0, MAP_H - 1 do for cc = 0, MAP_W - 1 do if SOFT[g[rr][cc]] then soft = soft + 1 end end end
   for _ in pairs(panelTodo) do todo = todo + 1 end
@@ -655,11 +752,19 @@ local function think()
       end
     end
   end
-  if sig ~= progressSig then progressSig, progressAt = sig, frame
+  if sig ~= progressSig then progressSig, progressAt, stallSig = sig, frame, nil
   elseif frame - progressAt > STALL then
     progressAt = frame
     exploreUntil, stallUntil = frame + 600, frame + 600
     log(string.format("%6d stalled (%s); exploring", frame, sig))
+    -- Two stalls in a row with no progress between: wedged (own remote
+    -- bombs, a dead end). Go back as after a death and try something else.
+    if stallSig == sig and timeLeft() > 1 then
+      log(string.format("%6d stuck at (%d,%d); rolling back", frame, c, r))
+      rollback, stallSig = true, nil
+    else
+      stallSig = sig
+    end
   end
   local plan, dir
   local function safeGoal(w, t0)
@@ -690,12 +795,18 @@ local function think()
       if g[rr][cc] == 0x66 then return nil end  -- no bombs on stairs
       if (noBombUntil[rr * KEY_W + cc] or 0) > frame then return nil end
       local why, cells, near = nil, {}, false
-      for _, cell in ipairs(blastCells(g, cc, rr, RANGE)) do
+      for _, cell in ipairs(blastCells(g, cc, rr, rangeAt(g, cc, rr))) do
         local k = cell[2] * KEY_W + cell[1]
         if panelDone[k] then return nil end
         local tt = g[cell[2]][cell[1]]
         -- $68: lighting it ($6F) is what kills 3-1's immune $8F enemies.
-        if panelTodo[k] or SOFT[tt] or isSwitchOff(tt) or tt == 0x68 then why = "obj" end
+        if panelTodo[k] or (SOFT[tt] and not softGone[k]) or isSwitchOff(tt) or tt == 0x68 or tt == 0x6B then why = "obj" end
+        -- A blast pushes an $E2 block one cell on; into a $D3 hole it fills
+        -- it and opens the way (docs/mechanics.md, push blocks).
+        if tt == 0xE2 and cell[3] then
+          local nc, nr = cell[1] + cell[3][1], cell[2] + cell[3][2]
+          if g[nr] and g[nr][nc] == 0xD3 then why = "obj" end
+        end
         cells[k] = true
         if reach[k] then near = true end
       end
@@ -710,7 +821,13 @@ local function think()
     -- will ever touch, without being in any blast on the way?
     local function canEscape(cc, rr, t)
       local w = withBomb(g, windows, cc, rr, NEW_FUSE + t)
-      return bfs(g, cc, rr, safeGoal(w, t), nil, combine(w, eWin), t) ~= nil
+      -- With the remote, the end cell must also be clear of the remote
+      -- bombs' blasts, or setting them off later would mean dying.
+      local safe = safeGoal(w, t)
+      local goal = remoteOn and function(c2, r2, n)
+        return safe(c2, r2, n) and not remoteCells[r2 * KEY_W + c2]
+      end or safe
+      return bfs(g, cc, rr, goal, nil, combine(w, eWin), t) ~= nil
     end
     local haveBomb = emu.read(P1 + P_BOMBS_LEFT, WRAM, false) > 0
     local why = haveBomb and targetsInReach(c, r, 0)
@@ -726,6 +843,10 @@ local function think()
       if why == "enemy" and not ambush then ambushStart = true end
       -- Bomb placement is edge-triggered: press on alternate frames.
       input.a = frame % 2 == 0
+    elseif remoteCells[here] and remoteWorth then
+      plan = "clear"
+      dir = bfs(g, c, r, function(cc, rr) return not remoteCells[rr * KEY_W + cc] and not windows[rr * KEY_W + cc] end,
+        nearEnemy, cw)
     else
       plan = "item"
       dir = bfs(g, c, r, function(cc, rr) return g[rr][cc] == ITEM end, nearEnemy, cw)
@@ -793,7 +914,7 @@ local function think()
       input[steer(step.dir, x, y, step.c, step.r)] = true
       -- Once on the target tile, keep moving toward its centre.
       if c == step.tc and r == step.tr then
-        input = { a = input.a }
+        input = { a = input.a, b = input.b }
         if x < tx - 1 then input.right = true elseif x > tx + 1 then input.left = true end
         if y < ty - 1 then input.down = true elseif y > ty + 1 then input.up = true end
       end

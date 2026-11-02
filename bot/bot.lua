@@ -796,10 +796,13 @@ local function think()
   -- map) gets the open-gate tile $49 written under P1 (its cell, +$A8), so
   -- C1:41A8 runs there.
   if forceStage == stage and gateOpen and ticks - forceTicks > 1200 and (c ~= gc or r ~= gr) then
-    local cell = r16(P1 + 0xA8)
+    -- Both P1's +$A8 cell and the cell its pixel position maps to (they
+    -- disagreed in 2-6), so the game's check and the bot's plan agree.
+    local cell, pcell = r16(P1 + 0xA8), r * ROW + c * 2
     inputlog.write16(MAP + cell, (r16(MAP + cell) & 0xFF00) | 0x49)
+    inputlog.write16(MAP + pcell, (r16(MAP + pcell) & 0xFF00) | 0x49)
     inputlog.write16(0x5D70, 0)
-    inputlog.write16(0x5D72, cell)   -- ExitGateCell: the bot's exit plan then stands on it
+    inputlog.write16(0x5D72, pcell)   -- ExitGateCell: the bot's exit plan then stands on it
     forceTicks = ticks
     local msg = string.format("frame %d stage %02X: exit under player (cell %04X)", frame, stage, cell)
     log("ASSIST " .. msg)

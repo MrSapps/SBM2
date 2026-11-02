@@ -453,7 +453,7 @@ static void ind8_set(uint8_t dp, uint16_t y, uint8_t v) { WriteLong8(dp_ptr(dp) 
 static void ind16_set(uint8_t dp, uint16_t y, uint16_t v) { WriteLong16(dp_ptr(dp) + y, v); }
 
 /* C0:A077  Screen position = object x/y + the piece's signed dx/dy. Leaves
- * $4E = dy (word), A = y, Y = $84, flags from the add. */
+ * $4E = dy (word), A = y, Y = $84, C/V from the add, N/Z from Y. */
 static void SpritePieceOffset_core(void)
 {
     Cpu *c = g_cpu;
@@ -465,7 +465,7 @@ static void SpritePieceOffset_core(void)
     c->a = adc16(ind16(0x6A, 0x18), dy, 0);
     ind16_set(0x6A, 0x84, c->a);
     c->y = 0x84;
-    SetNZ16(c->a);
+    SetNZ16(c->y);   /* ldy #$0084 is the last flag setter */
 }
 
 static void SpritePieceOffset(void)
@@ -864,7 +864,7 @@ static void ObjFlashTick(void)
     c->a = pal == 7 ? ind16(0x6A, 0x2A) : 7;
     c->y = 6;
     ind16_set(0x6A, 6, c->a);
-    SetNZ16(c->a);
+    SetNZ16(c->y);   /* the last flag setter is ldy #$0006 */
     store_cv();
     Ret_RTL();
 }

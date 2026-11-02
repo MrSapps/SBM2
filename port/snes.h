@@ -1,7 +1,7 @@
 /* SNES bus for the port's verification runtime: HiROM cartridge, WRAM, the
  * CPU-side registers that affect game logic, DMA, and a coarse video timing
- * model (master clocks, scanlines, vblank, NMI, auto-joypad). No rendering,
- * no SPC700: the APU ports are faked (see snes.c). */
+ * model (master clocks, scanlines, vblank, NMI, auto-joypad). Rendering only
+ * with a Ppu attached (ppu.h); no SPC700: the APU ports are faked (snes.c). */
 #ifndef SNES_H
 #define SNES_H
 #include <stdint.h>
@@ -21,6 +21,7 @@ typedef struct Snes {
     uint32_t sram_size;
     uint8_t wram[0x20000];
     uint8_t ppu[0x40];          /* last value written to $2100-$213F */
+    struct Ppu *ppu_state;      /* front-end only (ppu.h); NULL in the verifier */
     uint8_t mdr;                /* open bus */
 
     /* timing */

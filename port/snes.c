@@ -45,6 +45,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "snes.h"
+#include "ppu.h"
 
 enum { LINE = 1364, LINES = 262, VBLANK_LINE = 225, REFRESH_AT = 538,
        REFRESH = 40, AUTOJOY_AT = 130, AUTOJOY_LEN = 4224,
@@ -67,7 +68,9 @@ static void line_start(Snes *s)
         if (!s->framestep) s->rdnmi &= 0x7F;
     }
     if (s->framestep) return;
+    ppu_line(s, s->vcount);
     if (s->vcount == VBLANK_LINE) {
+        ppu_vblank(s);
         s->frame++;
         s->rdnmi |= 0x80;
         if (s->nmitimen & 0x80) raise_nmi(s, s->clock - s->hclock + NMI_H);
@@ -317,7 +320,7 @@ static uint8_t bbus_read(Snes *s, uint8_t r)
 
 static void bbus_write(Snes *s, uint8_t r, uint8_t v)
 {
-    if (r < 0x40) { s->ppu[r] = v; return; }
+    if (r < 0x40) { s->ppu[r] = v; ppu_write(s, r, v); return; }
     if (r < 0x80) { apu_write(s, r & 3, v); return; }
     switch (r) {
     case 0x80: s->wram[s->wram_addr] = v; s->wram_addr = (s->wram_addr + 1) & 0x1FFFF; break;

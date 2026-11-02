@@ -369,6 +369,7 @@ local triesAt = {}        -- rollbacks per snapshot frame (survives re-snapshots
 local function timeLeft() return r16(0x5E10) * 60 + r16(0x5E12) end  -- stage timer
 local playing = false     -- unlocked in a stage since the last lock
 local rollback = false    -- set by think() on a death
+local LOCK_DEATH, lockCount = 60, 0
 local exploreUntil = 0    -- after a rollback, "wait" becomes a random move
 -- Cells where pressing A placed no bomb (stairs, gate cells, ...): no bomb
 -- attempts there until noBombUntil[key].
@@ -398,6 +399,13 @@ local function score() return r16(0x5DEE) end  -- score / 100
 
 local function think()
   input = {}
+  -- A death locks P1 ($52 bit 0) for its whole animation; shorter locks
+  -- (a boss's freeze, warps) aren't deaths, so wait LOCK_DEATH frames.
+  if (r16(P1 + P_LOCK) & 1) ~= 0 then lockCount = lockCount + 1 else lockCount = 0 end
+  if lockCount > 0 and lockCount < LOCK_DEATH and playing then
+    input = {}
+    return
+  end
   if (r16(P1 + P_LOCK) & 1) ~= 0 then
     if playing then
       playing = false

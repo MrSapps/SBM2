@@ -4,6 +4,10 @@
  * Usage: play <rom> [options]
  *   -i FILE     input script ("<frame> <buttons>" lines, bot/harness.lua);
  *               without it, and with SDL, the keyboard drives pad 1
+ *   -r FILE     replay a pad log (*.inputs, e.g. build/<run>/run.inputs from
+ *               bot/drive.py) in frame-step mode, as the verifier does: the
+ *               bot's run plays back exactly. A frame is then a logic frame,
+ *               drawn whole at its end (no HDMA effects)
  *   -n N        stop after N video frames
  *   -s LIST     headless: write frames LIST (comma-separated) as PPM files
  *   -o DIR      where -s writes (default .)
@@ -11,7 +15,7 @@
  *   -x NAME     disable this hook (repeatable)
  *
  * Keys: arrows, Z = B, X = A, A = Y, S = X, Q = L, W = R, Enter = Start,
- * Right Shift = Select, Esc quits. */
+ * Right Shift = Select, Esc quits; hold Tab to run 8x faster. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -39,11 +43,39 @@ static void write_ppm(const char *dir, uint32_t frame)
     fclose(f);
 }
 
-/* Runs until the next vblank starts. */
+static uint16_t *load_log(const char *path, uint32_t *len)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t *b = malloc(size + 1);
+    uint16_t *in = calloc(size / 2 + 1, 2);
+    if (fread(b, 1, size, f) != (size_t)size) size = 0;
+    fclose(f);
+    for (long i = 0; i + 1 < size; i += 2) in[i / 2] = b[i] | b[i + 1] << 8;
+    free(b);
+    *len = size / 2;
+    return in;
+}
+
+/* Runs until the next vblank starts, or in frame-step mode to the next
+ * wait-loop exit, then draws the frame from the registers as they are. */
 static int run_frame(void)
 {
     uint32_t f = m.frame;
     long n = 0;
+    if (m.framestep) {
+        do {
+            snes_step(&m);
+            if (++n > 50000000) return -1;
+            if (m.pad_pos >= m.npads) return 1;
+        } while (!(m.wait_at[m.cpu.pc] && snes_wait_point(&m, (uint32_t)m.cpu.pb << 16 | m.cpu.pc) == WAIT_EXIT));
+        ppu_vblank(&m);
+        for (int y = 1; y <= 224; y++) ppu_line(&m, y);
+        return 0;
+    }
     while (m.frame == f) {
         snes_step(&m);
         if (++n > 50000000) return -1;
@@ -54,13 +86,14 @@ static int run_frame(void)
 int main(int argc, char **argv)
 {
     if (argc < 2) { fprintf(stderr, "usage: play <rom> [-i input] [-n frames] [-s f1,f2 -o dir] [-N] [-x hook]\n"); return 2; }
-    const char *input = NULL, *outdir = ".", *shots = NULL;
+    const char *input = NULL, *replay = NULL, *outdir = ".", *shots = NULL;
     long frames = -1;
     int hooks = 1;
     uint8_t *enable = NULL;
     if (snes_load(&m, argv[1])) { fprintf(stderr, "can't load %s\n", argv[1]); return 2; }
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "-i") && i + 1 < argc) input = argv[++i];
+        else if (!strcmp(argv[i], "-r") && i + 1 < argc) replay = argv[++i];
         else if (!strcmp(argv[i], "-n") && i + 1 < argc) frames = atol(argv[++i]);
         else if (!strcmp(argv[i], "-s") && i + 1 < argc) shots = argv[++i];
         else if (!strcmp(argv[i], "-o") && i + 1 < argc) outdir = argv[++i];
@@ -85,6 +118,16 @@ int main(int argc, char **argv)
     m.ppu_state = &ppu;
     m.input = pads;
     m.input_len = cap;
+    if (replay) {
+        uint32_t n;
+        uint16_t *log = load_log(replay, &n);
+        if (!log) { fprintf(stderr, "can't read %s\n", replay); return 2; }
+        m.framestep = 1;
+        m.pads = log;
+        m.npads = n;
+        for (uint32_t i = 0; i < n; i++) if (log[i] & 0xF) { m.pad_markers = 1; break; }
+        input = replay;  /* the keyboard does not drive the pad */
+    }
     if (hooks) hook_install(&m, enable);
 
     int headless = shots != NULL;
@@ -98,7 +141,9 @@ int main(int argc, char **argv)
         }
         if (last < 0) last = len;
         for (long f = 1; f <= last; f++) {
-            if (run_frame()) { fprintf(stderr, "stuck at frame %ld\n", f); return 1; }
+            int r = run_frame();
+            if (r > 0) break;
+            if (r) { fprintf(stderr, "stuck at frame %ld\n", f); return 1; }
             for (const char *p = shots ? shots : ""; *p; ) {
                 if (strtol(p, (char **)&p, 10) == f) write_ppm(outdir, m.frame);
                 if (*p == ',') p++;
@@ -131,7 +176,10 @@ int main(int argc, char **argv)
         /* A hook that runs a whole frame driver can pass several vblanks in
          * one step: hold the pad for the next few. */
         if (!input) for (uint32_t k = 1; k <= 8 && m.frame + k < cap; k++) pads[m.frame + k] = pad;
-        if (run_frame()) { fprintf(stderr, "stuck at frame %ld\n", f); return 1; }
+        int fast = ks[SDL_SCANCODE_TAB] ? 8 : 1, r = 0;
+        for (int k = 0; k < fast && !r; k++) r = run_frame();
+        if (r > 0) { printf("replay finished at frame %ld\n", f); break; }
+        if (r) { fprintf(stderr, "stuck at frame %ld\n", f); return 1; }
         SDL_UpdateTexture(tex, NULL, ppu.pixels, 256 * 4);
         SDL_RenderClear(ren);
         SDL_RenderCopy(ren, tex, NULL, NULL);

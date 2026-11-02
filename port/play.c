@@ -7,7 +7,9 @@
  *   -r FILE     replay a pad log (*.inputs, e.g. build/<run>/run.inputs from
  *               bot/drive.py) in frame-step mode, as the verifier does: the
  *               bot's run plays back exactly. A frame is then a logic frame,
- *               drawn whole at its end (no HDMA effects)
+ *               drawn whole at its end (no HDMA effects). Runs uncapped
+ *   -p          pace a replay at 60 frames a second
+ *   -u          run uncapped (the default for -r)
  *   -n N        stop after N video frames
  *   -s LIST     headless: write frames LIST (comma-separated) as PPM files
  *   -o DIR      where -s writes (default .)
@@ -88,7 +90,7 @@ int main(int argc, char **argv)
     if (argc < 2) { fprintf(stderr, "usage: play <rom> [-i input] [-n frames] [-s f1,f2 -o dir] [-N] [-x hook]\n"); return 2; }
     const char *input = NULL, *replay = NULL, *outdir = ".", *shots = NULL;
     long frames = -1;
-    int hooks = 1;
+    int hooks = 1, uncapped = -1;
     uint8_t *enable = NULL;
     if (snes_load(&m, argv[1])) { fprintf(stderr, "can't load %s\n", argv[1]); return 2; }
     for (int i = 2; i < argc; i++) {
@@ -98,6 +100,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-s") && i + 1 < argc) shots = argv[++i];
         else if (!strcmp(argv[i], "-o") && i + 1 < argc) outdir = argv[++i];
         else if (!strcmp(argv[i], "-N")) hooks = 0;
+        else if (!strcmp(argv[i], "-p")) uncapped = 0;
+        else if (!strcmp(argv[i], "-u")) uncapped = 1;
         else if (!strcmp(argv[i], "-x") && i + 1 < argc) {
             int h = hook_find(argv[++i]);
             if (h < 0) { fprintf(stderr, "no hook %s\n", argv[i]); return 2; }
@@ -128,6 +132,7 @@ int main(int argc, char **argv)
         for (uint32_t i = 0; i < n; i++) if (log[i] & 0xF) { m.pad_markers = 1; break; }
         input = replay;  /* the keyboard does not drive the pad */
     }
+    if (uncapped < 0) uncapped = replay != NULL;
     if (hooks) hook_install(&m, enable);
 
     int headless = shots != NULL;
@@ -184,6 +189,7 @@ int main(int argc, char **argv)
         SDL_RenderClear(ren);
         SDL_RenderCopy(ren, tex, NULL, NULL);
         SDL_RenderPresent(ren);
+        if (uncapped) continue;
         static uint64_t next;
         uint64_t now = SDL_GetTicks64();
         next = next && next > now - 100 ? next + 1000 / 60 : now + 1000 / 60;

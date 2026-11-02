@@ -186,6 +186,9 @@ local softSeen, softGone = {}, {}  -- world 2 regrowth (think)
 -- the oldest (docs/mechanics.md). They count as far-off until we press B.
 local REMOTE_T, remoteOn = 100000, false
 local stallSig  -- progress signature at the last stall (think)
+local remoteSince  -- frame our remote bomb(s) appeared (think)
+local rollbackBefore  -- a rollback must land before this frame (think)
+local trappedSince  -- frame we found no way out of our remote blast (think)
 
 -- Live bombs from the bomb table: {c, r, t (frames to explosion), power}.
 local function readBombs(g)
@@ -697,11 +700,17 @@ local function think()
       end
     end
     if emu.read(P1 + P_BOMBS_LEFT, WRAM, false) == 0 then remoteWorth = true end
+    -- We hold one remote bomb at a time (think): an old one whose target
+    -- got away goes off anyway, to free the bomb.
+    remoteSince = remoteSince or frame
+    if frame - remoteSince > 300 then remoteWorth = true end
     if remoteWorth and not remoteCells[here] and not nearEnemy[here] and frame >= nextDetonate then
       input.b = true
       nextDetonate = frame + 20
       log(string.format("%6d detonate", frame))
     end
+  else
+    remoteSince = nil
   end
   visits[here] = (visits[here] or 0) + 1
   -- World 2 soft blocks grow back (docs/mechanics.md): one already blown
@@ -714,6 +723,16 @@ local function think()
       end
     end
   end
+  -- Unless regrown blocks wall us off from what is left to do (the open
+  -- exit, or the last enemies): then they are worth bombing again.
+  local walledIn = next(softGone) ~= nil and not bfs(g, c, r, function(cc, rr)
+    if gateOpen and #walkers == 0 then return g[rr][cc] == GATE_OPEN end
+    for _, e in ipairs(walkers) do
+      if math.abs(e[1] - cc) + math.abs(e[2] - rr) <= 1 then return true end
+    end
+    return #walkers == 0
+  end)
+  if walledIn then softGone = {} end
   local soft, todo = 0, 0
   for rr = 0, MAP_H - 1 do for cc = 0, MAP_W - 1 do if SOFT[g[rr][cc]] then soft = soft + 1 end end end
   for _ in pairs(panelTodo) do todo = todo + 1 end
@@ -860,7 +879,13 @@ local function think()
   elseif frame - progressAt > STALL then
     progressAt = frame
     exploreUntil, stallUntil = frame + 600, frame + 600
-    log(string.format("%6d stalled (%s); exploring", frame, sig))
+    local es = {}
+    for _, e in ipairs(elist) do
+      es[#es + 1] = string.format("%02X@(%d,%d)%s%s%s", e.type, e.c, e.r, e.killable and "k" or "",
+        e.harmful and "h" or "", e.gadget and "g" or "")
+    end
+    log(string.format("%6d stalled (%s); exploring; gate $%04X (%d,%d)%s; enemies %s", frame, sig, gate, gc, gr,
+      gateOpen and " open" or "", table.concat(es, " ")))
     -- Two stalls in a row with no progress between: wedged (own remote
     -- bombs, a dead end). Go back as after a death and try something else.
     if stallSig == sig and timeLeft() > 1 then
@@ -936,7 +961,9 @@ local function think()
       end or safe
       return bfs(g, cc, rr, goal, nil, combine(w, eWin), t) ~= nil
     end
-    local haveBomb = emu.read(P1 + P_BOMBS_LEFT, WRAM, false) > 0
+    -- With the remote, one bomb at a time: a remote bomb is never danger, so
+    -- a second one placed nearby can seal us in between them.
+    local haveBomb = emu.read(P1 + P_BOMBS_LEFT, WRAM, false) > 0 and not (remoteOn and next(remoteCells))
     local why = haveBomb and targetsInReach(c, r, 0)
     if why == "enemy" and frame < ambushHold then why = nil end
     if why and canEscape(c, r, 0) then
@@ -944,16 +971,28 @@ local function think()
       if not bombTry or bombTry[1] ~= here then bombTry = { here, frame }
       elseif frame - bombTry[2] > 20 then
         noBombUntil[here] = frame + 600
-        log(string.format("%6d no bomb appears at (%d,%d); avoiding it", frame, c, r))
+        local bs = {}
+        for _, b in ipairs(lastBombs) do bs[#bs + 1] = string.format("(%d,%d)t%d%s", b[1], b[2], b[3], b[5] and "r" or "") end
+        log(string.format("%6d no bomb appears at (%d,%d); avoiding it; left %d bombs %s", frame, c, r,
+          emu.read(P1 + P_BOMBS_LEFT, WRAM, false), table.concat(bs, " ")))
         bombTry = nil
       end
       if why == "enemy" and not ambush then ambushStart = true end
       -- Bomb placement is edge-triggered: press on alternate frames.
       input.a = frame % 2 == 0
-    elseif remoteCells[here] and remoteWorth then
+    elseif remoteCells[here] and (remoteWorth or not haveBomb) then
       plan = "clear"
       dir = bfs(g, c, r, function(cc, rr) return not remoteCells[rr * KEY_W + cc] and not windows[rr * KEY_W + cc] end,
         nearEnemy, cw)
+        or bfs(g, c, r, function(cc, rr) return not remoteCells[rr * KEY_W + cc] end, nil, windows)
+      -- Sealed in by our own remote bomb: setting it off is a death, so go
+      -- back as after one rather than stand here until the stall check.
+      if dir then trappedSince = nil
+      elseif not trappedSince then trappedSince = frame
+      elseif frame - trappedSince > 120 and timeLeft() > 1 then
+        log(string.format("%6d trapped by own remote bomb at (%d,%d); rolling back", frame, c, r))
+        rollback, trappedSince, rollbackBefore = true, nil, (remoteSince or frame) - 10
+      end
     else
       plan = "item"
       dir = bfs(g, c, r, function(cc, rr) return g[rr][cc] == ITEM end, nearEnemy, cw)
@@ -1100,7 +1139,8 @@ local function onFrame()
     -- Newest snapshot at least 60 frames before the death, then further
     -- back by one per 3 failures there.
     local i = #snaps
-    while i > 1 and snaps[i][1] > frame - 60 do i = i - 1 end
+    while i > 1 and snaps[i][1] > math.min(frame - 60, rollbackBefore or frame) do i = i - 1 end
+    rollbackBefore = nil
     if i >= 1 then
       i = math.max(1, i - (triesAt[snaps[i][1]] or 0) // 3)
       local snap = snaps[i]
@@ -1118,6 +1158,7 @@ local function onFrame()
           inputlog.truncate(snap[3])
         end)
         frame, step, playing, fuseSeen = snap[1], nil, false, {}
+        remoteSince, trappedSince = nil, nil
         return
       end
     end

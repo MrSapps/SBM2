@@ -874,8 +874,11 @@ local function think()
         -- A blast pushes an $E2 block one cell on; into a $D3 hole it fills
         -- it and opens the way (docs/mechanics.md, push blocks).
         if tt == 0xE2 and cell[3] then
+          -- Worth pushing toward a hole one or two cells on (a push moves
+          -- it one cell; a block pushed into a $D3 fills it).
           local nc, nr = cell[1] + cell[3][1], cell[2] + cell[3][2]
-          if g[nr] and g[nr][nc] == 0xD3 then why = "obj" end
+          local n2 = g[nr + cell[3][2]] and g[nr + cell[3][2]][nc + cell[3][1]]
+          if g[nr] and (g[nr][nc] == 0xD3 or (g[nr][nc] == 0x00 and n2 == 0xD3)) then why = "obj" end
         end
         cells[k] = true
         if reach[k] then near = true end

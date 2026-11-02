@@ -256,3 +256,50 @@ C0:3761 FindPowerSpots      ; world 1: tile $14 cells -> $7E2FF0 (bombs placed t
 7E5D5C World2MachineState   ; bit 0 = a bomb went off in the furnace
 7E30F0 FuseCells            ; world 2: CellItems $0E cells {cell, gfx}
 7E5CBE ConveyorMode         ; bit 0 fast, bit 1 reversed (battle levers only)
+# --- final boss (stage $57, 5-8): boss engine at $001000, see docs/enemies.md ---
+CC:EAC4 BossEngineTick      ; runs boss objects $001000 + list from $1040; $1C72 set -> P1 +$EF = $FF
+CC:EB31 BossEngineReset     ; clears $001000-$0017FF, list heads $1040/$1080
+CC:EC7B FinalBossSpawn      ; type $AE routine (via CC:EA9D): controller $001000 -> CC:C63D, once
+CC:C63D FinalBossInit       ; HP $1C, x $180 (hidden), y $50
+CC:C884 FinalBossAppear     ; 256 f blinking, then patrol
+CC:C8D6 FinalBossPatrol     ; 1 px/f left-right; picks slam / ball attack
+CC:CAC4 FinalBossSlam       ; P1 below: drop 72 px, hold 64 f, rise 1 px/f
+CC:CB56 FinalBossBallAttack ; stop 224 f, arm spawns ball launchers
+CC:C9C2 FinalBossAnimByHP   ; animation set by HP band (>=21, 13-20, 1-12, 0)
+CC:C8C4 FinalBossTouchP1    ; contact box CC:CA20 -> BossTouchP1
+CC:CBE1 FinalBossForm1Dead
+CC:CC4B FinalBossForm1Blowup
+CC:D0B8 FinalBossForm2Appear ; HP 6
+CC:D139 FinalBossForm2      ; homing body, waypoints CC:D272
+CC:D2E7 FinalBossForm2Hurt  ; 63 f, then HP-1; HP 0 -> CC:D338
+CC:D338 FinalBossForm2Dead
+CC:D416 FinalBossEscape     ; 640 f scripted P1 walk (BossForcedPad)
+CC:D57B FinalBossClear      ; $B9 |= $4000, BossStageClear = $FFFF
+CC:D5CE FinalBossArm
+CC:D813 FinalBossBallLauncher
+CC:DAA8 FinalBossBall       ; 1 px/f, steers toward P1 every 32 f, box +-8 kills
+CC:9C62 BossDefeated        ; saves P1 hearts, BossP1Invuln = $FFFF
+CC:9C4E BossFightResumes    ; restores P1 hearts, BossP1Invuln = 0
+CC:9C76 BossNoDieWhileP1Dies ; P1 +0 bit 3 and HP 0 -> HP 1
+CC:96BB BossForcedPadApply  ; BossForcedPad & $FFF0 -> $C3
+CC:96D9 BossBombObjHit      ; bomb object (+$7E $0100, +$52 bit 4) in box [$6D] -> hit
+CC:A266 BossFlameSense      ; offset list [$70]: flame tile -> +$24 hit; bombs there removed
+CC:A2C4 BossEatBomb         ; bomb on a sensing point: removed and refunded, no blast
+CC:A538 BossContactP1       ; P1 in box [$6D] -> BossTouchP1
+CC:A573 BoxHasP1            ; carry = P1 x/y inside box [$6D] around +$11/+$14
+CC:A5BC BossHurtTick        ; +$24 hit -> +$26 = $3F; when +$26 runs out, HP-1
+CC:A6E9 BossHurtTick2       ; same, for form 2
+CC:E64F BossSpawnChild      ; free $40 slot in $001000-$0017FF, code [$6A]
+CC:E70A BossObjDelete
+CC:E73D BossMoveXFacing     ; x += $40 (8.8), negated when +$0F bit 7
+CC:E74E BossMoveX
+CC:E787 BossMoveY
+C1:6B90 EnemyType24         ; types $A4/$A6 (contact-harmless, list C5:D850)
+001000 BossObj              ; boss controller: +0 code ptr, +$11 x, +$14 y, +$20 HP
+001C70 BossStageClear       ; $FFFF = boss beaten, stage ends
+001C72 BossP1Invuln         ; nonzero: P1 +$EF forced to $FF each frame
+001C74 BossSavedHearts
+001C76 BossForcedPad        ; scripted P1 pad (escape scene)
+001C78 BossTouchP1          ; set this frame -> P1 tile-under = $41 -> death
+001C7A BossFrameCount
+7E5E38 PlayerCutsceneLock   ; nonzero: P1 frozen (boss intro / transitions)

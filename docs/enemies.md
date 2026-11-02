@@ -291,3 +291,151 @@ wakes them was not traced.
   `$B2` shots (moving 1.5-2 px/f).
 * Safe: types `$C0+`, flashing (`+4` bit 5), hidden (`+4` bit 6),
   dormant (`+4` bit 15).
+
+## 7. Final boss (5-8, stage `$57`)
+
+The fight does not use the enemy structs. **[probe]** marks facts checked
+in Mesen from `build/g_w5c/stage.mss`, with P1 standing still and kept
+alive by forcing `+$EF` = `$FF`.
+
+### 7.1 Where it lives
+
+* The type `$AE` object in slot `$8500` (x = 400, off screen) is only a
+  spawner. Its pointer-table entry (`$2E`) goes through a trampoline at
+  CC:EA9D to `FinalBossSpawn` (CC:EC7B). If `$001000` is empty, that
+  routine starts the **boss engine** (`BossEngineReset` CC:EB31), with
+  the controller object at **`$001000`**.
+* Boss engine objects are `$40` bytes each, in `$001000-$0017FF`. `+0..+2`
+  holds a 24-bit code pointer, which is the current state. The controller
+  is run every frame by `BossEngineTick` (CC:EAC4), and then the child
+  list starting at `$1040`. Child objects are created by
+  `BossSpawnChild` (CC:E64F) and removed by `BossObjDelete` (CC:E70A).
+* Controller fields: `+$11` x and `+$14` y. Both are 16-bit **screen
+  pixels**, with fractions in `+$10`/`+$13`. Adding `+$100` to x hides the
+  body, and the code does this to make it blink. `+$0F` bit 7 is the
+  facing. **`+$20` = HP**. `+$24` = "hit this frame" (`$FFFF`). `+$26` =
+  hurt timer. `+$34..+$3C` are state timers.
+* Map cell of a boss point: col = (x + `StageOriginX`) >> 4, row =
+  (y + `StageOriginY`) >> 4. In 5-8 the origin is x 8, y 0 **[probe]**.
+* Type `$A4` is the routine at C1:6B90, shared with `$A6`. It is in the
+  contact-exempt list C5:D850, so touching it never kills, and it has no
+  part in the win.
+
+### 7.2 How it kills
+
+The only killer is `BossTouchP1` (`$001C78`). `BossContactP1` (CC:A538)
+sets it when P1's x/y (`$7E8010`/`$7E8018`) is inside a box around an
+object. The box is half-open: [x+a, x+b) by [y+c, y+d). On the next
+`ObjTileUpdate`, P1's tile-under `+$B4` becomes `$41`, and P1 loses a
+heart or dies **[probe]**: `+$B4` = `$41`, then `+$52` = `$0801`, one
+frame later.
+
+| object | box (dx, dy) |
+|---|---|
+| form 1 body (`FinalBossTouchP1`, CC:CA20) | x −38..+37, y −48..+35 |
+| ball (CC:DC11) | x −8..+7, y −8..+7 |
+| form 2 body (CC:D26A) | x −24..+23, y −24..+23 |
+
+The arm and head sprites (CC:D5CE, CC:DD21) have no contact test.
+
+### 7.3 Form 1 (skull mech, HP 28)
+
+Start: `FinalBossInit` (CC:C63D). HP = `$1C`, body at x 128, y 80.
+States (`$001000`) **[probe]**:
+
+* `C884` appear: blinks for 256 frames, and P1 is locked
+  (`$7E5E38` = `$FFFF`).
+* `C8D6` patrol: moves 1 px/f along x. It reverses after 136 moving
+  frames plus 80 still frames (`+$34` from `$D8`), so the sweep is about
+  x 59..196 at y 80 **[probe]**.
+  * **Slam** (`CAC4`): starts when the 32-frame cooldown `+$38` is spent
+    and P1 is within x −16..+15 of the body and anywhere below it
+    (box CC:D59B). It holds still for 24 frames, then drops about 72 px
+    to y ≈ 152, holds 64 frames, and rises 1 px/f back to y 80. The
+    contact box goes down with it. **[probe]** y 80 -> 152 -> 80.
+  * **Ball attack** (`CB56`): starts once 512 moving frames have passed
+    (`+$3A`) and x is a multiple of 32. The body stops for 224 frames.
+    The arm (`FinalBossArm`) drops, and at `+$3C` = `$A0`, `$60` and
+    `$20` it spawns a launcher at (x & ~31, y 120). After 16 frames the
+    launcher becomes a **ball** (`FinalBossBall` CC:DAA8). A ball:
+    * moves 1 px/f up, right, down or left (table CC:DC19);
+    * every 32 frames re-aims: it keeps its direction if P1 is in the
+      64 px wide lane ahead, turns toward P1 if P1 is in a side lane
+      (boxes CC:DC39), and otherwise picks a random direction;
+    * turns clockwise when the point 16 px ahead is a bomb (`$43`) or a
+      hard block (`$C5`/`$C6`);
+    * lives 512 frames (only 60 more once form 1 dies).
+
+    **[probe]** P1 standing at (128,166) was killed by a ball at frame
+    766. This is the usual death.
+* **Damage** (`BossFlameSense` CC:A266, offsets at CC:A384). There are
+  25 sensing points at x + {−32, −16, 0, 16, 32} and
+  y + {−48, −32, −16, 0, 16}, a 5×5 block of cells: columns c−2..c+2 and
+  rows r−3..r+1 around the body cell (r, c). If any of these cells has
+  tile `$01` (flame), it is a hit (`+$24`). A thrown bomb object
+  (section 7.4) inside x −16..+15, y −1..+31 also hits
+  (`BossBombObjHit`, CC:97E0).
+  * **A bomb lying on a sensing cell is removed with no blast** and given
+    back to its owner (`BossEatBomb` CC:A2C4). So bombs must be placed
+    outside the 5×5 block, with fire long enough to reach into it, and
+    they must not be overrun before they go off.
+* `BossHurtTick` (CC:A5BC): a hit plays a sound and sets `+$26` = `$3F`.
+  Hits are ignored while it counts down, and at the end HP drops by 1.
+  **[probe]** A flame written at (x+32, y+16) gave `+$24` the next frame
+  and HP 28 -> 27, 66 frames later. So it takes 28 separate bombs.
+* At HP 21 and HP 13, an explosion effect plays and the animation set
+  changes (`FinalBossAnimByHP`). Timings and attacks do not change.
+* `BossNoDieWhileP1Dies` (CC:9C76): while P1 is dying (`+0` bit 3), HP 0
+  is put back to 1.
+
+### 7.4 Form 2 (HP 6)
+
+After `FinalBossForm1Dead` (CC:CBE1), `BossDefeated` (CC:9C62) saves
+P1's hearts, and `BossP1Invuln` (`$1C72`) keeps P1 invulnerable. During
+the cut scene (`CC4B` -> `CEEA` -> `CF14` -> `CF52` -> `CF82` -> `CFB6`
+-> `D03A`, about 1550 frames **[probe]**), P1 is moved to (128,197) and
+locked. `D0B8` sets HP = 6. After 224 frames the fight resumes in `D139`
+(`BossFightResumes` gives the hearts back).
+
+* **Movement.** The body flies toward one of 16 waypoints (CC:D272,
+  screen x 64..208, y 64..200). It re-aims every 16 frames in one of 16
+  directions. When the body is within ±24 px of the waypoint, it picks a
+  new random one. Speed is 1.0 px/f at HP ≥ 5, 1.25 at HP 3-4 and 1.5 at
+  HP ≤ 2 (tables CC:E16F/E1AF/E1EF). It ignores walls. **[probe]** path
+  logged.
+* **Damage.** The 20 points at x + {−32..32}, y + {−32..16} still remove
+  bombs. A flame on them sets `+$24`, but `D139` clears `+$24` straight
+  away, so **flames do not hurt form 2** **[probe]**. The only hit is a
+  bomb object (`+$7E` = `$0100`) with `+$52` bit 4 inside x ±24, y ±24
+  (CC:97E8). That is the bomb a player carries and throws (created by
+  C0:A743 above the player's head). Bomb objects with bit 5 (made at a
+  cell centre by C0:B03F) are swallowed and do no damage.
+* A hit goes to `FinalBossForm2Hurt` (`D2E7`) for 63 frames, then HP
+  drops by 1. HP 0 leads to `FinalBossForm2Dead` (`D338`).
+* Form 2 has no other attacks. Contact is its only danger.
+
+### 7.5 End of the fight
+
+`D338`: P1 becomes invulnerable. Then come 320 frames of explosions
+(`D382`) and +`$320` to `ScoreHundreds`. After that, `D3DD` waits 128
+frames, and `FinalBossEscape` (`D416`) plays 640 frames in which P1's
+pad is driven by `BossForcedPad` (`$1C76` -> `$C3`, applied by CC:96BB).
+Finally, `FinalBossClear` (CC:D57B) sets `GameModeFlags` `|= $4000` and
+`BossStageClear` (`$001C70`) = `$FFFF`. The stage-end code at CC:2817
+then leaves the stage, and `$1A` becomes `$60` (ending) **[probe]**:
+1268 frames from the form 2 kill to `$1A` = `$60`.
+
+### 7.6 Ending the fight from outside (assist)
+
+Both recipes use the game's own hurt and defeat path. Apply them only
+while `+$26` (`$001026`) = 0 and P1 is alive.
+
+* **Form 1** (`$001000` is `C8D6`, `CAC4` or `CB56`): write `$001020` = 1
+  and `$001024` = `$FFFF`. About 66 frames later HP reaches 0 and the
+  state becomes `CC4B` **[probe]**.
+* **Form 2** (`$001000` = `D139`): write `$001003` = `$D139`,
+  `$001005` = `$CC` (the return state), `$001000` = `$D2E7` (bank byte
+  `$001002` stays `$CC`), `$001020` = 1, `$001024` = `$FFFF` and
+  `$001026` = 0. HP reaches 0, then come `D338`, `D382`, `D3DD`, `D416`
+  and `D59A`, and finally `$1A` = `$60` **[probe]**. Writing HP alone does
+  nothing in `D139`, because that state never tests HP.

@@ -685,7 +685,7 @@ local function think()
       for _, cell in ipairs(blastCells(g, b[1], b[2], b[4])) do
         local k = cell[2] * KEY_W + cell[1]
         remoteCells[k] = true
-        local t = g[cell[2]][cell[1]]
+        local t = g[cell[2]] and g[cell[2]][cell[1]]
         if (SOFT[t] and not softGone[k]) or panelTodo[k] or t == 0x68 or t == 0x6B or t == 0xE2 then remoteWorth = true end
       end
     end
@@ -773,7 +773,7 @@ local function think()
   -- Score from retries counts as progress, so also force a stage that has
   -- taken 3 assist windows in all.
   if (ticks - lastProgress > 2 * ASSIST or ticks - stageTicks > 3 * ASSIST) and forceStage ~= stage
-      and not NOASSIST then
+      and not NOASSIST and stage ~= 0x57 then  -- 5-8 has its own (final boss) assist
     forceStage, forceTicks = stage, ticks
     local msg = string.format("frame %d stage %02X: forced clear (%s)", frame, stage, sig)
     log("ASSIST " .. msg)
@@ -807,6 +807,30 @@ local function think()
     local msg = string.format("frame %d stage %02X: exit under player (cell %04X)", frame, stage, cell)
     log("ASSIST " .. msg)
     local fh = io.open(OUT .. "/assists.txt", "a"); if fh then fh:write(msg .. "\n"); fh:close() end
+  end
+  -- Final boss assist (5-8, logged): the controller at $7E1000 is not an
+  -- enemy struct (docs/enemies.md section 7). After the bot's own try, take
+  -- each form to its last hit the way the game does: HP $1020 = 1 and the
+  -- hit flag $1024 set, while the hurt timer $1026 is idle. Form 2 (state
+  -- CC:D139) only takes a hit from its hit state, so that is set up too.
+  if not NOASSIST and stage == 0x57 and ticks - stageTicks > 3000 and r16(0x1026) == 0
+      and r16(0x1020) > 1 and (r16(P1 + P_LOCK) & 1) == 0 then
+    local state = r16(0x1000) | (emu.read(0x1002, WRAM, false) << 16)
+    local form1 = state == 0xCCC8D6 or state == 0xCCCAC4 or state == 0xCCCB56
+    if not form1 and state ~= 0xCCD139 then state = nil
+    elseif state == 0xCCD139 then
+      inputlog.write16(0x1003, 0xD139)
+      inputlog.write16(0x1005, (r16(0x1005) & 0xFF00) | 0xCC)
+      inputlog.write16(0x1000, 0xD2E7)
+    end
+    if state then
+      inputlog.write16(0x1020, 1)
+      inputlog.write16(0x1024, 0xFFFF)
+      inputlog.write16(0x1026, 0)
+      local msg = string.format("frame %d stage 57: final boss hit (state %06X)", frame, state)
+      log("ASSIST " .. msg)
+      local fh = io.open(OUT .. "/assists.txt", "a"); if fh then fh:write(msg .. "\n"); fh:close() end
+    end
   end
   if forceStage == stage then
     local st2 = r16(0x5D94)

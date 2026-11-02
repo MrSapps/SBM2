@@ -173,6 +173,13 @@ to the walled centre, which holds the gold panel and the `$68`.
   holding Right, it bounced again and landed at (6,14). With nothing
   held, P1 bounced straight up and came back down on the same pad.
 * Landing on a pad launches again in the held direction.
+* **[probe]** 3-6 (`stage_35.mss`): after a flight `+$52` reads `$0809`
+  for about 20 frames while P1 settles (on or next to the target pad),
+  then `$0801` on the pad or clear. A death is `$0801` off a pad, so
+  check bit 3 before calling a lock a death. Pads there are 3-5 cells
+  apart vertically. (10,24) Up chained to (10,18), then (10,14), (10,10)
+  and (10,6), which climbs from the start area (rows 24-27) to the upper
+  area with the soft blocks and the gate. A jump from (5,24) Up drowned.
 
 **Bot recipe.** Walk onto the `$4C` and hold the direction you want to
 fly until P1 is airborne (about 20 frames after arriving). The landing

@@ -145,6 +145,7 @@ local SPRING = 0x4C  -- spring pad (world 3): launches P1 in the held direction
 -- (docs/mechanics.md section 5).
 local springLand = {}
 local springDir, springFrom  -- direction to hold on the pad; jump in flight
+local springTry  -- {padKey, dir}: an untried jump we are walking to (think)
 local lastAir = -100  -- last frame P1 was in the air ($52 = $1801)
 local function walkable(g, c, r)
   if r < 0 or r >= MAP_H or c < 0 or c >= MAP_W then return false end
@@ -381,37 +382,39 @@ end
 -- Timed BFS from (c0,r0). Moving one tile takes FPT frames; a cell is entered
 -- only if no blast window overlaps the time spent in it. t0 offsets the clock
 -- (for plans that start later). Returns first step direction and length.
+local lastBfs  -- {g, goal, avoid}: the last route found, replanned on a pad
 local function bfs(g, c0, r0, goal, avoid, windows, t0)
   t0 = t0 or 0
   local q, head = { { c0, r0, nil, 0 } }, 1
   local seen = { [r0 * KEY_W + c0] = true }
+  -- A pad is a node P1 can only leave by a jump, in any direction; where
+  -- it lands is learnt (springLand), else assumed 5 cells on.
+  local function jump(pc, pr, dir, first, n)
+    local land = springLand[(pr * KEY_W + pc) .. dir[3]]
+    if land == nil then land = { pc + 5 * dir[1], pr + 5 * dir[2] } end
+    if not land then return end
+    local lk = land[2] * KEY_W + land[1]
+    local t = t0 + (n + 6) * FPT  -- ~20 frames on the pad + ~70 in the air
+    if not seen[lk] and (walkable(g, land[1], land[2]) or (g[land[2]] and g[land[2]][land[1]] == SPRING))
+        and not (windows and hit(windows, lk, t - FPT, t + FPT)) then
+      seen[lk] = true
+      q[#q + 1] = { land[1], land[2], first or dir[3], n + 6 }
+    end
+  end
   while q[head] do
     local c, r, first, n = table.unpack(q[head]); head = head + 1
-    if goal(c, r, n) then return first, n end
-    for _, dir in ipairs(DIRS) do
-      local cc, rr = c + dir[1], r + dir[2]
-      local k = rr * KEY_W + cc
-      local arrive = t0 + (n + 1) * FPT
-      if not seen[k] and walkable(g, cc, rr) and not (avoid and avoid[k])
-          and not (windows and hit(windows, k, arrive - FPT, arrive + FPT)) then
-        seen[k] = true
-        q[#q + 1] = { cc, rr, first or dir[3], n + 1 }
-      elseif g[rr] and g[rr][cc] == SPRING and not (avoid and avoid[k]) then
-        local land = springLand[k .. dir[3]]
-        if land == nil then
-          local lc, lr = cc, rr
-          for _ = 1, 3 do
-            lc, lr = lc + 5 * dir[1], lr + 5 * dir[2]
-            if not (g[lr] and g[lr][lc] == SPRING) then break end
-          end
-          land = { lc, lr }
-        end
-        local lk = land and land[2] * KEY_W + land[1]
-        local t = t0 + (n + 6) * FPT  -- ~20 frames on the pad + ~70 in the air
-        if land and not seen[lk] and walkable(g, land[1], land[2])
-            and not (windows and hit(windows, lk, t - FPT, t + FPT)) then
-          seen[lk] = true
-          q[#q + 1] = { land[1], land[2], first or dir[3], n + 6 }
+    if g[r][c] == SPRING then
+      for _, dir in ipairs(DIRS) do jump(c, r, dir, first, n) end
+    else
+      if goal(c, r, n) then lastBfs = { g, goal, avoid }; return first, n end
+      for _, dir in ipairs(DIRS) do
+        local cc, rr = c + dir[1], r + dir[2]
+        local k = rr * KEY_W + cc
+        local arrive = t0 + (n + 1) * FPT
+        if not seen[k] and not (avoid and avoid[k]) and (walkable(g, cc, rr) or (g[rr] and g[rr][cc] == SPRING))
+            and not (windows and hit(windows, k, arrive - FPT, arrive + FPT)) then
+          seen[k] = true
+          q[#q + 1] = { cc, rr, first or dir[3], n + 1 }
         end
       end
     end
@@ -506,6 +509,9 @@ local function combine(a, b)
 end
 
 local nextDetonate = 0
+-- SBM2_SEED varies the random choices (bench.py -s), to tell luck from skill.
+local SEED = tonumber(os.getenv("SBM2_SEED") or "0")
+math.randomseed(SEED)
 local function think()
   input = {}
   -- Locked ($52 bit 0): dying, on the exit, warping, a boss's freeze, ...
@@ -516,9 +522,16 @@ local function think()
   local pc0, pr0 = playerTile()
   local onPad = emu.read(MAP + pr0 * ROW + pc0 * 2, WRAM, false) == SPRING
   if (lockv & 0xF801) == 0x1801 then lastAir = frame end
-  if (lockv & 1) ~= 0 and (onPad or (frame >= lastAir and frame - lastAir <= 6)) then
+  if os.getenv("SBM2_TRACE") and springFrom then log(string.format("%6d trace lock %04X px(%d,%d) tile (%d,%d) onPad %s", frame, lockv, r16(P1 + P_X), r16(P1 + P_Y), pc0, pr0, tostring(onPad))) end
+  -- $0809: landed from a jump (on or next to a pad), not a death.
+  if (lockv & 1) ~= 0 and (onPad or (lockv & 0xF809) == 0x0809 or (frame >= lastAir and frame - lastAir <= 6)) then
     -- On a spring pad ($0801 there is the pad's lock, not a death) or in
     -- the air ($1801): hold the planned direction through the launch.
+    -- Landed on a pad: pick the jump from here toward the last plan's goal.
+    if onPad and springTry and springTry[1] == pr0 * KEY_W + pc0 then springDir = springTry[2]
+    elseif onPad and not springFrom and lastBfs then
+      springDir = bfs(lastBfs[1], pc0, pr0, lastBfs[2], lastBfs[3]) or springDir
+    end
     if onPad and not springDir then springDir = DIRS[math.random(4)][3] end  -- not planned: any way off
     if onPad and not springFrom and springDir then
       springFrom = (pr0 * KEY_W + pc0) .. springDir
@@ -539,7 +552,7 @@ local function think()
   end
   springFrom = nil
   if (lockv & 1) ~= 0 then
-    if playing and (lockv & 0xF801) == 0x0801 then  -- not $1801 (spring jump)
+    if playing and (lockv & 0xF809) == 0x0801 then  -- not $1801/$0809 (spring jump)
       playing = false
       if r16(P1 + 0xA8) ~= r16(0x5D72) then
         deaths = deaths + 1
@@ -610,7 +623,7 @@ local function think()
   local stNow = emu.read(0x1A, WRAM, false)
   if stNow ~= savedStage then
     savedStage = stNow
-    softSeen, softGone, springLand = {}, {}, {}
+    softSeen, softGone, springLand, springTry = {}, {}, {}, nil
     stageTicks = ticks
     log(string.format("%6d STAGE %02X", frame, stNow))
     onNextInstruction(function()
@@ -660,6 +673,26 @@ local function think()
     if e.killable then
       for _, path in ipairs(samples[i]) do
         for _, iv in ipairs(path) do reach[iv[1]] = true end
+      end
+    end
+  end
+  -- Dormant enemies (+4 bit 15: parked off-screen, e.g. on 3-6's islands)
+  -- still keep the gate shut; go and find them.
+  local dormant = {}
+  if not gateOpen then
+    for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
+      local typ = r16(base + 0x7E) & 0xFF
+      local py = r16(base + P_Y)
+      if (r16(base) & 0xF000) == 0x9000 and (r16(base + 4) & 0x8000) ~= 0 and typ >= 0x80 and typ < 0xC0
+          and py >= 16 and py < 0x8000 then
+        local dc, dr = toTile(r16(base + P_X), r16(base + P_Y))
+        if g[dr] and g[dr][dc] then dormant[#dormant + 1] = { dc, dr } end
+      end
+    end
+    -- Only once no active enemy is left: most dormant ones come back alone.
+    if #walkers == 0 then
+      for _, d in ipairs(dormant) do
+        if not HARD[g[d[2]][d[1]]] then walkers[#walkers + 1] = d end
       end
     end
   end
@@ -880,6 +913,7 @@ local function think()
     progressAt = frame
     exploreUntil, stallUntil = frame + 600, frame + 600
     local es = {}
+    for _, d in ipairs(dormant) do es[#es + 1] = string.format("dormant@(%d,%d)", d[1], d[2]) end
     for _, e in ipairs(elist) do
       es[#es + 1] = string.format("%02X@(%d,%d)%s%s%s", e.type, e.c, e.r, e.killable and "k" or "",
         e.harmful and "h" or "", e.gadget and "g" or "")
@@ -994,8 +1028,17 @@ local function think()
         rollback, trappedSince, rollbackBefore = true, nil, (remoteSince or frame) - 10
       end
     else
-      plan = "item"
-      dir = bfs(g, c, r, function(cc, rr) return g[rr][cc] == ITEM end, nearEnemy, cw)
+      -- An open, unblocked gate is the way out whatever is still alive
+      -- (PlayerOnExitTile C1:41A8 checks only Exit_Blocked and the panels;
+      -- 2-1's furnace never stops making enemies).
+      if gateOpen and r16(0x5D70) < 0x8000 then
+        plan = "exit"
+        dir = bfs(g, c, r, function(cc, rr) return g[rr][cc] == GATE_OPEN end, nearEnemy, cw)
+      end
+      if not dir then
+        plan = "item"
+        dir = bfs(g, c, r, function(cc, rr) return g[rr][cc] == ITEM end, nearEnemy, cw)
+      end
       if not dir and haveBomb then
         -- Objectives (blocks, panels) first; enemy-only spots after.
         plan = "seek"
@@ -1024,7 +1067,32 @@ local function think()
           return false
         end, nearEnemy, cw)
       end
-      if frame < stallUntil and plan ~= "bomb" then dir = nil end
+      if not dir then
+        -- Nothing left on this side: try a spring jump not made yet. Where
+        -- it lands (or that it drowns: rollback) is learnt, so the planner
+        -- can then route over the spring network (3-1, 3-6).
+        springTry = nil
+        dir = bfs(g, c, r, function(cc, rr)
+          for _, d in ipairs(DIRS) do
+            local pc, pr = cc + d[1], rr + d[2]
+            if g[pr] and g[pr][pc] == SPRING then
+              local pk = pr * KEY_W + pc
+              for _, d2 in ipairs(DIRS) do
+                if springLand[pk .. d2[3]] == nil then springTry = { pk, d2[3], pc, pr }; return true end
+              end
+            end
+          end
+          return false
+        end, nearEnemy, cw)
+        if springTry then
+          plan = "spring"
+          if not dir then  -- next to the pad: step onto it
+            local dc, dr = springTry[3] - c, springTry[4] - r
+            dir = (dc == 1 and "right") or (dc == -1 and "left") or (dr == 1 and "down") or "up"
+          end
+        end
+      end
+      if frame < stallUntil and plan ~= "bomb" and plan ~= "spring" then dir = nil end
       if not dir and frame < exploreUntil then
         -- After a death or a long stall: walk toward the least visited
         -- neighbour (random tie-break) and sometimes drop a bomb.
@@ -1050,6 +1118,7 @@ local function think()
     local d = ({ up = { 0, -1 }, down = { 0, 1 }, left = { -1, 0 }, right = { 1, 0 } })[dir]
     step = { c = c, r = r, tc = c + d[1], tr = r + d[2], dir = dir }
     springDir = g[step.tr] and g[step.tr][step.tc] == SPRING and dir or nil
+    if springDir and springTry and springTry[1] == step.tr * KEY_W + step.tc then springDir = springTry[2] end
   end
   if step then
     local tx, ty = tileCentre(step.tc, step.tr)
@@ -1150,7 +1219,7 @@ local function onFrame()
         for k = #snaps, i + 1, -1 do snaps[k] = nil end
         rollbacks = rollbacks + 1
         log(string.format("%6d rollback to %d (try %d, deaths %d)", frame, snap[1], tries, deaths))
-        math.randomseed(rollbacks * 7919 + snap[1])
+        math.randomseed(rollbacks * 7919 + snap[1] + SEED)
         exploreUntil = snap[1] + 60 * (tries + 1)
         shuffleDirs()
         onNextInstruction(function()

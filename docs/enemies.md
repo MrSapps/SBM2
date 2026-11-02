@@ -291,6 +291,11 @@ wakes them was not traced.
   `$B2` shots (moving 1.5-2 px/f).
 * Safe: types `$C0+`, flashing (`+4` bit 5), hidden (`+4` bit 6),
   dormant (`+4` bit 15).
+* Dormant enemies still keep the exit gate shut. **[probe]** 1-2: three
+  sat above row 0 (y < 16) after the visible ones were dead and came
+  down by themselves later. 3-6 (`$35`): `$8E`/`$96` stayed dormant in
+  the water column and on the islands, which are reached only by spring
+  pads.
 
 ## 7. Final boss (5-8, stage `$57`)
 

@@ -2,10 +2,11 @@
 
   bench.py collect               copy build/*/stage_XX.mss (+ .inputs) into
                                  build/lib/ (first one found per stage)
-  bench.py run <out> [-f FRAMES] [-j JOBS] [stage ...]
+  bench.py run <out> [stage ...] [-f FRAMES] [-j JOBS] [-s SEEDS]
                                  run each stage start for FRAMES frames
                                  (default 15000, a full 4-minute stage) with SBM2_NOASSIST=1,
-                                 then print a table; stages are hex ids (21)
+                                 then print a table; stages are hex ids (21);
+                                 -s runs each stage with seeds 0..SEEDS-1
   bench.py report <out>          the table again
 
 A stage counts as cleared when the bot log shows a later STAGE line; frames
@@ -40,13 +41,13 @@ def collect():
     print(f'{found} new; library: {" ".join(sorted(s[6:8] for s in os.listdir(LIB) if s.endswith(".mss")))}')
 
 
-def run_one(out, stage, frames):
-    d = os.path.join(out, stage)
+def run_one(out, stage, frames, seed=0):
+    d = os.path.join(out, stage if seed == 0 else f'{stage}s{seed}')
     shutil.rmtree(d, ignore_errors=True)
-    env = dict(os.environ, SBM2_NOASSIST='1')
+    env = dict(os.environ, SBM2_NOASSIST='1', SBM2_SEED=str(seed))
     subprocess.run([sys.executable, DRIVE, d, os.path.join(LIB, f'stage_{stage}.mss'), str(frames)],
                    env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return stage
+    return os.path.basename(d)
 
 
 def result(out, stage):
@@ -63,22 +64,29 @@ def result(out, stage):
                 deaths += 1
             elif 'rollback to' in line:
                 rollbacks += 1
-    clear = next((f for f, s in stages if s != stage), None)
+    clear = next((f for f, s in stages if s != stage[:2]), None)
     return clear, deaths, rollbacks, end
 
 
 def report(out):
-    rows = []
-    for stage in sorted(os.listdir(out)):
-        if os.path.isdir(os.path.join(out, stage)):
-            rows.append((stage,) + result(out, stage))
-    print(f'{"stage":6} {"cleared":>8} {"deaths":>7} {"rollbk":>7}  end (stage score/soft/panels enemies)')
-    for stage, clear, deaths, rb, end in rows:
-        print(f'{stage[0]}-{int(stage[1], 16) + 1:<4} {clear if clear is not None else "-":>8} {deaths:>7} {rb:>7}  {end}')
-    n = sum(1 for r in rows if r[1] is not None)
-    times = sorted(r[1] for r in rows if r[1] is not None)
+    # Runs of one stage with other seeds (bench.py -s) live in <stage>s<seed>.
+    runs = {}
+    for name in sorted(os.listdir(out)):
+        if os.path.isdir(os.path.join(out, name)):
+            runs.setdefault(name[:2], []).append(result(out, name))
+    print(f'{"stage":6} {"cleared":>8} {"frames":>7} {"deaths":>7}  end of the first run (stage score/soft/panels enemies)')
+    total = cleared = deaths = 0
+    times = []
+    for stage, rs in sorted(runs.items()):
+        ok = [r[0] for r in rs if r[0] is not None]
+        med = sorted(ok)[len(ok) // 2] if ok else '-'
+        d = sum(r[1] for r in rs)
+        print(f'{stage[0]}-{int(stage[1], 16) + 1:<4} {len(ok):>4}/{len(rs):<3} {med:>7} {d:>7}  {rs[0][3]}')
+        total, cleared, deaths = total + len(rs), cleared + len(ok), deaths + d
+        times += ok
+    times.sort()
     med = times[len(times) // 2] if times else '-'
-    print(f'cleared {n}/{len(rows)}, median frames {med}, deaths {sum(r[2] for r in rows)}')
+    print(f'cleared {cleared}/{total} runs over {len(runs)} stages, median frames {med}, deaths {deaths}')
 
 
 def main():
@@ -88,15 +96,18 @@ def main():
     ap.add_argument('stages', nargs='*')
     ap.add_argument('-f', '--frames', type=int, default=15000)
     ap.add_argument('-j', '--jobs', type=int, default=3)
+    ap.add_argument('-s', '--seeds', type=int, default=1)
     a = ap.parse_args()
     if a.cmd == 'collect':
         return collect()
     out = os.path.abspath(a.out)
     if a.cmd == 'run':
-        stages = a.stages or sorted(s[6:8] for s in os.listdir(LIB) if s.endswith('.mss'))
+        # $60 is the ending, not a stage.
+        stages = a.stages or sorted(s[6:8] for s in os.listdir(LIB) if s.endswith('.mss') and s[6:8] != '60')
+        jobs = [(s, seed) for seed in range(a.seeds) for s in stages]
         os.makedirs(out, exist_ok=True)
         with concurrent.futures.ThreadPoolExecutor(a.jobs) as ex:
-            for s in ex.map(lambda s: run_one(out, s, a.frames), stages):
+            for s in ex.map(lambda j: run_one(out, j[0], a.frames, j[1]), jobs):
                 print(s, *result(out, s), flush=True)
     report(out)
 

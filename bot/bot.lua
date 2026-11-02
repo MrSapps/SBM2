@@ -470,6 +470,7 @@ local ticks = 0           -- frames run, rollbacks included (frame rewinds)
 local HEART_DEATHS, deathsAtProgress, heartStage = 20, 0, nil
 local seenSigs = {}
 local forceStage, forceTicks = nil, 0  -- stage being cleared by assists
+local stageTicks = 0  -- ticks when the current stage started
 local deaths, rollbacks = 0, 0
 -- Ambush search: a bomb placed only for an enemy is tried from a savestate;
 -- if nobody died AMBUSH_FRAMES later, reload and retry with a random delay
@@ -607,6 +608,7 @@ local function think()
   if stNow ~= savedStage then
     savedStage = stNow
     softSeen, softGone, springLand = {}, {}, {}
+    stageTicks = ticks
     log(string.format("%6d STAGE %02X", frame, stNow))
     onNextInstruction(function()
       local data = emu.createSavestate()
@@ -768,7 +770,10 @@ local function think()
   -- EnemyDie's (C1:5028) struct writes, without the score.
   -- Once stuck that long the stage is marked, and both this and the panel
   -- bit are reapplied every frame, since a rollback undoes them.
-  if ticks - lastProgress > 2 * ASSIST and forceStage ~= stage then
+  -- Score from retries counts as progress, so also force a stage that has
+  -- taken 3 assist windows in all.
+  if (ticks - lastProgress > 2 * ASSIST or ticks - stageTicks > 3 * ASSIST) and forceStage ~= stage
+      and not NOASSIST then
     forceStage, forceTicks = stage, ticks
     local msg = string.format("frame %d stage %02X: forced clear (%s)", frame, stage, sig)
     log("ASSIST " .. msg)

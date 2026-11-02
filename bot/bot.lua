@@ -807,7 +807,9 @@ local function think()
   if not NOASSIST and #enemies > 0 and (forceStage == stage or timeLeft() < 20) then
     for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
       local t = r16(base + 0x7E)
-      if (r16(base) & 0xF000) == 0x9000 and (r16(base + 4) & 0x8000) == 0 and t ~= 0x90 and t ~= 0x98 then
+      -- Real enemies only: not the platforms, track blocks, furnace ($C0+).
+      if (r16(base) & 0xF000) == 0x9000 and (r16(base + 4) & 0x8000) == 0 and t ~= 0x90 and t ~= 0x98
+          and (t & 0xFF) < 0xC0 then
         local ec, er = toTile(r16(base + P_X), r16(base + P_Y))
         if ec ~= gc or er ~= gr then
           local w = function(o, v) inputlog.write16(base + o, v) end

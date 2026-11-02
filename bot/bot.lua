@@ -275,6 +275,84 @@ local function blastCells(g, c, r, p)
   return cells
 end
 
+-- Push-block planner (docs/mechanics.md section 1): a blast that reaches an
+-- $E2 pushes it one cell, onto $00 or into a $D3 hole (which it fills).
+-- Breadth-first over push sequences until the cells P1 can walk to gain
+-- something useful. Returns the bomb cell of the first push, or nil.
+local function planPushes(g, c0, r0, useful, maxStates)
+  local function region(grid)
+    local seen, list, head = { [r0 * KEY_W + c0] = true }, { { c0, r0 } }, 1
+    while list[head] do
+      local c, r = list[head][1], list[head][2]; head = head + 1
+      for _, d in ipairs(DIRS) do
+        local cc, rr = c + d[1], r + d[2]
+        local k = rr * KEY_W + cc
+        if not seen[k] and walkable(grid, cc, rr) then seen[k] = true; list[#list + 1] = { cc, rr } end
+      end
+    end
+    return seen
+  end
+  local function copy(grid)
+    local o = {}
+    for r = 0, MAP_H - 1 do local row = {}; for c = 0, MAP_W - 1 do row[c] = grid[r][c] end; o[r] = row end
+    return o
+  end
+  local function key(grid)
+    local t = {}
+    for r = 0, MAP_H - 1 do
+      for c = 0, MAP_W - 1 do
+        local v = grid[r][c]
+        if v == 0xE2 or v == 0xD3 then t[#t + 1] = r * KEY_W + c .. (v == 0xE2 and "b" or "h") end
+      end
+    end
+    return table.concat(t, ",")
+  end
+  local reach0 = region(g)
+  local q, head, seenS = { { g, nil, 0 } }, 1, { [key(g)] = true }
+  while q[head] and #q < maxStates do
+    local grid, first, depth = q[head][1], q[head][2], q[head][3]; head = head + 1
+    local reach = depth == 0 and reach0 or region(grid)
+    if depth > 0 then
+      for k in pairs(reach) do
+        if not reach0[k] and useful(k % KEY_W, k // KEY_W, grid) then return first end
+      end
+    end
+    if depth < 6 then
+      for r = 0, MAP_H - 1 do
+        for c = 0, MAP_W - 1 do
+          if grid[r][c] == 0xE2 then
+            for _, d in ipairs(DIRS) do
+              local tc, tr = c + d[1], r + d[2]
+              local tt = grid[tr] and grid[tr][tc]
+              if tt == 0x00 or tt == 0xD3 then
+                -- Nearest bomb cell behind the block, the blast line clear.
+                for j = 1, RANGE do
+                  local bc, br = c - d[1] * j, r - d[2] * j
+                  local bt = grid[br] and grid[br][bc]
+                  if bt == nil or bt >= 0x80 then break end
+                  local bk = br * KEY_W + bc
+                  if reach[bk] and bt ~= 0x66 then
+                    local ng = copy(grid)
+                    ng[r][c] = 0x00
+                    ng[tr][tc] = tt == 0xD3 and 0x00 or 0xE2
+                    local nk = key(ng)
+                    if not seenS[nk] then
+                      seenS[nk] = true
+                      q[#q + 1] = { ng, first or bk, depth + 1 }
+                    end
+                    break
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+  return nil
+end
+
 -- Blast windows per cell: windows[cell] = list of {t0, t1} frames from now.
 -- extra = {c, r, t, power} adds a hypothetical bomb. Chain reactions: a bomb
 -- caught in an earlier blast goes off at that blast's time.
@@ -390,6 +468,7 @@ local BOARD = 0x36
 local rideFail, rideWait, rideFrom = {}, nil, nil
 -- Rides come when the platform does: never count on one to escape a blast.
 local allowRide = true
+local pushCell, pushNext, lastObjFrame = nil, 0, 0  -- push planner state (think)
 local function laneEnds(g, c, r)
   local ends = {}
   for _, d in ipairs({ { 0, -1 }, { 0, 1 }, { -1, 0 }, { 1, 0 } }) do
@@ -408,10 +487,12 @@ local function bfs(g, c0, r0, goal, avoid, windows, t0)
   t0 = t0 or 0
   -- Bucket queue by steps taken: jumps and rides cost several steps.
   local buckets, dist = { [0] = { { c0, r0, nil } } }, { [r0 * KEY_W + c0] = 0 }
+  local last = 0  -- the highest step count queued
   local function push(c, r, first, n)
     local k = r * KEY_W + c
     if dist[k] and dist[k] <= n then return end
     dist[k] = n
+    if n > last then last = n end
     local b = buckets[n]
     if not b then b = {}; buckets[n] = b end
     b[#b + 1] = { c, r, first }
@@ -429,14 +510,13 @@ local function bfs(g, c0, r0, goal, avoid, windows, t0)
       push(land[1], land[2], first or dir[3], n + 6)
     end
   end
-  local n, last = 0, 0
-  while n <= last + 20 do
+  local n = 0
+  while n <= last do
     local b = buckets[n]
     local i = 1
     while b and b[i] do
       local c, r, first = b[i][1], b[i][2], b[i][3]; i = i + 1
       if dist[r * KEY_W + c] == n then
-        last = n
         if g[r][c] == SPRING then
           for _, dir in ipairs(DIRS) do jump(c, r, dir, first, n) end
         else
@@ -562,6 +642,16 @@ local function think()
   -- Locked ($52 bit 0): dying, on the exit, warping, a boss's freeze, ...
   -- Only a death is a death: C0:A675 sets $52 = $0801 (docs/enemies.md).
   local lockv = r16(P1 + P_LOCK)
+  if os.getenv("SBM2_DUMP") and frame % 600 == 50 then
+    local t = {}
+    for base = 0x8400, 0x9F00, 0x100 do
+      if r16(base) ~= 0 then
+        t[#t + 1] = string.format("[%04X %04X %04X %02X (%d,%d) hp%02X]", base, r16(base), r16(base + 4), r16(base + 0x7E) & 0xFF,
+          r16(base + P_X), r16(base + P_Y), emu.read(base + 0x43, WRAM, false))
+      end
+    end
+    log(string.format("%6d dump 5D94=%04X 5D70=%04X %s", frame, r16(0x5D94), r16(0x5D70), table.concat(t, " ")))
+  end
   -- Riding a world 4 platform (+2 bit 15): hands off until it drops us.
   if (r16(P1 + 2) & 0x8000) ~= 0 and (lockv & 1) == 0 then
     if not rideFrom then
@@ -836,7 +926,7 @@ local function think()
         local k = cell[2] * KEY_W + cell[1]
         remoteCells[k] = true
         local t = g[cell[2]] and g[cell[2]][cell[1]]
-        if (SOFT[t] and not softGone[k]) or panelTodo[k] or t == 0x68 or t == 0x6B or t == 0xE2 then remoteWorth = true end
+        if (SOFT[t] and not softGone[k]) or panelTodo[k] or t == 0x68 or t == 0x6B or t == 0x6A or t == 0xE2 then remoteWorth = true end
       end
     end
   end
@@ -1074,6 +1164,7 @@ local function think()
       if g[rr][cc] == 0x66 then return nil end  -- no bombs on stairs
       if (noBombUntil[rr * KEY_W + cc] or 0) > frame then return nil end
       local why, cells, near = nil, {}, false
+      if pushCell == rr * KEY_W + cc then why = "obj" end
       for _, cell in ipairs(blastCells(g, cc, rr, rangeAt(g, cc, rr))) do
         local k = cell[2] * KEY_W + cell[1]
         local tt = g[cell[2]][cell[1]]
@@ -1082,7 +1173,7 @@ local function think()
           why = "obj"
         elseif panelDone[k] then return nil end
         -- $68: lighting it ($6F) is what kills 3-1's immune $8F enemies.
-        if panelTodo[k] or (SOFT[tt] and not softGone[k]) or tt == BARREL or isSwitchOff(tt) or tt == 0x68 or tt == 0x6B then why = "obj" end
+        if panelTodo[k] or (SOFT[tt] and not softGone[k]) or tt == BARREL or isSwitchOff(tt) or tt == 0x68 or tt == 0x6B or tt == 0x6A then why = "obj" end
         -- A blast pushes an $E2 block one cell on; into a $D3 hole it fills
         -- it and opens the way (docs/mechanics.md, push blocks).
         if tt == 0xE2 and cell[3] then
@@ -1120,10 +1211,33 @@ local function think()
     -- With the remote, one bomb at a time: a remote bomb is never danger, so
     -- a second one placed nearby can seal us in between them.
     local haveBomb = emu.read(P1 + P_BOMBS_LEFT, WRAM, false) > 0 and not (remoteOn and next(remoteCells))
+    -- Nothing to bomb for a while: plan block pushes that open up more of
+    -- the map (gate, soft blocks, panels, items, enemies beyond holes).
+    if haveBomb and frame - lastObjFrame > 240 and frame >= pushNext then
+      pushNext = frame + 120
+      local hasBlock = false
+      for rr = 0, MAP_H - 1 do for cc = 0, MAP_W - 1 do if g[rr][cc] == 0xE2 then hasBlock = true end end end
+      pushCell = nil
+      if hasBlock then
+        pushCell = planPushes(g, c, r, function(cc, rr, grid)
+          local t = grid[rr][cc]
+          if t == GATE_OPEN or t == ITEM or panelTodo[rr * KEY_W + cc] then return true end
+          for _, d in ipairs(DIRS) do
+            local n = grid[rr + d[2]] and grid[rr + d[2]][cc + d[1]]
+            if n == 0xC9 or n == GATE_OPEN or (SOFT[n] and not softGone[(rr + d[2]) * KEY_W + cc + d[1]]) then return true end
+          end
+          for _, e in ipairs(walkers) do if e[1] == cc and e[2] == rr then return true end end
+          return false
+        end, 600)
+        if pushCell then log(string.format("%6d push plan: bomb at (%d,%d)", frame, pushCell % KEY_W, pushCell // KEY_W)) end
+      end
+    end
     local why = haveBomb and targetsInReach(c, r, 0)
     if why == "enemy" and frame < ambushHold then why = nil end
     if why and canEscape(c, r, 0) then
       plan = "bomb"
+      if why == "obj" then lastObjFrame = frame end
+      if pushCell == here then pushCell = nil end
       if not bombTry or bombTry[1] ~= here then bombTry = { here, frame }
       elseif frame - bombTry[2] > 20 then
         noBombUntil[here] = frame + 600
@@ -1171,7 +1285,10 @@ local function think()
             return why == want and (want == "obj" or frame >= ambushHold)
               and canEscape(cc, rr, n * FPT)
           end, nearEnemy, cw)
-          if dir then break end
+          if dir then
+            if want == "obj" then lastObjFrame = frame end
+            break
+          end
         end
       end
       if not dir and gateOpen and #walkers == 0 then

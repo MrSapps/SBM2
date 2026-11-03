@@ -979,6 +979,11 @@ local ROLLOUTS, HORIZON = 12, 420  -- sampled paths per enemy, frames ahead
 local EATER_SKIP = { [0x95] = true }  -- killChance: eaters go by eaterFate
 local KILL_P = 0.3                 -- bomb for an enemy at this kill chance
 local ENEMY_MARGIN = 6             -- frames of slack around predicted contact
+-- Bosses (bot/boss.lua): boss-engine objects, not enemy structs.
+local Boss = dofile(BOT_DIR .. "/boss.lua")({ r16 = r16, rd8 = function(a) return emu.read(a, WRAM, false) end,
+  origin = origin, MAP_W = MAP_W, MAP_H = MAP_H, KEY_W = KEY_W })
+local BOSS_MARGIN, BOSS_SLACK = 6, 12  -- pixels around a boss box; frames either side of its pass
+local bossHp = nil  -- total boss HP last frame (nil: no boss)
 
 -- a and b both map cell -> list of windows; the overlay looks up both.
 local function combine(a, b)
@@ -1164,6 +1169,9 @@ local function think()
       its[#its + 1] = string.format("(%d,%d)k%d", (cell & 0x7F) // 2, cell >> 7, r16(ITEMLIST + 4 * i + 2) & 0x3FFF)
     end
     log(string.format("%6d hidden items: %s", frame, table.concat(its, " ")))
+    local ab = {}
+    for i = 0xE0, 0xFF do ab[#ab + 1] = string.format("%02X", emu.read(P1 + i, WRAM, false)) end
+    log(string.format("%6d P1 +E0..FF %s", frame, table.concat(ab, " ")))
 
     onNextInstruction(function()
       local data = emu.createSavestate()
@@ -1209,8 +1217,46 @@ local function think()
   local hasEater = false
   for _, e in ipairs(elist) do if e.type == Enemies.EATER then hasEater = true end end
   local eWin = Enemies.windows(samples, elist, HORIZON, ENEMY_MARGIN)
+  -- Bosses: their boxes are no-go for the whole horizon; flames on their
+  -- sense points (where they'll be when the bomb goes off) hurt them.
+  local bosses = Boss.read()
+  local bossNow, bossSense, bossEat = {}, {}, {}
+  if #bosses > 0 then
+    bossNow = Boss.contactCells(bosses, BOSS_MARGIN, 0)
+    for k, l in pairs(Boss.windows(bosses, HORIZON, BOSS_MARGIN, BOSS_SLACK)) do
+      local e = eWin[k] or {}
+      for _, iv in ipairs(l) do e[#e + 1] = iv end
+      eWin[k] = e
+    end
+    for _, b in ipairs(bosses) do if b.hurt then b.sense = nil end end
+    bossSense = Boss.senseCells(bosses, NEW_FUSE)
+    bossEat = Boss.senseCells(bosses, 0)
+    -- With the remote we pick the moment: a blast within a few cells of
+    -- where a boss is now is worth setting up (bosses come to P1).
+    if remoteOn then
+      bossSense = {}
+      for k in pairs(bossEat) do
+        local bc, br = k % KEY_W, k // KEY_W
+        for dr = -3, 3 do
+          for dc = -3 + math.abs(dr), 3 - math.abs(dr) do bossSense[(br + dr) * KEY_W + bc + dc] = true end
+        end
+      end
+    end
+    if frame % 60 == 0 then
+      local t = {}
+      for _, b in ipairs(bosses) do
+        t[#t + 1] = string.format("%04X@%02X%04X(%d,%d v%.2f,%.2f hp%d%s%s)", b.base, emu.read(b.base + 2, WRAM, false),
+          r16(b.base), b.x, b.y, b.vx, b.vy, r16(b.base + 0x20),
+          b.box and " box" or "", b.sense and " sense" or "")
+      end
+      log(string.format("%6d bosses %s", frame, table.concat(t, " ")))
+    end
+  end
   local cw = combine(windows, eWin)   -- blasts + enemies, for routes
   local enemies, walkers = {}, {}
+  for _, cell in ipairs(Boss.centres(bosses)) do
+    enemies[#enemies + 1] = cell; walkers[#walkers + 1] = cell
+  end
   local reach = {}                    -- cells a killable enemy may pass through
   for i, e in ipairs(elist) do
     if not e.gadget and e.type < 0xC0 and (e.c ~= gc or e.r ~= gr) then
@@ -1245,6 +1291,7 @@ local function think()
   end
   -- Cells harmful enemies hold now (or are entering): fallback routes avoid them.
   local enemyNow = {}
+  for k in pairs(bossNow) do enemyNow[k] = true end
   for _, e in ipairs(elist) do
     if e.harmful then
       enemyNow[e.r * KEY_W + e.c] = true
@@ -1336,6 +1383,14 @@ local function think()
       end
     end
     if emu.read(P1 + P_BOMBS_LEFT, WRAM, false) == 0 then remoteWorth = true end
+    -- A boss sense point in the blast (and not on the bomb: it would eat it).
+    for k in pairs(bossEat) do
+      if remoteCells[k] then
+        local onBomb = false
+        for _, b in ipairs(lastBombs) do if b[5] and b[2] * KEY_W + b[1] == k then onBomb = true end end
+        if not onBomb then remoteWorth = true end
+      end
+    end
     -- We hold one remote bomb at a time (think): an old one whose target
     -- got away goes off anyway, to free the bomb.
     remoteSince = remoteSince or frame
@@ -1367,6 +1422,14 @@ local function think()
   for _ in pairs(panelTodo) do todo = todo + 1 end
   -- Not the enemy count: spawners (the 2-1 furnace) keep adding enemies.
   local sig = string.format("%d/%d/%d", score(), soft, todo)
+  -- A boss losing HP is progress too (+$20, docs/enemies.md section 7).
+  bossHp = nil
+  if #bosses > 0 then
+    local hp = 0
+    for _, b in ipairs(bosses) do hp = hp + r16(b.base + 0x20) end
+    sig = sig .. "/hp" .. hp
+    bossHp = hp
+  end
   -- Assist (logged): a stage whose panels we can't finish (unsolved gimmick)
   -- gets the game's own "all panels lit" bit ($5D94 bit 15, as C1:2335
   -- sets it) after ASSIST frames without progress or when time is short.
@@ -1580,6 +1643,13 @@ local function think()
         if tt == ITEM and heartNow[k] then return nil end  -- never blast a heart item
         cells[k] = true
         if reach[k] then near = true end
+      end
+      -- A bomb on a boss's sense point is eaten (BossEatBomb CC:A2C4).
+      if next(bossSense) then
+        if bossEat[rr * KEY_W + cc] or bossSense[rr * KEY_W + cc] then return nil end
+        for k in pairs(cells) do
+          if bossSense[k] then why = why or "enemy"; break end
+        end
       end
       -- A bomb an eater gets to first is swallowed: no blast at all.
       local eatK = 0
@@ -1926,8 +1996,12 @@ local function think()
     local tx, ty = tileCentre(step.tc, step.tr)
     if math.abs(x - tx) <= 1 and math.abs(y - ty) <= 1 then
       step = nil
-    elseif plan ~= "flee" and (danger[step.tr * KEY_W + step.tc] or nearEnemy[step.tr * KEY_W + step.tc]) then
-      step = nil  -- the committed tile became dangerous; replan next frame
+    elseif plan ~= "flee" and (danger[step.tr * KEY_W + step.tc]
+        or (plan ~= "dodge" and nearEnemy[step.tr * KEY_W + step.tc])) then
+      -- The committed tile became dangerous; replan next frame. A dodge
+      -- goes through cells near an enemy on purpose (around a boss, all
+      -- of them can be).
+      step = nil
     else
       input[steer(step.dir, x, y, step.c, step.r)] = true
       -- Once on the target tile, keep moving toward its centre.
@@ -2011,6 +2085,7 @@ end
 
 
 local function onFrame()
+  Boss.frame()
   if not loaded then
     local fh = assert(io.open(LOAD, "rb")); local data = fh:read("a"); fh:close()
     onNextInstruction(function()
@@ -2059,7 +2134,7 @@ local function onFrame()
     end)
   end
   if ambush and frame >= ambush[1] + AMBUSH_FRAMES then
-    if liveEnemies() < ambush[3] or score() > ambush[5] then
+    if liveEnemies() < ambush[3] or score() > ambush[5] or (bossHp and ambush[7] and bossHp < ambush[7]) then
       ambushHits = ambushHits + 1
       log(string.format("%6d ambush hit (try %d; %d/%d)", frame, ambush[4], ambushHits, ambushes))
       ambush = nil
@@ -2086,7 +2161,7 @@ local function onFrame()
     ambushStart = false
     if not ambush then
       ambushes = ambushes + 1
-      local a = { frame, nil, liveEnemies(), 0, score() }
+      local a = { frame, nil, liveEnemies(), 0, score(), nil, bossHp }
       ambush = a
       onNextInstruction(function() a[2], a[6] = emu.createSavestate(), inputlog.mark() end)
     end

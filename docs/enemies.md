@@ -444,3 +444,49 @@ while `+$26` (`$001026`) = 0 and P1 is alive.
   `$001026` = 0. HP reaches 0, then come `D338`, `D382`, `D3DD`, `D416`
   and `D59A`, and finally `$1A` = `$60` **[probe]**. Writing HP alone does
   nothing in `D139`, because that state never tests HP.
+
+## 8. Boss engine in general (all bosses)
+
+Every boss runs on the boss engine of section 7.1 (objects at
+`$001000-$0017FF`, x/y in `+$11`/`+$14`, HP in `+$20`). Two shared routines
+give the bot all it needs without knowing a boss's states:
+
+* **Contact.** A killing object calls `BossContactP1` (CC:A538) with a box
+  at `[$6D]`: four words, each `$1000` + an offset. P1 is caught when
+  x + a < P1 x <= x + b − 1 and the same for y (`BoxHasP1` CC:A573,
+  half-open). `BoxHasP1` is also called on its own with sight boxes that
+  never kill (CC:9E5F, 3-8 below), so only calls through `CC:A538` count.
+
+  | box | dx | dy | used by |
+  |---|---|---|---|
+  | CC:9B4C | −32..+31 | −32..+55 | 3-8 sun body (CC:9AC7, 9B54, 9BDD, hurt) |
+  | CC:A23F | −16..+15 | −16..+15 | `sub_CCA118` (CC:A1E0) |
+  | CC:CA20 | −38..+37 | −48..+35 | 5-8 form 1 body |
+  | CC:DC11 | −8..+7 | −8..+7 | 5-8 balls |
+
+* **Damage.** A hurtable object calls `BossFlameSense` (CC:A266) with a
+  list of (dx, dy) sense points at `[$70]` (ended by `$8000`). A point on
+  a flame tile (`MapTileAtXY` = `$01`) sets `+$24` (hit). A point on a
+  bomb tile (`$43`) removes the bomb and gives it back to its owner
+  (`BossEatBomb` CC:A2C4), so a bomb must be set **outside** the sense
+  points with its flame reaching in. Nothing is sensed while the hurt
+  timer `+$26` runs.
+* Map cell of a point: col = (x + `StageOriginX`) >> 4, row =
+  (y + `StageOriginY`) >> 4 (`MapTileAtXY` C0:BFE2).
+
+### 8.1 3-8 (stage `$37`): the sun
+
+* HP 11 (`+$20` = `$0B`, set by the intro state before CC:9A85).
+* Sense points: CC:A31E, a 5×5 grid at x, y + {−32, −16, 0, 16, 32}. Any
+  flame within two cells of the centre hurts it.
+* Body contact: box CC:9B4C (above). It reaches 3½ cells below the
+  centre, further than the sense grid.
+* Moves diagonally at about 0.5 px/frame on each axis (`BossMoveXFacing`),
+  turning back at the arena edges **[bot log]**. When P1 is level with it
+  and 16..40 px to either side (sight boxes CC:9E9A/9EA2), it stops for
+  `$C0` frames (state CC:9BDD).
+* At HP < 5 it spawns children around itself (`sub_CC9EAA`, every 32
+  frames, every 8 at HP < 3). They kill on contact too; the bot reads
+  their boxes the same way.
+* HP 0: P1 is frozen (`PlayerCutsceneLock`), and after the death
+  animation `BossStageClear` ends the stage (CC:9DBB).

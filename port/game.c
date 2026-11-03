@@ -2497,6 +2497,182 @@ static void EnemyNoteCells(void)
 }
 
 
+/* C1:531D  Exit_Blocked bit 15 = some enemy (from list index 10) still
+ * counts: type +$7E low byte set, not bit 6, +4 bit 13 clear, not a $96,
+ * and a $90/$98 only while +$BE is negative. */
+static void UpdateExitBlocked(void)
+{
+    Cpu *c = g_cpu;
+    ram16_set(Exit_Blocked, ram16(Exit_Blocked) & 0x7FFF);
+    for (ram16_set(0x1C, 0x0A);; ram16_set(0x1C, ram16(0x1C) + 2)) {
+        c->x = ram16(0x1C);
+        uint16_t p = ram16(0x7E2620 + c->x);
+        if (p == 0xFFFF) {
+            c->a = p;
+            SetNZ16(0);
+            SetFlag(FC, 1);
+            Ret_RTL();
+            return;
+        }
+        ram16_set(0x6A, p);
+        c->y = 0x7E;
+        uint16_t t = ind16(0x6A, 0x7E);
+        if (!(t & 0xFF) || (t & 0x40)) continue;
+        c->y = 0x04;
+        if (ind16(0x6A, 0x04) & 0x2000) continue;
+        c->y = 0x7E;
+        if (t == 0x98 || t == 0x90) {
+            c->y = 0xBE;
+            if (ind16(0x6A, 0xBE) & 0x8000) continue;
+            SetFlag(FC, 1);
+        } else if (t == 0x96) {
+            continue;
+        } else {
+            SetFlag(FC, t >= 0x96);
+        }
+        c->a = ram16(Exit_Blocked) | 0x8000;
+        ram16_set(Exit_Blocked, c->a);
+        SetNZ16(c->a);
+        Ret_RTL();
+        return;
+    }
+}
+
+/* C1:52C5  Per-frame update of every live object from list index 8
+ * ($1C = position, $6A = object). Non-enemies (+$7E bit 7 clear) go to
+ * C1:5383. Awake enemies (+4 bit 15 clear) run EnemyDispatch and
+ * EnemyNoteCells, then the animation step C1:4E82, the screen wrap C0:A146
+ * and the +$0C timer C1:53D4. In stage x-7 while $7E5E40 is positive every
+ * object skips its own logic and only animates, wraps and ticks. */
+static void ObjectsUpdate(void)
+{
+    Cpu *c = g_cpu;
+    CallLong(0xC1531D);
+    for (ram16_set(0x1C, 8);; ram16_set(0x1C, ram16(0x1C) + 2)) {
+        c->x = ram16(0x1C);
+        uint16_t p = ram16(0x7E2620 + c->x);
+        if (p == 0xFFFF) {
+            c->a = p;
+            SetNZ16(0);
+            SetFlag(FC, 1);
+            Ret_RTL();
+            return;
+        }
+        ram16_set(0x6A, p);
+        int frozen = (ram16(0x1A) & 0x0F) == 6 && !(ram16(0x7E5E40) & 0x8000);
+        if (!frozen) {
+            c->y = 0x7E;
+            if (!(ind16(0x6A, 0x7E) & 0x80)) { CallLong(0xC15383); continue; }
+            c->y = 0x04;
+            if (ind16(0x6A, 0x04) & 0x8000) continue;
+            CallLong(0xC161E8);
+            CallLong(0xC164FE);
+        }
+        CallLong(0xC14E82);
+        CallLong(0xC0A146);
+        CallLong(0xC153D4);
+    }
+}
+
+
+/* C1:0592  For each player object (+$7E bit 8): C0:A8D3 reads its pad into
+ * $7E5BFC; the target cell list $7E2720 gets the cell it is heading for
+ * (+$A8 one step right/left/down/up by pad bits 8/9/10/11), or 0 with no
+ * direction held. */
+static void PlayerTargetCells(void)
+{
+    Cpu *c = g_cpu;
+    load_cv();
+    ram8_set(0x6C, 0x7E);
+    for (ram16_set(0x1C, 0);; ram16_set(0x1C, ram16(0x1C) + 2)) {
+        c->x = ram16(0x1C);
+        uint16_t p = ram16(0x7E2620 + c->x);
+        if (p == 0xFFFF) break;
+        ram16_set(0x6A, p);
+        c->y = 0x7E;
+        if (!(ind16(0x6A, 0x7E) & 0x100)) continue;
+        store_cv();
+        CallLong(0xC0A8D3);
+        load_cv();
+        uint16_t pad = ram16(0x7E5BFC);
+        if (!pad) {
+            c->x = ram16(0x1C);
+            ram16_set(0x7E2720 + c->x, 0);
+            continue;
+        }
+        uint16_t step = pad & 0x100 ? 2 : pad & 0x200 ? 0xFFFE : pad & 0x400 ? 0x80 : 0xFF80;
+        c->y = OBJ_CELL;
+        uint16_t t = adc16(step, ind16(0x6A, OBJ_CELL), 0);
+        c->x = ram16(0x1C);
+        ram16_set(0x7E2720 + c->x, t);
+    }
+    c->a = 0xFFFF;
+    SetNZ16(0);
+    fc = 1;
+    store_cv();
+    Ret_RTL();
+}
+
+
+/* C0:A146  Screen wrap for the object at [$6A] (live: first word
+ * negative): x +$10 &= $7E5D3E, y +$18 &= $7E5D3C. Bit 12 of the first word
+ * = on screen (x < $110 or >= $1E8, y < $F0 or >= $1F8, both < $200). An
+ * object coming on screen gets bit 12 and loses bit 13; one going off gets
+ * bit 13 and loses bit 12 if +4 bit 10 is set, else its whole $100-byte
+ * slot is cleared. */
+static void ObjScreenWrap(void)
+{
+    Cpu *c = g_cpu;
+    uint16_t f = ind16(0x6A, 0);
+    if (!(f & 0x8000)) { c->a = f; SetNZ16(f); Ret_RTL(); return; }
+    c->y = 0x10;
+    uint16_t x = ind16(0x6A, 0x10) & ram16(0x7E5D3E);
+    ind16_set(0x6A, 0x10, x);
+    c->y = 0x18;
+    uint16_t y = ind16(0x6A, 0x18) & ram16(0x7E5D3C);
+    ind16_set(0x6A, 0x18, y);
+    f = ind16(0x6A, 0);
+    /* The compares as the original makes them: A, C, N/Z are those of the
+     * last one when it returns from a compare. */
+#define CMP(v, k) (c->a = (v), SetNZ16((v) - (k)), SetFlag(FC, (v) >= (k)), (v) >= (k))
+    int on;
+    c->y = 0x18;
+    if (CMP(y, 0x200)) on = 0;
+    else if (!CMP(y, 0xF0)) on = -1;          /* y on screen: check x */
+    else on = CMP(y, 0x1F8) ? -1 : 0;
+    if (on < 0) {
+        c->y = 0x10;
+        if (CMP(x, 0x200)) on = 0;
+        else if (!CMP(x, 0x110)) on = 1;
+        else on = CMP(x, 0x1E8);
+    }
+#undef CMP
+    if (!(f & 0x1000)) {
+        if (on) {
+            f = (f | 0x1000) & 0xDFFF;
+            ind16_set(0x6A, 0, f);
+            c->a = f;
+            SetNZ16(f);
+        }
+    } else if (!on) {
+        c->y = 0x04;
+        if (!(ind16(0x6A, 0x04) & 0x400)) {
+            for (uint16_t i = 0; i < 0x100; i += 2) ind16_set(0x6A, i, 0);
+            c->a = 0;
+            c->x = 0;
+            c->y = 0x100;
+            SetNZ16(0);
+        } else {
+            f = (ind16(0x6A, 0) | 0x2000) & 0xEFFF;
+            ind16_set(0x6A, 0, f);
+            c->a = f;
+            SetNZ16(f);
+        }
+    }
+    Ret_RTL();
+}
+
+
 const Hook g_hooks[] = {
     { 0xC0BFE2, "MapTileAtXY",       MapTileAtXY,       FM | FX, 0, 0 },
     { 0xC14031, "PlayerTileHandler", PlayerTileHandler, FX,      0, 0 },
@@ -2554,6 +2730,10 @@ const Hook g_hooks[] = {
     { 0xC1540F, "BuildObjLists",     BuildObjLists,     FM | FX, 0, 0 },
     { 0xC10F10, "DrawObjects",       DrawObjects,       FM | FX, 0, 0 },
     { 0xC164FE, "EnemyNoteCells",    EnemyNoteCells,    FM | FX, 0, 0 },
+    { 0xC1531D, "UpdateExitBlocked", UpdateExitBlocked, FM | FX, 0, 0 },
+    { 0xC152C5, "ObjectsUpdate",     ObjectsUpdate,     FM | FX, 0, 0 },
+    { 0xC10592, "PlayerTargetCells", PlayerTargetCells, FM | FX, 0, 0 },
+    { 0xC0A146, "ObjScreenWrap",     ObjScreenWrap,     FM | FX, 0, 0 },
     { 0xC0E0AA, "BombsUpdate",       BombsUpdate,       FM | FX, 0,
       IGN_A | IGN_X | IGN_Y | IGN_NZ | IGN_C | IGN_V },
 };

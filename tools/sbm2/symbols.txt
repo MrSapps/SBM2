@@ -155,6 +155,9 @@ C0:DE63 FreeSlotsA          ; non-negative entries of 16 at $7E3D88 -> $7E2860
 C0:DEA5 FreeSlotsB          ; non-negative entries of 32 at $7F0000 -> $7E2860
 C1:540F BuildObjLists       ; live objects -> $7E2620, cells $7E26A0, targets $7E2720
 C1:0F10 DrawObjects         ; draw order by y (+$18) via SortObjList, then draw each
+C1:531D UpdateExitBlocked   ; Exit_Blocked bit 15 = an enemy that counts is alive
+C1:0592 PlayerTargetCells   ; players' $7E2720 = cell ahead in the held direction
+C0:A146 ObjScreenWrap       ; x/y wrap, on-screen bit 12; off screen: bit 13 or slot cleared
 C1:558E EnemyOnPlayerCell   ; carry: harmful enemy with +$A8 == P1 +$A8
 C1:5624 HarmlessTypeCheck   ; carry: (type & $7F) in list C5:D850
 C1:2C52 EnemyInitFromRecord ; record C2:DAC6[+4]: +$40 type, +$41, +$43 hp, +$46/+$48 speed

@@ -134,11 +134,22 @@ needed later. A crumbled hole can be refilled with a push block
 * `$4B` (type `$0B`) is the visible kind. A blast destroys it like a soft
   block (break kind 4, the flame stops there) and leaves floor.
 
-**Bot recipe.** Never step on `$63` or `$4B` (treat them as solid). Bomb a
-`$4B` to clear it. A `$63` can only be cleared by walking on it. In 5-3
-(`c_w5`) row 8 is a full line of `$63`, and every way from the start area
-to the exit crosses it. Cross it while holding a heart, or give up one
-life: the trap stays `$00` after the death.
+* `PlayerTakeHit` does nothing (carry clear, no heart used) while P1
+  flashes (`+4` bit 5): after a heart is spent `+$B9` = `$C0` counts down
+  once a frame (`ObjFlashTick` C0:A570), so for about 190 frames every
+  further trap P1 walks onto is sprung (and becomes `$00`) for free.
+* **[bot runs]** A death does **not** keep the trap sprung for the bot's
+  purposes: losing a life restarts the stage, soft blocks and traps
+  included (5-5: after dying on (10,10) the planner found (8,12) and the
+  soft blocks back). The `$00` seen in the 5-3 probe was before the restart.
+
+**Bot recipe.** Never step on `$63` or `$4B` without a heart (treat them
+as solid). Bomb a `$4B` to clear it. A `$63` can only be cleared by walking
+on it, and only a heart (`+$EF`) or the flash after one makes that stick.
+Chain traps that lie close together inside one flash. In 5-3 (`c_w5`)
+row 8 is a full line of `$63`, and every way from the start area to the
+exit crosses it. In 5-5 the corridors to the holes at column 25 need about
+8 trap crossings between block pushes: more hearts than the start gives.
 
 ## 4. Gold panels and the light switch
 

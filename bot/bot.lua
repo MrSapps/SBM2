@@ -275,84 +275,6 @@ local function blastCells(g, c, r, p)
   return cells
 end
 
--- Push-block planner (docs/mechanics.md section 1): a blast that reaches an
--- $E2 pushes it one cell, onto $00 or into a $D3 hole (which it fills).
--- Breadth-first over push sequences until the cells P1 can walk to gain
--- something useful. Returns the bomb cell of the first push, or nil.
-local function planPushes(g, c0, r0, useful, maxStates)
-  local function region(grid)
-    local seen, list, head = { [r0 * KEY_W + c0] = true }, { { c0, r0 } }, 1
-    while list[head] do
-      local c, r = list[head][1], list[head][2]; head = head + 1
-      for _, d in ipairs(DIRS) do
-        local cc, rr = c + d[1], r + d[2]
-        local k = rr * KEY_W + cc
-        if not seen[k] and walkable(grid, cc, rr) then seen[k] = true; list[#list + 1] = { cc, rr } end
-      end
-    end
-    return seen
-  end
-  local function copy(grid)
-    local o = {}
-    for r = 0, MAP_H - 1 do local row = {}; for c = 0, MAP_W - 1 do row[c] = grid[r][c] end; o[r] = row end
-    return o
-  end
-  local function key(grid)
-    local t = {}
-    for r = 0, MAP_H - 1 do
-      for c = 0, MAP_W - 1 do
-        local v = grid[r][c]
-        if v == 0xE2 or v == 0xD3 then t[#t + 1] = r * KEY_W + c .. (v == 0xE2 and "b" or "h") end
-      end
-    end
-    return table.concat(t, ",")
-  end
-  local reach0 = region(g)
-  local q, head, seenS = { { g, nil, 0 } }, 1, { [key(g)] = true }
-  while q[head] and #q < maxStates do
-    local grid, first, depth = q[head][1], q[head][2], q[head][3]; head = head + 1
-    local reach = depth == 0 and reach0 or region(grid)
-    if depth > 0 then
-      for k in pairs(reach) do
-        if not reach0[k] and useful(k % KEY_W, k // KEY_W, grid) then return first end
-      end
-    end
-    if depth < 6 then
-      for r = 0, MAP_H - 1 do
-        for c = 0, MAP_W - 1 do
-          if grid[r][c] == 0xE2 then
-            for _, d in ipairs(DIRS) do
-              local tc, tr = c + d[1], r + d[2]
-              local tt = grid[tr] and grid[tr][tc]
-              if tt == 0x00 or tt == 0xD3 then
-                -- Nearest bomb cell behind the block, the blast line clear.
-                for j = 1, RANGE do
-                  local bc, br = c - d[1] * j, r - d[2] * j
-                  local bt = grid[br] and grid[br][bc]
-                  if bt == nil or bt >= 0x80 then break end
-                  local bk = br * KEY_W + bc
-                  if reach[bk] and bt ~= 0x66 then
-                    local ng = copy(grid)
-                    ng[r][c] = 0x00
-                    ng[tr][tc] = tt == 0xD3 and 0x00 or 0xE2
-                    local nk = key(ng)
-                    if not seenS[nk] then
-                      seenS[nk] = true
-                      q[#q + 1] = { ng, first or bk, depth + 1 }
-                    end
-                    break
-                  end
-                end
-              end
-            end
-          end
-        end
-      end
-    end
-  end
-  return nil
-end
-
 -- Blast windows per cell: windows[cell] = list of {t0, t1} frames from now.
 -- extra = {c, r, t, power} adds a hypothetical bomb. Chain reactions: a bomb
 -- caught in an earlier blast goes off at that blast's time.
@@ -468,7 +390,9 @@ local BOARD = 0x36
 local rideFail, rideWait, rideFrom = {}, nil, nil
 -- Rides come when the platform does: never count on one to escape a blast.
 local allowRide = true
-local pushCell, pushNext, lastObjFrame = nil, 0, 0  -- push planner state (think)
+local pushCell, pushNext, lastObjFrame = nil, 0, 0  -- stage planner state (think)
+local noBombTile, stepIdx, stepSince = {}, 0, 0  -- tile -> failed bomb placements on it
+local planSteps, planIdx, planCo, trapCell, lastPending, settleNeed = nil, 1, nil, nil, 0, 130
 local trapsOK, sacrificeUntil = false, 0  -- crossing a trap on purpose (think)
 local bombWhy  -- why the last bomb was placed, for the log
 local function laneEnds(g, c, r)
@@ -549,6 +473,389 @@ local function bfs(g, c0, r0, goal, avoid, windows, t0)
     n = n + 1
   end
   return nil
+end
+
+-- Stage planner: a search over map states for the cheapest chain of map
+-- changes after which P1 can walk to something worth doing that it can't
+-- reach now (a panel, a soft block, the open gate, an item, the $6B button,
+-- a crystal; enemies only at a penalty). Actions:
+--   bomb at a reachable cell: pushes the $E2 blocks its blast reaches one
+--     cell on (onto $00, or into a $D3 hole, which it fills; section 1),
+--     breaks soft blocks and $4B, presses $6B ($F5 becomes an $E2);
+--   trap: walk onto a $63 next to the region (a heart or a life; it is $00
+--     afterwards, section 3).
+-- Walking includes platform rides and spring jumps, as bfs does. A* with a
+-- relaxed distance (blocks, holes, traps and soft blocks passable at a cost)
+-- as the heuristic. Returns the first action {kind, k, chain} or nil.
+local TRAP_COST, BOMB_COST, ENEMY_PEN, H_WEIGHT = 8, 2, 4, 4
+local RELAX = { [0xE2] = 2, [0xD3] = 2, [0x63] = 4, [0x4B] = 1, [0xF5] = 3 }
+local function regionOf(g, c0, r0)
+  local seen, list, head = { [r0 * KEY_W + c0] = true }, { { c0, r0 } }, 1
+  local function add(c, r)
+    local k = r * KEY_W + c
+    if not seen[k] then seen[k] = true; list[#list + 1] = { c, r } end
+  end
+  while list[head] do
+    local c, r = list[head][1], list[head][2]; head = head + 1
+    local t = g[r][c]
+    if t == SPRING then
+      for _, dir in ipairs(DIRS) do
+        local land = springLand[(r * KEY_W + c) .. dir[3]]
+        if land == nil then land = { c + 5 * dir[1], r + 5 * dir[2] } end
+        if land and (walkable(g, land[1], land[2]) or (g[land[2]] and g[land[2]][land[1]] == SPRING)) then
+          add(land[1], land[2])
+        end
+      end
+    else
+      if t == BOARD then
+        for _, e in ipairs(laneEnds(g, c, r)) do
+          if not rideFail[(r * KEY_W + c) .. ">" .. (e[2] * KEY_W + e[1])] then add(e[1], e[2]) end
+        end
+      end
+      for _, d in ipairs(DIRS) do
+        local cc, rr = c + d[1], r + d[2]
+        if walkable(g, cc, rr) or (g[rr] and g[rr][cc] == SPRING) then add(cc, rr) end
+      end
+    end
+  end
+  return seen
+end
+
+-- Binary heap on f.
+local function heapPush(h, item)
+  h[#h + 1] = item
+  local i = #h
+  while i > 1 do
+    local p = i // 2
+    if h[p].f <= h[i].f then break end
+    h[p], h[i] = h[i], h[p]; i = p
+  end
+end
+local function heapPop(h)
+  local top = h[1]
+  local n = #h
+  h[1] = h[n]; h[n] = nil; n = n - 1
+  local i = 1
+  while true do
+    local l, r, m = 2 * i, 2 * i + 1, i
+    if l <= n and h[l].f < h[m].f then m = l end
+    if r <= n and h[r].f < h[m].f then m = r end
+    if m == i then break end
+    h[m], h[i] = h[i], h[m]; i = m
+  end
+  return top
+end
+
+-- Where the tiles the planner reasons about are: a search is dropped when
+-- this changes under it.
+local SIG_TILES = { [0xE2] = true, [0xD3] = true, [0x63] = true, [0xC2] = true, [0x4B] = true, [0x6B] = true,
+  [0xF5] = true }
+local function structSig(g)
+  local t = {}
+  for r = 0, MAP_H - 1 do
+    local row = g[r]
+    for c = 0, MAP_W - 1 do
+      local v = row[c]
+      if SIG_TILES[v] then t[#t + 1] = (r * KEY_W + c) * 256 + v end
+    end
+  end
+  return table.concat(t, ",")
+end
+
+-- What a bomb at (bc,br) does to the map: list of {c, r, new tile}, and the
+-- set of cells its blast covers.
+local function bombEffect(grid, bc, br)
+  local changes, blast = {}, {}
+  for _, cell in ipairs(blastCells(grid, bc, br, rangeAt(grid, bc, br))) do
+    local cc, rr = cell[1], cell[2]
+    blast[rr * KEY_W + cc] = true
+    local t = grid[rr][cc]
+    if SOFT[t] or t == 0x4B then changes[#changes + 1] = { cc, rr, 0x00 }
+    elseif t == 0x6B then
+      changes[#changes + 1] = { cc, rr, 0x72 }
+      for r = 0, MAP_H - 1 do
+        for c = 0, MAP_W - 1 do if grid[r][c] == 0xF5 then changes[#changes + 1] = { c, r, 0xE2 } end end
+      end
+    elseif t == 0xE2 and cell[3] then
+      local tc, tr = cc + cell[3][1], rr + cell[3][2]
+      local tt = grid[tr] and grid[tr][tc]
+      if tt == 0x00 or tt == 0xD3 then
+        changes[#changes + 1] = { cc, rr, 0x00 }
+        changes[#changes + 1] = { tc, tr, tt == 0xD3 and 0x00 or 0xE2 }
+      end
+    end
+  end
+  return changes, blast
+end
+
+-- Moves of blocks / the button among changes, as a string: what a planned
+-- bomb must still do when it is placed (soft blocks may be gone already).
+local function keyChanges(changes, grid)
+  local t = {}
+  for _, ch in ipairs(changes) do
+    if not (ch[3] == 0x00 and (SOFT[grid[ch[2]][ch[1]]] or grid[ch[2]][ch[1]] == 0x4B)) then
+      t[#t + 1] = (ch[2] * KEY_W + ch[1]) * 256 + ch[3]
+    end
+  end
+  table.sort(t)
+  return table.concat(t, ",")
+end
+
+-- Runs as a coroutine when called from one: yields every SLICE seconds.
+-- ctx: objGoal(c, r, grid), enemyGoal(c, r) or nil, avoid = set of cells no
+-- planned blast may touch, maxExp, slice.
+-- Returns the list of steps {kind, k, changes, desc} (or nil), the
+-- expansion count.
+local function stagePlan(g, c0, r0, ctx)
+  local clock0 = os.clock()
+  local yieldable = coroutine.isyieldable()
+  local slice0 = os.clock()
+  local shorten
+  local reach0 = regionOf(g, c0, r0)
+  local hGoals = {}
+  for r = 0, MAP_H - 1 do
+    for c = 0, MAP_W - 1 do
+      local k = r * KEY_W + c
+      if not reach0[k] and walkable(g, c, r) then
+        if ctx.objGoal(c, r, g) then hGoals[k] = 0
+        elseif ctx.enemyGoal and ctx.enemyGoal(c, r) then hGoals[k] = ENEMY_PEN end
+      end
+    end
+  end
+  if next(hGoals) == nil then return nil, 0 end
+  local function hcost(grid, region)
+    local dist, buckets, best, last = {}, { [0] = {} }, math.huge, 0
+    for k in pairs(region) do dist[k] = 0; local b = buckets[0]; b[#b + 1] = k end
+    local n = 0
+    while n <= last and n < best do
+      local b = buckets[n]
+      local i = 1
+      while b and b[i] do
+        local k = b[i]; i = i + 1
+        if dist[k] == n then
+          local pen = hGoals[k]
+          if pen and n + pen < best then best = n + pen end
+          local c, r = k % KEY_W, k // KEY_W
+          for _, d in ipairs(DIRS) do
+            local cc, rr = c + d[1], r + d[2]
+            local t = grid[rr] and grid[rr][cc]
+            if t then
+              local w
+              if walkable(grid, cc, rr) or t == SPRING then w = 0
+              elseif SOFT[t] then w = 1
+              else w = RELAX[t] end
+              if w then
+                local nk, nn = rr * KEY_W + cc, n + w
+                if not dist[nk] or dist[nk] > nn then
+                  dist[nk] = nn
+                  if nn > last then last = nn end
+                  local bb = buckets[nn]
+                  if not bb then bb = {}; buckets[nn] = bb end
+                  bb[#bb + 1] = nk
+                end
+              end
+            end
+          end
+        end
+      end
+      n = n + 1
+    end
+    return best == math.huge and 40 or best
+  end
+  -- Bomb cells in the region whose blast reaches a block, soft block, $4B
+  -- or the button.
+  local function bombCells(grid, region)
+    local cand = {}
+    for r = 0, MAP_H - 1 do
+      local row = grid[r]
+      for c = 0, MAP_W - 1 do
+        local t = row[c]
+        if t == 0xE2 or SOFT[t] or t == 0x4B or t == 0x6B then
+          for _, d in ipairs(DIRS) do
+            for j = 1, math.max(RANGE, 1) do
+              local bc, br = c - d[1] * j, r - d[2] * j
+              local bt = grid[br] and grid[br][bc]
+              if bt == nil or bt >= 0x80 then break end
+              local bk = br * KEY_W + bc
+              if region[bk] and bt ~= 0x66 and walkable(grid, bc, br) and not (ctx.noBomb and ctx.noBomb(bk, bt)) then
+                cand[bk] = true
+              end
+              if BLAST_ENDS[bt & 0x3F] then break end
+            end
+          end
+        end
+      end
+    end
+    return cand
+  end
+  -- Some cell outside the blast within 7 steps of the bomb.
+  local function escapable(grid, bc, br, blast)
+    local seen, list, head = { [br * KEY_W + bc] = 0 }, { { bc, br } }, 1
+    while list[head] do
+      local c, r = list[head][1], list[head][2]
+      local n = seen[r * KEY_W + c]; head = head + 1
+      if not blast[r * KEY_W + c] then return true end
+      if n < 7 then
+        for _, d in ipairs(DIRS) do
+          local cc, rr = c + d[1], r + d[2]
+          local k = rr * KEY_W + cc
+          if seen[k] == nil and walkable(grid, cc, rr) then seen[k] = n + 1; list[#list + 1] = { cc, rr } end
+        end
+      end
+    end
+    return false
+  end
+  local function child(s, changes, anchor, cost, act)
+    local ng, copied = {}, {}
+    for r = 0, MAP_H - 1 do ng[r] = s.grid[r] end
+    local diff = {}
+    for k, v in pairs(s.diff) do diff[k] = v end
+    for _, ch in ipairs(changes) do
+      local c, r, t = ch[1], ch[2], ch[3]
+      if not copied[r] then
+        local row = {}
+        for cc = 0, MAP_W - 1 do row[cc] = ng[r][cc] end
+        ng[r], copied[r] = row, true
+      end
+      ng[r][c] = t
+      local k = r * KEY_W + c
+      if g[r][c] == t then diff[k] = nil else diff[k] = t end
+    end
+    local region = regionOf(ng, anchor % KEY_W, anchor // KEY_W)
+    local keys, minK = {}, math.huge
+    for k, v in pairs(diff) do keys[#keys + 1] = k * 256 + v end
+    table.sort(keys)
+    for k in pairs(region) do if k < minK then minK = k end end
+    local key = table.concat(keys, ",") .. "@" .. minK
+    return { grid = ng, diff = diff, region = region, key = key .. "h" .. s.hearts, g = s.g + cost,
+      depth = s.depth + 1, parent = s, act = act, hearts = s.hearts }
+  end
+  -- Drop steps the goal is reached without (one at a time, replaying the
+  -- rest on the map), cut the plan where the goal is first reached, and
+  -- recompute each step's effect.
+  local function replay(list, enemyOK)
+    local grid, ac, ar = {}, c0, r0
+    for r = 0, MAP_H - 1 do local row = {}; for c = 0, MAP_W - 1 do row[c] = g[r][c] end; grid[r] = row end
+    local out = {}
+    for i, st in ipairs(list) do
+      local reg = regionOf(grid, ac, ar)
+      local sc, sr = st.k % KEY_W, st.k // KEY_W
+      local changes
+      if st.kind == "bomb" then
+        if not reg[st.k] then return nil end
+        changes = bombEffect(grid, sc, sr)
+        if #changes == 0 then return nil end
+        out[i] = { kind = "bomb", k = st.k, desc = st.desc, changes = changes, key = keyChanges(changes, grid) }
+      else
+        if grid[sr][sc] ~= 0x63 then return nil end
+        local adj = false
+        for _, d in ipairs(DIRS) do if reg[(sr + d[2]) * KEY_W + sc + d[1]] then adj = true end end
+        if not adj then return nil end
+        changes = { { sc, sr, 0x00 } }
+        out[i] = { kind = "trap", k = st.k, desc = st.desc, changes = changes }
+      end
+      for _, ch in ipairs(changes) do grid[ch[2]][ch[1]] = ch[3] end
+      ac, ar = sc, sr
+      for k in pairs(regionOf(grid, ac, ar)) do
+        if not reach0[k] then
+          local c, r = k % KEY_W, k // KEY_W
+          if ctx.objGoal(c, r, grid) or (enemyOK and ctx.enemyGoal and ctx.enemyGoal(c, r)) then return out end
+        end
+      end
+      if yieldable and os.clock() - slice0 > ctx.slice then coroutine.yield(); slice0 = os.clock() end
+    end
+    return nil
+  end
+  function shorten(list, enemyOK)
+    local best = replay(list, enemyOK)
+    if not best then return list end
+    local changed = true
+    while changed do
+      changed = false
+      local i = 1
+      while i <= #best do
+        local cand = {}
+        for j, st in ipairs(best) do if j ~= i then cand[#cand + 1] = st end end
+        local r = replay(cand, enemyOK)
+        if r then best, changed = r, true else i = i + 1 end
+      end
+    end
+    return best
+  end
+  local function steps(s)
+    local list = {}
+    while s and s.act do table.insert(list, 1, s.act); s = s.parent end
+    return list
+  end
+  local start = { grid = g, diff = {}, region = reach0, g = 0, depth = 0, key = "", hearts = ctx.hearts,
+    flashAt = ctx.flashing and (r0 * KEY_W + c0) or nil }
+  start.f = 0
+  local heap, best, exp = { start }, { [""] = 0 }, 0
+  while #heap > 0 do
+    local s = heapPop(heap)
+    if s.terminal then return shorten(steps(s.state), true), exp, true end
+    if s.depth > 0 then
+      local enemy = false
+      for k in pairs(s.region) do
+        if not reach0[k] then
+          local c, r = k % KEY_W, k // KEY_W
+          if ctx.objGoal(c, r, s.grid) then return shorten(steps(s), false), exp end
+          if ctx.enemyGoal and ctx.enemyGoal(c, r) then enemy = true end
+        end
+      end
+      if enemy then heapPush(heap, { terminal = true, state = s, f = s.g + ENEMY_PEN }) end
+    end
+    exp = exp + 1
+    if exp > ctx.maxExp then return nil, exp end
+    if yieldable and os.clock() - slice0 > ctx.slice then
+      coroutine.yield()
+      slice0 = os.clock()
+    end
+    local kids = {}
+    for bk in pairs(bombCells(s.grid, s.region)) do
+      local bc, br = bk % KEY_W, bk // KEY_W
+      local changes, blast = bombEffect(s.grid, bc, br)
+      local bad = false
+      for k in pairs(blast) do if ctx.avoid[k] then bad = true; break end end
+      if not bad and #changes > 0 and escapable(s.grid, bc, br, blast) then
+        kids[#kids + 1] = child(s, changes, bk, BOMB_COST, { kind = "bomb", k = bk,
+          key = keyChanges(changes, s.grid), changes = changes, desc = string.format("bomb(%d,%d)", bc, br) })
+      end
+    end
+    local traps = {}
+    for k in pairs(s.region) do
+      local c, r = k % KEY_W, k // KEY_W
+      for _, d in ipairs(DIRS) do
+        local cc, rr = c + d[1], r + d[2]
+        local tk = rr * KEY_W + cc
+        if s.grid[rr] and s.grid[rr][cc] == 0x63 and not traps[tk] then
+          traps[tk] = true
+          -- A heart pays for a trap (a death restarts the stage, traps
+          -- and all); the flash that follows makes the next one nearby free.
+          local free = s.flashAt and math.abs(s.flashAt % KEY_W - cc) + math.abs(s.flashAt // KEY_W - rr) <= 6
+          if free or s.hearts > 0 then
+            local kid = child(s, { { cc, rr, 0x00 } }, tk, TRAP_COST,
+              { kind = "trap", k = tk, changes = { { cc, rr, 0x00 } }, desc = string.format("trap(%d,%d)", cc, rr) })
+            kid.hearts = free and s.hearts or s.hearts - 1
+            kid.flashAt = (not free) and tk or nil
+            kid.key = kid.key .. "h" .. kid.hearts .. (kid.flashAt and "f" .. kid.flashAt or "")
+            kids[#kids + 1] = kid
+          end
+        end
+      end
+    end
+    for _, kid in ipairs(kids) do
+      if not best[kid.key] or best[kid.key] > kid.g then
+        best[kid.key] = kid.g
+        -- Greedy on the relaxed distance, deepest first among equals (a
+        -- breadth-first plateau of pointless pushes is what costs time);
+        -- the plan is shortened afterwards.
+        kid.f = hcost(kid.grid, kid.region) * 1000 - kid.g
+        heapPush(heap, kid)
+      end
+    end
+  end
+  return nil, exp
 end
 
 local function playerTile()
@@ -968,56 +1275,8 @@ local function think()
       end
     end
   end
-  -- Unless regrown blocks wall us off from what is left to do (the open
-  -- exit, the last enemies, unlit panels, the $6B button, push blocks):
-  -- then they are worth bombing again.
-  local goals = {}
-  for k in pairs(panelTodo) do goals[k] = true end
-  for rr = 0, MAP_H - 1 do
-    for cc = 0, MAP_W - 1 do
-      local t = g[rr][cc]
-      if t == 0x6B or t == 0xE2 or (gateOpen and t == GATE_OPEN) then goals[rr * KEY_W + cc] = true end
-    end
-  end
-  local function leftToDo(cc, rr)
-    if gateOpen and #walkers == 0 then return g[rr][cc] == GATE_OPEN end
-    for _, e in ipairs(walkers) do
-      if math.abs(e[1] - cc) + math.abs(e[2] - rr) <= 1 then return true end
-    end
-    for _, d in ipairs(DIRS) do
-      if goals[(rr + d[2]) * KEY_W + cc + d[1]] then return true end
-    end
-    return #walkers == 0 and next(goals) == nil
-  end
-  if next(softGone) ~= nil then
-    -- Only when it is the regrown blocks that are in the way: something
-    -- left to do is reachable with them gone but not as things are.
-    local open = {}
-    for rr = 0, MAP_H - 1 do
-      local row = {}
-      for cc = 0, MAP_W - 1 do
-        local t = g[rr][cc]
-        row[cc] = (SOFT[t] and softGone[rr * KEY_W + cc]) and 0x00 or t
-      end
-      open[rr] = row
-    end
-    local function flood(grid)
-      local seen, list, head = { [r * KEY_W + c] = true }, { { c, r } }, 1
-      while list[head] do
-        local cc, rr = list[head][1], list[head][2]; head = head + 1
-        for _, d in ipairs(DIRS) do
-          local c2, r2 = cc + d[1], rr + d[2]
-          local k = r2 * KEY_W + c2
-          if not seen[k] and walkable(grid, c2, r2) then seen[k] = true; list[#list + 1] = { c2, r2 } end
-        end
-      end
-      return seen
-    end
-    local now, later = flood(g), flood(open)
-    for k in pairs(later) do
-      if not now[k] and leftToDo(k % KEY_W, k // KEY_W) then softGone = {}; break end
-    end
-  end
+  -- Regrown blocks that wall us off from what is left to do are the stage
+  -- planner's business (it bombs the ones in the way).
   local soft, todo = 0, 0
   for rr = 0, MAP_H - 1 do for cc = 0, MAP_W - 1 do if SOFT[g[rr][cc]] then soft = soft + 1 end end end
   for _ in pairs(panelTodo) do todo = todo + 1 end
@@ -1277,18 +1536,109 @@ local function think()
       for _, e in ipairs(walkers) do if e[1] == cc and e[2] == rr then return true end end
       return false
     end
-    -- Nothing to bomb for a while: plan block pushes that open up more of
-    -- the map (gate, soft blocks, panels, items, enemies beyond holes).
-    if frame - lastObjFrame > 240 and frame >= pushNext then
-      pushNext = frame + 120
-      local hasBlock = false
-      for rr = 0, MAP_H - 1 do for cc = 0, MAP_W - 1 do if g[rr][cc] == 0xE2 then hasBlock = true end end end
-      pushCell = nil
-      if hasBlock then
-        pushCell = planPushes(g, c, r, usefulAt, 600)
-        if pushCell then log(string.format("%6d push plan: bomb at (%d,%d)", frame, pushCell % KEY_W, pushCell // KEY_W))
-        elseif os.getenv("SBM2_DBG") then log(string.format("%6d dbg no push plan", frame)) end
+    -- Nothing reachable to bomb for a while: the stage planner looks for a
+    -- chain of pushes, bombs and trap crossings that opens up more of the
+    -- map. It runs as a coroutine over several frames; its steps are then
+    -- followed one by one, each checked against the map before it is taken
+    -- (a step whose effect differs from the plan means a new search). Not
+    -- while blasts are out or blocks still slide: the map is about to change.
+    if next(danger) ~= nil or next(remoteCells) ~= nil then lastPending = frame end
+    -- A pushed block slides for ~160 frames after its blast; a regrowing
+    -- soft block (world 2) is back ~190 frames after it, so go at once.
+    local settled = frame - lastPending > settleNeed
+    local sigNow = structSig(g)
+    if planCo then
+      if planCo[2] ~= sigNow then
+        planCo = nil
+      else
+        local t0 = os.clock()
+        local ok, steps, exp, enemyOnly = coroutine.resume(planCo[1])
+        planCo[3] = planCo[3] + os.clock() - t0
+        if not ok then
+          log(string.format("%6d plan error: %s", frame, tostring(steps))); planCo = nil
+        elseif coroutine.status(planCo[1]) == "dead" then
+          local descs = {}
+          for _, st in ipairs(steps or {}) do descs[#descs + 1] = st.desc end
+          log(string.format("%6d plan: %s%s [%d states, %.2fs]", frame, steps and table.concat(descs, " ") or "none",
+            enemyOnly and " (enemy)" or "", exp or 0, planCo[3]))
+          planSteps, planIdx, planCo, stepIdx = steps, 1, nil, 0
+          if not steps then pushNext = frame + 600 end
+        end
       end
+    end
+    pushCell, trapCell = nil, nil
+    while planSteps and settled do
+      local st = planSteps[planIdx]
+      if not st then planSteps = nil; lastObjFrame = frame; break end
+      local done = true
+      for _, ch in ipairs(st.changes) do if g[ch[2]][ch[1]] ~= ch[3] then done = false end end
+      if done then
+        planIdx = planIdx + 1
+      else
+        local reachNow = regionOf(g, c, r)
+        local sc, sr = st.k % KEY_W, st.k // KEY_W
+        local ok
+        if st.kind == "bomb" then
+          local changes = bombEffect(g, sc, sr)
+          ok = reachNow[st.k] and #changes > 0 and keyChanges(changes, g) == st.key
+        elseif g[sr][sc] ~= 0x63 then
+          break  -- sprung, still breaking: wait for the $00
+        else
+          ok = (r16(P1 + 4) & 0x20) ~= 0 or emu.read(P1 + 0xEF, WRAM, false) > 0
+          if ok then
+            ok = false
+            for _, d in ipairs(DIRS) do if reachNow[(sr + d[2]) * KEY_W + sc + d[1]] then ok = true end end
+          end
+        end
+        if ok and planIdx == stepIdx and frame - stepSince > 1500 then
+          -- Not done in 25 s (no way to bomb there, enemies in the way...).
+          log(string.format("%6d plan step %s timed out; replanning", frame, st.desc))
+          noBombUntil[st.k] = frame + 1800
+          ok = false
+        end
+        if ok then
+          if planIdx ~= stepIdx then stepIdx, stepSince = planIdx, frame end
+          if st.kind == "bomb" then pushCell = st.k else trapCell = st.k end
+          settleNeed = (st.kind == "bomb" and st.key ~= "") and 130 or 10
+        else
+          log(string.format("%6d plan step %s no longer fits; replanning", frame, st.desc))
+          planSteps, pushNext = nil, 0
+        end
+        break
+      end
+    end
+    if not planSteps and not planCo and settled and frame - lastObjFrame > 240 and frame >= pushNext then
+      pushNext = frame + 120
+      local anyWalkerIn = false
+      local reachNow = regionOf(g, c, r)
+      for _, e in ipairs(walkers) do if reachNow[e[2] * KEY_W + e[1]] then anyWalkerIn = true end end
+      local hearts = emu.read(P1 + 0xEF, WRAM, false)
+      local flashing = (r16(P1 + 4) & 0x20) ~= 0 and emu.read(P1 + 0xB9, WRAM, false) > 120
+      local gc0 = {}
+      for rr = 0, MAP_H - 1 do local row = {}; for cc = 0, MAP_W - 1 do row[cc] = g[rr][cc] end; gc0[rr] = row end
+      local pTodo, pDone, sGone, wk = panelTodo, panelDone, softGone, walkers
+      local ctx = {
+        objGoal = function(cc, rr, grid)
+          local k = rr * KEY_W + cc
+          local t = grid[rr][cc]
+          if t == GATE_OPEN or t == ITEM or pTodo[k] or t == 0x68 or t == 0x6B then return true end
+          for _, d in ipairs(DIRS) do
+            local nk = (rr + d[2]) * KEY_W + cc + d[1]
+            local n = grid[rr + d[2]] and grid[rr + d[2]][cc + d[1]]
+            if n == GATE_OPEN or (SOFT[n] and not sGone[nk]) or pTodo[nk] or n == 0x6B or n == 0x68
+                or n == 0x6A or n == 0x4B then return true end
+          end
+          return false
+        end,
+        enemyGoal = not anyWalkerIn and function(cc, rr)
+          for _, e in ipairs(wk) do if e[1] == cc and e[2] == rr then return true end end
+          return false
+        end or nil,
+        avoid = pDone, maxExp = 4000, slice = 0.03,
+        noBomb = function(k, t) return (noBombTile[t] or 0) >= 2 or (noBombUntil[k] or 0) > frame end,
+        hearts = hearts >= 0x80 and 99 or hearts, flashing = flashing,
+      }
+      planCo = { coroutine.create(function() return stagePlan(gc0, c, r, ctx) end), sigNow, 0 }
     end
     local why = haveBomb and targetsInReach(c, r, 0)
     if why == "enemy" and frame < ambushHold then why = nil end
@@ -1302,11 +1652,12 @@ local function think()
         end
         log(string.format("%6d dbg bomb cells %s plan=%s push=%s", frame, table.concat(t, " "), tostring(panelPlan ~= nil), tostring(pushCell)))
       end
-      if why == "obj" then lastObjFrame = frame end
-      if pushCell == here then pushCell = nil end
+      if why == "obj" and pushCell ~= here then lastObjFrame = frame end
       if not bombTry or bombTry[1] ~= here then bombTry = { here, frame }
       elseif frame - bombTry[2] > 20 then
         noBombUntil[here] = frame + 600
+        -- Twice on the same kind of tile (lit panels $70): never plan bombs there.
+        noBombTile[g[r][c]] = (noBombTile[g[r][c]] or 0) + 1
         local bs = {}
         for _, b in ipairs(lastBombs) do bs[#bs + 1] = string.format("(%d,%d)t%d%s", b[1], b[2], b[3], b[5] and "r" or "") end
         log(string.format("%6d no bomb appears at (%d,%d); avoiding it; left %d bombs %s", frame, c, r,
@@ -1345,17 +1696,45 @@ local function think()
         -- Objectives (blocks, panels) first; enemy-only spots after.
         plan = "seek"
         for _, want in ipairs({ "obj", "enemy" }) do
+          local goalK
           dir = bfs(g, c, r, function(cc, rr, n)
             if (cc == c and rr == r) or danger[rr * KEY_W + cc] then return false end
             local why = targetsInReach(cc, rr, n * FPT)
-            return why == want and (want == "obj" or frame >= ambushHold)
+            local ok = why == want and (want == "obj" or frame >= ambushHold)
               and canEscape(cc, rr, n * FPT)
+            if ok then goalK = rr * KEY_W + cc end
+            return ok
           end, nearEnemy, cw)
           if dir then
-            if want == "obj" then lastObjFrame = frame end
+            -- A planned step is not a target of its own: the planner keeps
+            -- going after it.
+            if want == "obj" and goalK ~= pushCell then lastObjFrame = frame end
             break
           end
+          -- The planned trap comes before bombing for enemies.
+          if want == "obj" and trapCell then break end
         end
+      end
+      -- The planner's next step is a $63 trap: walk next to it, then onto it.
+      if not dir and trapCell then
+        local tc, tr = trapCell % KEY_W, trapCell // KEY_W
+        if g[tr][tc] ~= 0x63 then
+          trapCell, pushNext = nil, frame + 30
+        elseif math.abs(tc - c) + math.abs(tr - r) == 1 then
+          if not danger[trapCell] and not nearEnemy[trapCell] then
+            plan, dir = "trap", (tc > c and "right") or (tc < c and "left") or (tr > r and "down") or "up"
+          end
+        else
+          dir = bfs(g, c, r, function(cc, rr) return math.abs(tc - cc) + math.abs(tr - rr) == 1 end, nearEnemy, cw)
+          if dir then plan = "trap" end
+        end
+      end
+      if not dir and trapCell and plan ~= "trap" and haveBomb then
+        plan = "seek"
+        dir = bfs(g, c, r, function(cc, rr, n)
+          if (cc == c and rr == r) or danger[rr * KEY_W + cc] then return false end
+          return targetsInReach(cc, rr, n * FPT) == "enemy" and frame >= ambushHold and canEscape(cc, rr, n * FPT)
+        end, nearEnemy, cw)
       end
       if not dir and gateOpen and #walkers == 0 then
         plan = "exit"
@@ -1396,29 +1775,6 @@ local function think()
             dir = (dc == 1 and "right") or (dc == -1 and "left") or (dr == 1 and "down") or "up"
           end
         end
-      end
-      if not dir and not springTry and not pushCell and frame - lastObjFrame > 900 and frame - sacrificeUntil > 1500 then
-        -- Still nothing: cross a $63 trap (a heart, or a life; the trap is
-        -- gone afterwards, docs/mechanics.md section 3) if that reaches
-        -- something useful. The death that may follow is not rolled back.
-        local base = {}
-        do
-          local list, head = { { c, r } }, 1
-          base[r * KEY_W + c] = true
-          while list[head] do
-            local cc, rr = list[head][1], list[head][2]; head = head + 1
-            for _, d in ipairs(DIRS) do
-              local c2, r2 = cc + d[1], rr + d[2]
-              local k = r2 * KEY_W + c2
-              if not base[k] and walkable(g, c2, r2) then base[k] = true; list[#list + 1] = { c2, r2 } end
-            end
-          end
-        end
-        trapsOK = true
-        local d2 = bfs(g, c, r, function(cc, rr) return not base[rr * KEY_W + cc] and usefulAt(cc, rr, g) end)
-        trapsOK = false
-        if d2 then plan, dir = "trap", d2 end
-        if os.getenv("SBM2_DBG") then log(string.format("%6d dbg trap route %s", frame, tostring(d2))) end
       end
       if frame < stallUntil and plan ~= "bomb" and plan ~= "spring" and plan ~= "trap" then dir = nil end
       if not dir and frame < exploreUntil then
@@ -1470,8 +1826,8 @@ local function think()
     local d = ({ up = { 0, -1 }, down = { 0, 1 }, left = { -1, 0 }, right = { 1, 0 } })[dir]
     step = { c = c, r = r, tc = c + d[1], tr = r + d[2], dir = dir }
     if plan == "trap" and g[step.tr] and (g[step.tr][step.tc] == 0x63 or g[step.tr][step.tc] == 0x4B) then
-      sacrificeUntil = frame + 240
-      log(string.format("%6d crossing the trap at (%d,%d) on purpose", frame, step.tc, step.tr))
+      log(string.format("%6d crossing the trap at (%d,%d) on purpose (hearts %d)", frame, step.tc, step.tr,
+        emu.read(P1 + 0xEF, WRAM, false)))
     end
     springDir = g[step.tr] and g[step.tr][step.tc] == SPRING and dir or nil
     if springDir and springTry and springTry[1] == step.tr * KEY_W + step.tc then springDir = springTry[2] end

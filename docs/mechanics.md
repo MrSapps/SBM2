@@ -138,17 +138,36 @@ needed later. A crumbled hole can be refilled with a push block
   flashes (`+4` bit 5): after a heart is spent `+$B9` = `$C0` counts down
   once a frame (`ObjFlashTick` C0:A570), so for about 190 frames every
   further trap P1 walks onto is sprung (and becomes `$00`) for free.
-* **[bot runs]** A death does **not** keep the trap sprung for the bot's
-  purposes: losing a life restarts the stage, soft blocks and traps
-  included (5-5: after dying on (10,10) the planner found (8,12) and the
-  soft blocks back). The `$00` seen in the 5-3 probe was before the restart.
+* **[probe]** A death does **not** keep the trap sprung. 5-3
+  (`stage_52.mss`), P1 put on the trap (8,2) with no heart: the tile went
+  `$41` at once and `$00` 60 frames later, but after the death animation
+  (about 300 frames) the whole map was cleared and the stage reloaded:
+  row 8 all `$63` again, 14 soft blocks again, lives 2 -> 1. `FindTraps`
+  (C1:4D6C) rebuilds `TrapList` from the map at stage load. (The earlier
+  probe only watched the frames before the reload.)
+* So a trap crossing only sticks with a heart (or during the flash after
+  one). Hearts come from heart items only: no other item flashes P1.
+
+### Items and hearts
+
+Items hidden in soft blocks are listed at `$7E3C48` (4-byte entries
+`{cell, kind}`, `$FFFF` ends; bit 14 of kind is set when the block breaks
+and `sub_C1223D` writes tile `$44` and the item's art from table C5:F205).
+Picking an item up jumps through table C5:F145 by the low byte of the
+cell's `TileGfxMap` (`$7FA000`). Kind 11 (art `$1640`, handler C0:9C5B)
+is the **heart**: `+$EF` += 1. Kinds 0/2 raise `+$E1`/`+$E2`, 1/5/9/10 set
+`+$F3` (remote and other bomb kinds), 12/13/7/8 count up `+$FB/$FA/$FE/$FF`,
+14/15 add score. Bench start states: 5-2 hides a heart at (26,11) and 5-6
+one at (13,4); 5-3 and 5-5 hide none (5-3 starts with 0 hearts, 5-5 with
+1). 5-3 still clears without crossing (bench seed 1, frame 14230); 5-5's
+corridors to the holes at column 25 need about 8 separate crossings, so
+from its bench state they cannot be opened.
 
 **Bot recipe.** Never step on `$63` or `$4B` without a heart (treat them
 as solid). Bomb a `$4B` to clear it. A `$63` can only be cleared by walking
 on it, and only a heart (`+$EF`) or the flash after one makes that stick.
 Chain traps that lie close together inside one flash. In 5-3 (`c_w5`)
-row 8 is a full line of `$63`, and every way from the start area to the
-exit crosses it. In 5-5 the corridors to the holes at column 25 need about
+row 8 is a full line of `$63`. In 5-5 the corridors to the holes at column 25 need about
 8 trap crossings between block pushes: more hearts than the start gives.
 
 ## 4. Gold panels and the light switch
@@ -187,6 +206,12 @@ to the walled centre, which holds the gold panel and the `$68`.
   holding Right, it bounced again and landed at (6,14). With nothing
   held, P1 bounced straight up and came back down on the same pad.
 * Landing on a pad launches again in the held direction.
+* Distances (`SpringLaunch` C0:4937 picks the routine from the held
+  direction): Up (C0:4A95) and Down (C0:4A0D) set the target y to the
+  start -/+ `$30`, so they land **exactly 3 cells** away. Left (C0:4B16)
+  and Right (C0:4B91) fly at `$1.3000` px/f along an arc: about 5 cells
+  (the 3-1 probe above). Nothing held: C0:499A, a bounce in place. In 3-1
+  pad (9,6) Down lands on (9,9), inside the walled centre with the panel.
 * **[probe]** 3-6 (`stage_35.mss`): after a flight `+$52` reads `$0809`
   for about 20 frames while P1 settles (on or next to the target pad),
   then `$0801` on the pad or clear. A death is `$0801` off a pad, so

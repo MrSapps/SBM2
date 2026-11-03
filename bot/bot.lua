@@ -123,6 +123,33 @@ local function writeFile(path, data)
   local fh = assert(io.open(path, "wb")); fh:write(data); fh:close()
 end
 
+-- Heart items (+$EF += 1, handler C0:9C5B). Items hidden in soft blocks
+-- are listed at $7E3C48 ({cell, kind}, 4 bytes each, $FFFF ends; kind bit
+-- 14 set once revealed, sub_C1223D). Kind 11 is the heart (art $1640 from
+-- table C5:F205). A revealed item is tile $44; its kind shows as the low
+-- byte of TileGfxMap ($7FA000), $40 for the heart (handler table C5:F145).
+local GFX, ITEMLIST = 0x1A000, 0x3C48
+local function heartCells()
+  local t = {}
+  for i = 0, 63 do
+    local cell = r16(ITEMLIST + 4 * i)
+    if cell >= 0x8000 then break end
+    local kind = r16(ITEMLIST + 4 * i + 2)
+    if (kind & 0x3FFF) == 11 then
+      t[(cell >> 7) * KEY_W + (cell & 0x7F) // 2] = (kind & 0x4000) ~= 0 and "shown" or "hidden"
+    end
+  end
+  for r = 0, MAP_H - 1 do
+    for c = 0, MAP_W - 1 do
+      local o = r * ROW + c * 2
+      if emu.read(MAP + o, WRAM, false) == 0x44 and emu.read(GFX + o, WRAM, false) == 0x40 then
+        t[r * KEY_W + c] = "item"
+      end
+    end
+  end
+  return t
+end
+
 local function readMap()
   local g = {}
   for r = 0, MAP_H - 1 do
@@ -147,6 +174,10 @@ local springLand = {}
 local springDir, springFrom  -- direction to hold on the pad; jump in flight
 local springTry  -- {padKey, dir}: an untried jump we are walking to (think)
 local lastAir = -100  -- last frame P1 was in the air ($52 = $1801)
+local jumpUntil = -100  -- a jump-pad throw (locked, not dying) lasts until then
+-- Cells that started a warp/ride after which P1 froze in place: never
+-- walked onto again (walkable).
+local badCell = {}
 local function walkable(g, c, r)
   if r < 0 or r >= MAP_H or c < 0 or c >= MAP_W then return false end
   local t = g[r][c]
@@ -156,6 +187,7 @@ local function walkable(g, c, r)
   -- looks at tile & $3F); $40-$43 are bombs.
   -- $4C spring pad: not a cell to stand on; bfs uses it as a jump edge.
   if t == SPRING then return false end
+  if badCell[r * KEY_W + c] then return false end
   -- $4B/$63 traps cost a heart or a life (world 5).
   if t == 0x4B or t == 0x63 then return false end
   return EMPTY[t] == true or (t >= 0x04 and t < 0x80 and not isBomb(t))
@@ -391,7 +423,12 @@ local rideFail, rideWait, rideFrom = {}, nil, nil
 -- Rides come when the platform does: never count on one to escape a blast.
 local allowRide = true
 local pushCell, pushNext, lastObjFrame = nil, 0, 0  -- stage planner state (think)
-local noBombTile, stepIdx, stepSince = {}, 0, 0  -- tile -> failed bomb placements on it
+local noBombTile, stepIdx, stepSince = {}, 0, 0
+-- Experiments: plan trap crossings as if P1 had hearts, and log the map
+-- once play resumes after a death.
+local FAKE_HEARTS = os.getenv("SBM2_FAKE_HEARTS") == "1"
+local logMapNext = false
+local frozenAt, lastRide, lastHearts = { 0, 0, 0 }, nil, nil  -- P1 pixel position and since when it has not moved (think)  -- tile -> failed bomb placements on it
 local planSteps, planIdx, planCo, trapCell, lastPending, settleNeed = nil, 1, nil, nil, 0, 130
 local trapsOK, sacrificeUntil = false, 0  -- crossing a trap on purpose (think)
 local bombWhy  -- why the last bomb was placed, for the log
@@ -409,6 +446,10 @@ local function laneEnds(g, c, r)
 end
 
 local lastBfs  -- {g, goal, avoid}: the last route found, replanned on a pad
+-- Jump-pad objects $E0/$A0 (world 3, docs/enemies.md): P1 on the pad's
+-- cell is caught and thrown 8 cells right ($E0) or left ($A0).
+-- jumpObj[cell key] = {landing c, r}; refreshed each frame (think).
+local jumpObj = {}
 local function bfs(g, c0, r0, goal, avoid, windows, t0)
   t0 = t0 or 0
   -- Bucket queue by steps taken: jumps and rides cost several steps.
@@ -447,6 +488,10 @@ local function bfs(g, c0, r0, goal, avoid, windows, t0)
           for _, dir in ipairs(DIRS) do jump(c, r, dir, first, n) end
         else
           if goal(c, r, n) then lastBfs = { g, goal, avoid }; return first, n end
+          local jo = jumpObj[r * KEY_W + c]
+          if jo and first and (walkable(g, jo[1], jo[2]) or (g[jo[2]] and g[jo[2]][jo[1]] == SPRING)) then
+            push(jo[1], jo[2], first, n + 8)
+          end
           if g[r][c] == BOARD and allowRide then
             local k0 = r * KEY_W + c
             for _, e in ipairs(laneEnds(g, c, r)) do
@@ -512,6 +557,8 @@ local function regionOf(g, c0, r0)
           if not rideFail[(r * KEY_W + c) .. ">" .. (e[2] * KEY_W + e[1])] then add(e[1], e[2]) end
         end
       end
+      local jo = jumpObj[r * KEY_W + c]
+      if jo and (walkable(g, jo[1], jo[2]) or (g[jo[2]] and g[jo[2]][jo[1]] == SPRING)) then add(jo[1], jo[2]) end
       for _, d in ipairs(DIRS) do
         local cc, rr = c + d[1], r + d[2]
         if walkable(g, cc, rr) or (g[rr] and g[rr][cc] == SPRING) then add(cc, rr) end
@@ -954,6 +1001,10 @@ local function think()
   -- Locked ($52 bit 0): dying, on the exit, warping, a boss's freeze, ...
   -- Only a death is a death: C0:A675 sets $52 = $0801 (docs/enemies.md).
   local lockv = r16(P1 + P_LOCK)
+  local heartsNow = emu.read(P1 + 0xEF, WRAM, false)
+  if heartsNow ~= lastHearts then
+    log(string.format("%6d hearts %02X -> %02X", frame, lastHearts or 0, heartsNow)); lastHearts = heartsNow
+  end
   if os.getenv("SBM2_DUMP") and frame % 600 == 50 then
     local t = {}
     for base = 0x8400, 0x9F00, 0x100 do
@@ -984,6 +1035,7 @@ local function think()
   elseif rideFrom then
     local rc, rr = playerTile()
     log(string.format("%6d ride from (%d,%d) ended at (%d,%d)", frame, rideFrom[1], rideFrom[2], rc, rr))
+    lastRide = { rideFrom[1], rideFrom[2], frame }
     rideFrom = nil
   end
   -- On a pad by pixel position: +$A8 still names the previous cell for a
@@ -993,7 +1045,11 @@ local function think()
   if (lockv & 0xF801) == 0x1801 then lastAir = frame end
   if os.getenv("SBM2_TRACE") and springFrom then log(string.format("%6d trace lock %04X px(%d,%d) tile (%d,%d) onPad %s", frame, lockv, r16(P1 + P_X), r16(P1 + P_Y), pc0, pr0, tostring(onPad))) end
   -- $0809: landed from a jump (on or next to a pad), not a death.
-  if (lockv & 1) ~= 0 and (onPad or (lockv & 0xF809) == 0x0809 or (frame >= lastAir and frame - lastAir <= 6)) then
+  -- Caught by an $E0/$A0 jump pad: its lock is not a death either.
+  local onJump = jumpObj[pr0 * KEY_W + pc0] ~= nil
+  if onJump and (lockv & 1) ~= 0 then jumpUntil = frame + 120 end
+  if (lockv & 1) ~= 0 and frame <= jumpUntil then lastAir = frame end
+  if (lockv & 1) ~= 0 and (onPad or onJump or (lockv & 0xF809) == 0x0809 or (frame >= lastAir and frame - lastAir <= 6)) then
     -- On a spring pad ($0801 there is the pad's lock, not a death) or in
     -- the air ($1801): hold the planned direction through the launch.
     -- Landed on a pad: pick the jump from here toward the last plan's goal.
@@ -1064,6 +1120,7 @@ local function think()
     return
   end
   if step == false then step = nil end
+  if not playing and FAKE_HEARTS then logMapNext = true end
   playing = true
   -- The border is always hard wall during play; anything else means the
   -- stage is loading or a cutscene is up.
@@ -1093,8 +1150,21 @@ local function think()
   if stNow ~= savedStage then
     savedStage = stNow
     softSeen, softGone, springLand, springTry, rideFail = {}, {}, {}, nil, {}
+    badCell, planSteps, planCo, noBombUntil = {}, nil, nil, {}
     stageTicks = ticks
-    log(string.format("%6d STAGE %02X", frame, stNow))
+    log(string.format("%6d STAGE %02X hearts %02X flash %04X/%02X", frame, stNow, emu.read(P1 + 0xEF, WRAM, false),
+      r16(P1 + 4), emu.read(P1 + 0xB9, WRAM, false)))
+    local hs = {}
+    for k, t in pairs(heartCells()) do hs[#hs + 1] = string.format("(%d,%d)%s", k % KEY_W, k // KEY_W, t) end
+    log(string.format("%6d heart items: %s", frame, table.concat(hs, " ")))
+    local its = {}
+    for i = 0, 63 do
+      local cell = r16(ITEMLIST + 4 * i)
+      if cell >= 0x8000 then break end
+      its[#its + 1] = string.format("(%d,%d)k%d", (cell & 0x7F) // 2, cell >> 7, r16(ITEMLIST + 4 * i + 2) & 0x3FFF)
+    end
+    log(string.format("%6d hidden items: %s", frame, table.concat(its, " ")))
+
     onNextInstruction(function()
       local data = emu.createSavestate()
       inputlog.saveState(OUT .. "/stage.mss", data)
@@ -1129,6 +1199,12 @@ local function think()
   -- Enemies: predicted paths give contact windows (eWin) and kill chances.
   -- enemies/walkers (cells) still drive the exit and hunt plans.
   local elist = Enemies.read(g)
+  jumpObj = {}
+  for _, e in ipairs(elist) do
+    if e.type == 0xE0 or e.type == 0xA0 then
+      jumpObj[e.r * KEY_W + e.c] = { e.c + (e.type == 0xE0 and 8 or -8), e.r }
+    end
+  end
   local samples = Enemies.rollouts(g, elist, c, r, ROLLOUTS, HORIZON)
   local hasEater = false
   for _, e in ipairs(elist) do if e.type == Enemies.EATER then hasEater = true end end
@@ -1183,6 +1259,7 @@ local function think()
     end
   end
   local panelTodo, panelDone = panels()
+  local heartNow = heartCells()
   -- Mode 1 panels (worlds 3-5) flip on every blast, so which spots to bomb
   -- is a parity puzzle: find reachable spots whose blasts together flip
   -- exactly the unfinished panels (Gaussian elimination over GF(2)).
@@ -1208,6 +1285,12 @@ local function think()
       return o
     end
     for _, cell in ipairs(list) do
+      -- Only cells a bomb can be put on (not stairs, not tiles where one
+      -- failed to appear, e.g. the $74 panels themselves).
+      local ct = g[cell[2]][cell[1]]
+      local ck = cell[2] * KEY_W + cell[1]
+      if ct == 0x66 or (noBombTile[ct] or 0) >= 1 or (noBombUntil[ck] or 0) > frame then goto nextCell end
+      do
       local m = 0
       for _, bc in ipairs(blastCells(g, cell[1], cell[2], rangeAt(g, cell[1], cell[2]))) do
         local i = idx[bc[2] * KEY_W + bc[1]]
@@ -1220,6 +1303,8 @@ local function think()
           else basis[bit] = { m, set }; break end
         end
       end
+      end
+      ::nextCell::
     end
     local t, sol = target, {}
     for bit = np - 1, 0, -1 do
@@ -1483,6 +1568,8 @@ local function think()
         if panelTodo[k] or (SOFT[tt] and not softGone[k]) or tt == BARREL or isSwitchOff(tt) or tt == 0x68 or tt == 0x6B or tt == 0x6A or tt == 0x4B then why = "obj" end
         -- A blast pushes an $E2 block one cell on; into a $D3 hole it fills
         -- it and opens the way (docs/mechanics.md, push blocks).
+        -- While a plan is on, only its own bombs move blocks.
+        if tt == 0xE2 and planSteps and pushCell ~= rr * KEY_W + cc then return nil end
         if tt == 0xE2 and cell[3] then
           -- Worth pushing toward a hole one or two cells on (a push moves
           -- it one cell; a block pushed into a $D3 fills it).
@@ -1490,6 +1577,7 @@ local function think()
           local n2 = g[nr + cell[3][2]] and g[nr + cell[3][2]][nc + cell[3][1]]
           if g[nr] and (g[nr][nc] == 0xD3 or (g[nr][nc] == 0x00 and n2 == 0xD3)) then why = "obj" end
         end
+        if tt == ITEM and heartNow[k] then return nil end  -- never blast a heart item
         cells[k] = true
         if reach[k] then near = true end
       end
@@ -1584,7 +1672,7 @@ local function think()
         elseif g[sr][sc] ~= 0x63 then
           break  -- sprung, still breaking: wait for the $00
         else
-          ok = (r16(P1 + 4) & 0x20) ~= 0 or emu.read(P1 + 0xEF, WRAM, false) > 0
+          ok = (r16(P1 + 4) & 0x20) ~= 0 or emu.read(P1 + 0xEF, WRAM, false) > 0 or FAKE_HEARTS
           if ok then
             ok = false
             for _, d in ipairs(DIRS) do if reachNow[(sr + d[2]) * KEY_W + sc + d[1]] then ok = true end end
@@ -1636,7 +1724,7 @@ local function think()
         end or nil,
         avoid = pDone, maxExp = 4000, slice = 0.03,
         noBomb = function(k, t) return (noBombTile[t] or 0) >= 2 or (noBombUntil[k] or 0) > frame end,
-        hearts = hearts >= 0x80 and 99 or hearts, flashing = flashing,
+        hearts = (hearts >= 0x80 or FAKE_HEARTS) and 99 or hearts, flashing = flashing,
       }
       planCo = { coroutine.create(function() return stagePlan(gc0, c, r, ctx) end), sigNow, 0 }
     end
@@ -1657,7 +1745,9 @@ local function think()
       elseif frame - bombTry[2] > 20 then
         noBombUntil[here] = frame + 600
         -- Twice on the same kind of tile (lit panels $70): never plan bombs there.
-        noBombTile[g[r][c]] = (noBombTile[g[r][c]] or 0) + 1
+        if emu.read(P1 + P_BOMBS_LEFT, WRAM, false) > 0 and g[r][c] ~= 0x00 then
+          noBombTile[g[r][c]] = (noBombTile[g[r][c]] or 0) + 1
+        end
         local bs = {}
         for _, b in ipairs(lastBombs) do bs[#bs + 1] = string.format("(%d,%d)t%d%s", b[1], b[2], b[3], b[5] and "r" or "") end
         log(string.format("%6d no bomb appears at (%d,%d); avoiding it; left %d bombs %s", frame, c, r,
@@ -1849,6 +1939,22 @@ local function think()
     end
   end
   if plan ~= "bomb" then bombTry = nil end
+  -- Pressing a direction but not moving for 600 frames (held by an object,
+  -- a warp gone wrong): go back to before it.
+  local pressing = input.up or input.down or input.left or input.right
+  if not pressing or math.abs(x - frozenAt[1]) + math.abs(y - frozenAt[2]) > 3 or frame < frozenAt[3] then
+    frozenAt = { x, y, frame }
+  end
+  if frame - frozenAt[3] > 600 and timeLeft() > 1 then
+    log(string.format("%6d frozen at (%d,%d) since %d; rolling back", frame, c, r, frozenAt[3]))
+    rollback, rollbackBefore = true, frozenAt[3] - 100
+    if lastRide and frozenAt[3] - lastRide[3] < 120 then
+      badCell[lastRide[2] * KEY_W + lastRide[1]] = true
+      rollbackBefore = lastRide[3] - 300
+      log(string.format("%6d froze after the ride from (%d,%d): not again", frame, lastRide[1], lastRide[2]))
+    end
+    frozenAt = { x, y, frame }
+  end
   local s = string.format("%s %s @(%d,%d) px(%d,%d)", plan == "bomb" and "bomb:" .. tostring(bombWhy) or plan, dir or "-", c, r, x, y)
   if s ~= lastPlan then
     log(string.format("%6d %s", frame, s)); lastPlan = s
@@ -1988,6 +2094,7 @@ local function onFrame()
   if not ok then log("error: " .. tostring(err)) end
   local dt = os.clock() - t0
   if dt > 0.05 then log(string.format("%6d slow think %.3fs", frame, dt)) end
+  if logMapNext then logMapNext = false; logMap() end
   if shots[frame] then
     writeFile(string.format("%s/f%06d.png", OUT, frame), emu.takeScreenshot())
     logMap()

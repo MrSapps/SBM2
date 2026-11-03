@@ -64,7 +64,8 @@ def result(out, stage):
                 deaths += 1
             elif 'rollback to' in line:
                 rollbacks += 1
-    clear = next((f for f, s in stages if s != stage[:2]), None)
+    # A game over sends the bot back a stage: only a later stage is a clear.
+    clear = next((f for f, s in stages if int(s, 16) > int(stage[:2], 16)), None)
     return clear, deaths, rollbacks, end
 
 

@@ -622,6 +622,7 @@ local function score() return r16(0x5DEE) end  -- score / 100
 local Enemies = dofile(BOT_DIR .. "/enemies.lua")({ r16 = r16, rd8 = function(a) return emu.read(a, WRAM, false) end,
   MAP_W = MAP_W, MAP_H = MAP_H, KEY_W = KEY_W, tileCentre = tileCentre })
 local ROLLOUTS, HORIZON = 12, 420  -- sampled paths per enemy, frames ahead
+local EATER_SKIP = { [0x95] = true }  -- killChance: eaters go by eaterFate
 local KILL_P = 0.3                 -- bomb for an enemy at this kill chance
 local ENEMY_MARGIN = 6             -- frames of slack around predicted contact
 
@@ -822,6 +823,8 @@ local function think()
   -- enemies/walkers (cells) still drive the exit and hunt plans.
   local elist = Enemies.read(g)
   local samples = Enemies.rollouts(g, elist, c, r, ROLLOUTS, HORIZON)
+  local hasEater = false
+  for _, e in ipairs(elist) do if e.type == Enemies.EATER then hasEater = true end end
   local eWin = Enemies.windows(samples, elist, HORIZON, ENEMY_MARGIN)
   local cw = combine(windows, eWin)   -- blasts + enemies, for routes
   local enemies, walkers = {}, {}
@@ -966,16 +969,29 @@ local function think()
     end
   end
   -- Unless regrown blocks wall us off from what is left to do (the open
-  -- exit, or the last enemies): then they are worth bombing again.
+  -- exit, the last enemies, unlit panels, the $6B button, push blocks):
+  -- then they are worth bombing again.
+  local goals = {}
+  for k in pairs(panelTodo) do goals[k] = true end
+  for rr = 0, MAP_H - 1 do
+    for cc = 0, MAP_W - 1 do
+      local t = g[rr][cc]
+      if t == 0x6B or t == 0xE2 or (gateOpen and t == GATE_OPEN) then goals[rr * KEY_W + cc] = true end
+    end
+  end
   local function leftToDo(cc, rr)
     if gateOpen and #walkers == 0 then return g[rr][cc] == GATE_OPEN end
     for _, e in ipairs(walkers) do
       if math.abs(e[1] - cc) + math.abs(e[2] - rr) <= 1 then return true end
     end
-    return #walkers == 0
+    for _, d in ipairs(DIRS) do
+      if goals[(rr + d[2]) * KEY_W + cc + d[1]] then return true end
+    end
+    return #walkers == 0 and next(goals) == nil
   end
-  if next(softGone) ~= nil and not bfs(g, c, r, leftToDo) then
-    -- Only when it is the regrown blocks that are in the way.
+  if next(softGone) ~= nil then
+    -- Only when it is the regrown blocks that are in the way: something
+    -- left to do is reachable with them gone but not as things are.
     local open = {}
     for rr = 0, MAP_H - 1 do
       local row = {}
@@ -985,7 +1001,22 @@ local function think()
       end
       open[rr] = row
     end
-    if bfs(open, c, r, leftToDo) then softGone = {} end
+    local function flood(grid)
+      local seen, list, head = { [r * KEY_W + c] = true }, { { c, r } }, 1
+      while list[head] do
+        local cc, rr = list[head][1], list[head][2]; head = head + 1
+        for _, d in ipairs(DIRS) do
+          local c2, r2 = cc + d[1], rr + d[2]
+          local k = r2 * KEY_W + c2
+          if not seen[k] and walkable(grid, c2, r2) then seen[k] = true; list[#list + 1] = { c2, r2 } end
+        end
+      end
+      return seen
+    end
+    local now, later = flood(g), flood(open)
+    for k in pairs(later) do
+      if not now[k] and leftToDo(k % KEY_W, k // KEY_W) then softGone = {}; break end
+    end
   end
   local soft, todo = 0, 0
   for rr = 0, MAP_H - 1 do for cc = 0, MAP_W - 1 do if SOFT[g[rr][cc]] then soft = soft + 1 end end end
@@ -1203,10 +1234,17 @@ local function think()
         cells[k] = true
         if reach[k] then near = true end
       end
+      -- A bomb an eater gets to first is swallowed: no blast at all.
+      local eatK = 0
+      if hasEater then
+        local eat
+        eat, eatK = Enemies.eaterFate(g, samples, elist, cc, rr, t or 0, NEW_FUSE, rangeAt(g, cc, rr), FLAME_FRAMES)
+        if eat >= 0.3 then return nil end
+      end
       if not why and near then
         local t0 = (t or 0) + NEW_FUSE
-        local _, best = Enemies.killChance(samples, elist, cells, t0 - 4, t0 + FLAME_FRAMES)
-        if best >= KILL_P then why = "enemy" end
+        local _, best = Enemies.killChance(samples, elist, cells, t0 - 4, t0 + FLAME_FRAMES, EATER_SKIP)
+        if math.max(best, eatK) >= KILL_P then why = "enemy" end
       end
       return why
     end

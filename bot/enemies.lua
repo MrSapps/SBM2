@@ -11,7 +11,8 @@
 --   E.read(g)                       -> enemies (see fields below)
 --   E.rollouts(g, list, pc, pr, n, horizon) -> samples (per enemy: n paths of {k, t0, t1})
 --   E.windows(samples, list, tmax, margin)   -> windows[k] = { {t0, t1}, ... } (contact)
---   E.killChance(samples, list, cells, t0, t1) -> expected kills, best single chance
+--   E.killChance(samples, list, cells, t0, t1, skip) -> expected kills, best single chance
+--   E.eaterFate(g, samples, list, bc, br, tb, fuse, range, flame) -> P(eaten), P(eater killed)
 return function(env)
   local r16, rd8 = env.r16, env.rd8
   local MAP_W, MAP_H, KEY_W = env.MAP_W, env.MAP_H, env.KEY_W
@@ -199,11 +200,11 @@ return function(env)
 
   -- cells: set of keys a blast covers during [t0, t1]. Returns the expected
   -- number of killable enemies caught and the best single-enemy chance.
-  function E.killChance(samples, list, cells, t0, t1)
+  function E.killChance(samples, list, cells, t0, t1, skip)
     local total, best = 0, 0
     for i, e in ipairs(list) do
       local s = samples[i]
-      if e.killable and #s > 0 then
+      if e.killable and #s > 0 and not (skip and skip[e.type]) then
         local hits = 0
         for _, path in ipairs(s) do
           for _, iv in ipairs(path) do
@@ -216,6 +217,51 @@ return function(env)
       end
     end
     return total, best
+  end
+
+  -- The $95 bomb eater (docs/enemies.md): at each cell centre it turns
+  -- toward the nearest bomb within 5 cells in a straight line (solid tiles
+  -- block the search) and swallows it on arrival, with no blast. A bomb put
+  -- at (bc,br) at time tb with this fuse is eaten if an eater sees it and
+  -- gets there first; if it gets there late, it walks into the blast.
+  -- Samples are the eater's paths without the bomb, followed until it sees it.
+  E.EATER = 0x95
+  function E.eaterFate(g, samples, list, bc, br, tb, fuse, range, flame)
+    local eaten, killed = 0, 0
+    local te = tb + fuse
+    for i, e in ipairs(list) do
+      local s = samples[i]
+      if e.type == E.EATER and not e.gadget and #s > 0 then
+        local half = e.cpf / 2
+        local ne, nk = 0, 0
+        for _, path in ipairs(s) do
+          for _, iv in ipairs(path) do
+            local tc = math.max(iv[2] + half, 0)
+            if tc > te then break end
+            local c, r = iv[1] % KEY_W, iv[1] // KEY_W
+            local d
+            if tc >= tb and (c == bc or r == br) and (c ~= bc or r ~= br) then
+              d = math.abs(c - bc) + math.abs(r - br)
+              local sc, sr = (bc > c and 1) or (bc < c and -1) or 0, (br > r and 1) or (br < r and -1) or 0
+              for j = 1, d - 1 do
+                if d > 5 or g[r + sr * j][c + sc * j] >= 0x80 then d = nil; break end
+              end
+              if d and d > 5 then d = nil end
+            end
+            if d then
+              local arrive = tc + d * e.cpf
+              if arrive <= te then ne = ne + 1
+              elseif d - (te + flame - tc) / e.cpf <= range then nk = nk + 1 end
+              break
+            end
+            if iv[1] == br * KEY_W + bc then break end
+          end
+        end
+        eaten = math.max(eaten, ne / #s)
+        if e.killable then killed = math.max(killed, nk / #s) end
+      end
+    end
+    return eaten, killed
   end
 
   return E

@@ -2673,6 +2673,67 @@ static void ObjScreenWrap(void)
 }
 
 
+/* C1:4DCF  Draws an object made of +$7C sprite pieces: C0:9D93 sets up
+ * the piece pointer $79; the first OAM slot +$80 comes from table C5:D862
+ * by +$08, then each piece takes the next slot not yet used in this frame
+ * ($7E2000 = slot taken) and is drawn by DrawObjectSprite, $79 moving 5
+ * bytes per piece. */
+static void DrawPieces(void)
+{
+    Cpu *c = g_cpu;
+    CallLong(0xC09D93);
+    c->y = 0x08;
+    c->a = ind16(0x6A, 0x08);
+    SetFlag(FC, c->a & 0x8000);
+    c->x = (uint16_t)(c->a << 1);
+    c->a = PeekLong16(0xC5D862 + c->x);
+    c->y = 0x80;
+    ind16_set(0x6A, 0x80, c->a);
+    for (;;) {
+        uint16_t slot;
+        for (;;) {
+            c->y = 0x80;
+            slot = ind16(0x6A, 0x80);
+            SetFlag(FC, slot & 0x8000);
+            c->x = (uint16_t)(slot << 1);
+            if (!ram16(0x7E2000 + c->x)) break;
+            ind16_set(0x6A, 0x80, slot + 1);
+        }
+        c->a = 0xFFFF;
+        ram16_set(0x7E2000 + c->x, 0xFFFF);
+        SetNZ16(0xFFFF);
+        CallLong(0xC14E1E);
+        ram16_set(0x79, ram16(0x79) + 5);
+        c->y = 0x7C;
+        c->a = ind16(0x6A, 0x7C) - 1;
+        SetNZ16(c->a);
+        if (!c->a) break;
+        ind16_set(0x6A, 0x7C, c->a);
+    }
+    Ret_RTL();
+}
+
+
+/* C0:9D93  Piece pointer $79-$7B = the object's +$79-$7B; +$7D = 0, +$7C
+ * = the piece count (first byte of the list); $79 then points past it. */
+static void PiecesStart(void)
+{
+    Cpu *c = g_cpu;
+    ram8_set(0x79, ind8(0x6A, 0x79));
+    ram8_set(0x7A, ind8(0x6A, 0x7A));
+    ram8_set(0x7B, ind8(0x6A, 0x7B));
+    ind8_set(0x6A, 0x7D, 0);
+    uint8_t n = ind8(0x79, 0);
+    ind8_set(0x6A, 0x7C, n);
+    c->a = (c->a & 0xFF00) | n;
+    c->y = 0x7C;
+    uint16_t p = ram16(0x79) + 1;
+    ram16_set(0x79, p);
+    SetNZ16(p);
+    Ret_RTL();
+}
+
+
 const Hook g_hooks[] = {
     { 0xC0BFE2, "MapTileAtXY",       MapTileAtXY,       FM | FX, 0, 0 },
     { 0xC14031, "PlayerTileHandler", PlayerTileHandler, FX,      0, 0 },
@@ -2734,6 +2795,8 @@ const Hook g_hooks[] = {
     { 0xC152C5, "ObjectsUpdate",     ObjectsUpdate,     FM | FX, 0, 0 },
     { 0xC10592, "PlayerTargetCells", PlayerTargetCells, FM | FX, 0, 0 },
     { 0xC0A146, "ObjScreenWrap",     ObjScreenWrap,     FM | FX, 0, 0 },
+    { 0xC14DCF, "DrawPieces",        DrawPieces,        FM | FX, 0, 0 },
+    { 0xC09D93, "PiecesStart",       PiecesStart,       FM | FX, 0, 0 },
     { 0xC0E0AA, "BombsUpdate",       BombsUpdate,       FM | FX, 0,
       IGN_A | IGN_X | IGN_Y | IGN_NZ | IGN_C | IGN_V },
 };

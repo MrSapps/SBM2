@@ -984,6 +984,23 @@ local Boss = dofile(BOT_DIR .. "/boss.lua")({ r16 = r16, rd8 = function(a) retur
   origin = origin, MAP_W = MAP_W, MAP_H = MAP_H, KEY_W = KEY_W })
 local BOSS_MARGIN, BOSS_SLACK = 6, 12  -- pixels around a boss box; frames either side of its pass
 local bossHp = nil  -- total boss HP last frame (nil: no boss)
+-- 5-8 form 2 (docs/enemies.md 7.4) is hurt only by a thrown bomb: with the
+-- glove (+$FE), lift a bomb of our own and throw it when the body is ahead.
+local throwFace, throwFaceFrames, liftAt = nil, 0, nil
+-- A thrown bomb's offset from P1, frame by frame from the release
+-- (measured in 5-8; it lands after ~12 frames). Left mirrors right, up
+-- mirrors down around the start 16 px above P1.
+local THROW_PATH = {
+  down = { { 0, -16 }, { 0, -16 }, { 0, -4 }, { 0, 6 }, { 0, 15 }, { 0, 23 }, { 0, 30 }, { 0, 36 }, { 0, 41 }, { 0, 44 }, { 0, 46 }, { 0, 48 } },
+  left = { { -4, -14 }, { -4, -14 }, { -8, -19 }, { -12, -23 }, { -16, -26 }, { -20, -28 }, { -24, -31 }, { -28, -33 },
+    { -32, -34 }, { -36, -35 }, { -40, -29 }, { -44, -21 }, { -48, -12 } },
+}
+THROW_PATH.up, THROW_PATH.right = {}, {}
+for i, p in ipairs(THROW_PATH.down) do THROW_PATH.up[i] = { 0, -32 - p[2] } end
+for i, p in ipairs(THROW_PATH.left) do THROW_PATH.right[i] = { -p[1], p[2] } end
+local function finalForm2()
+  return emu.read(0x1A, WRAM, false) == 0x57 and emu.read(0x1002, WRAM, false) == 0xCC and r16(0x1000) >= 0xD0B8
+end
 
 -- a and b both map cell -> list of windows; the overlay looks up both.
 local function combine(a, b)
@@ -1172,7 +1189,6 @@ local function think()
     local ab = {}
     for i = 0xE0, 0xFF do ab[#ab + 1] = string.format("%02X", emu.read(P1 + i, WRAM, false)) end
     log(string.format("%6d P1 +E0..FF %s", frame, table.concat(ab, " ")))
-
     onNextInstruction(function()
       local data = emu.createSavestate()
       inputlog.saveState(OUT .. "/stage.mss", data)
@@ -1219,6 +1235,13 @@ local function think()
   local eWin = Enemies.windows(samples, elist, HORIZON, ENEMY_MARGIN)
   -- Bosses: their boxes are no-go for the whole horizon; flames on their
   -- sense points (where they'll be when the bomb goes off) hurt them.
+  -- 5-8 form 2 flies straight at waypoint +$28 & 15 (table CC:D272).
+  Boss.target[0x1000] = nil
+  if finalForm2() then
+    local wp = 0xCCD272 + (r16(0x1028) & 15) * 4
+    local function rom16(ad) return emu.read(ad, emu.memType.snesMemory, false) | (emu.read(ad + 1, emu.memType.snesMemory, false) << 8) end
+    Boss.target[0x1000] = { rom16(wp), rom16(wp + 2) }
+  end
   local bosses = Boss.read()
   local bossNow, bossSense, bossEat = {}, {}, {}
   if #bosses > 0 then
@@ -1231,6 +1254,7 @@ local function think()
     for _, b in ipairs(bosses) do if b.hurt then b.sense = nil end end
     bossSense = Boss.senseCells(bosses, NEW_FUSE)
     bossEat = Boss.senseCells(bosses, 0)
+    if finalForm2() then bossSense = {} end  -- flames don't hurt form 2
     -- With the remote we pick the moment: a blast within a few cells of
     -- where a boss is now is worth setting up (bosses come to P1).
     if remoteOn then
@@ -2009,6 +2033,54 @@ local function think()
         input = { a = input.a, b = input.b }
         if x < tx - 1 then input.right = true elseif x > tx + 1 then input.left = true end
         if y < ty - 1 then input.down = true elseif y > ty + 1 then input.up = true end
+      end
+    end
+  end
+  -- Form 2 throws (thrown bomb object inside the body's x/y +-24, CC:97E8;
+  -- it flies ~52 px in ~14 frames from 16 px ahead of P1).
+  if finalForm2() and emu.read(P1 + 0xFE, WRAM, false) > 0 then
+    local f52 = r16(P1 + 0x52)
+    local holding = (f52 & 0x6) ~= 0
+    local body
+    for _, b in ipairs(bosses) do if b.base == 0x1000 then body = b end end
+    local bx, by = r16(0x1011), r16(0x1014)
+    local DV = { up = { 0, -1 }, down = { 0, 1 }, left = { -1, 0 }, right = { 1, 0 } }
+    for d in pairs(DV) do if input[d] then throwFace = d end end
+    if holding then
+      input.a = true
+      -- A throw hits if the bomb is inside the body's +-24 box (CC:97E8)
+      -- on some frame of its flight; turning first costs ~2 frames.
+      local want
+      for d, path in pairs(THROW_PATH) do
+        local delay = (throwFace == d and throwFaceFrames >= 2) and 0 or 3
+        for k, o in ipairs(path) do
+          local px, py = bx, by
+          if body then px, py = Boss.predict(body, k + delay) end
+          if math.abs(x + o[1] - px) <= 22 and math.abs(y + o[2] - py) <= 22 then want = d; break end
+        end
+        if want then break end
+      end
+      if want then
+        if throwFace == want and throwFaceFrames >= 2 then
+          input.a = nil
+          log(string.format("%6d throw %s at boss (%.0f,%.0f) from px(%d,%d)", frame, want, bx, by, x, y))
+          throwFaceFrames = 0
+        else
+          input = { a = true, [want] = true }
+          if throwFace == want then throwFaceFrames = throwFaceFrames + 1 else throwFace, throwFaceFrames = want, 1 end
+        end
+      end
+      liftAt = nil
+    else
+      local dist = math.abs(bx - x) + math.abs(by - y)
+      local onBomb = isBomb(g[r][c])
+      if onBomb and liftAt and frame - liftAt < 60 then
+        -- Our bomb is here: release, then press again to lift it (edge).
+        input = { a = frame % 2 == 0 }
+      elseif not onBomb and dist >= 40 and dist <= 140 and not danger[here] and not nearEnemy[here]
+          and emu.read(P1 + P_BOMBS_LEFT, WRAM, false) > 0 then
+        input.a = frame % 2 == 0
+        liftAt = frame
       end
     end
   end

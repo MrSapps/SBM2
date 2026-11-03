@@ -474,6 +474,11 @@ give the bot all it needs without knowing a boss's states:
 * Map cell of a point: col = (x + `StageOriginX`) >> 4, row =
   (y + `StageOriginY`) >> 4 (`MapTileAtXY` C0:BFE2).
 
+* **Thrown bombs.** `BossBombObjHit` (CC:96D9) checks bomb objects
+  (`+$7E` = `$0100`, list `$7E262A`) against a box at `[$6D]`: one with
+  `+$52` bit 4 (thrown, docs/mechanics.md 10b) is a hit; bit 5 just
+  removes it.
+
 ### 8.1 3-8 (stage `$37`): the sun
 
 * HP 11 (`+$20` = `$0B`, set by the intro state before CC:9A85).
@@ -490,3 +495,23 @@ give the bot all it needs without knowing a boss's states:
   their boxes the same way.
 * HP 0: P1 is frozen (`PlayerCutsceneLock`), and after the death
   animation `BossStageClear` ends the stage (CC:9DBB).
+
+### 8.2 4-8 (stage `$47`): the robot
+
+* One object at `$10C0`, state CC:C050, HP 8. Contact box CC:C339
+  (±12 px).
+* Every `$2A` frames it snaps to a 32 px grid and turns toward P1
+  (`CCDF53` gives the angle; table CC:C4FA maps it to up/right/down/left,
+  speeds CC:C4EA = 0.75 px/frame), so it moves two cells per step.
+* **Damage**: only a flame on the cell under its centre (CC:C4B9 ->
+  `MapTileAtXY`, then `BossEatBomb`). A bomb on that cell is swallowed.
+  With the remote, the bot sets a bomb near it and fires when the centre
+  cell is in the blast.
+* Within ±32 px of P1 (sight box CC:C498) it drops a bomb of its own
+  (child CC:C554) and waits `$80` frames.
+
+### 8.3 5-8 form 2 path
+
+Form 2 (CC:D139) heads for waypoint `+$28 & 15` (table CC:D272) and picks
+a new random one when it gets within box CC:D262 of it. The bot predicts
+it straight to the waypoint.

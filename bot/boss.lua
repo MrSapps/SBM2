@@ -19,6 +19,7 @@ return function(env)
   local KEY_W, MAP_W, MAP_H = env.KEY_W, env.MAP_W, env.MAP_H
   local ROM = emu.memType.snesMemory
   local CONTACT, EAT_BOMB = 0xCCA538, 0xCCA2C4
+  local SENSE_ENTRIES = { 0xCCA266, 0xCCC4B9 }  -- BossFlameSense, 4-8 centre check
 
   local function rl16(a)  -- 16-bit read from the CPU bus (ROM tables)
     return emu.read(a, ROM, false) | (emu.read(a + 1, ROM, false) << 8)
@@ -51,8 +52,15 @@ return function(env)
     obj(x).box = b
   end, emu.callbackType.exec, CONTACT, CONTACT)
 
+  -- X at BossEatBomb is the object only after a flame was found (otherwise
+  -- MapTileAtXY's tile index), so note the object when the check starts.
+  local senseObj
+  for _, a in ipairs(SENSE_ENTRIES) do
+    emu.addMemoryCallback(function() senseObj = emu.getState()["cpu.x"] end, emu.callbackType.exec, a, a)
+  end
   emu.addMemoryCallback(function()
-    local x = emu.getState()["cpu.x"]
+    local x = senseObj
+    if not x or x < 0x1000 or x >= 0x1800 then return end
     local o = obj(x)
     o.sense = o.sense or {}
     local s = o.sense
@@ -134,7 +142,18 @@ return function(env)
     if q > span then q = 2 * span - q end
     return lo + q
   end
+  -- A known destination (B.target[base] = {x, y}, e.g. 5-8 form 2's
+  -- waypoint): straight there at the current speed, then stay.
+  B.target = {}
   function B.predict(b, t)
+    local tg = B.target[b.base]
+    if tg then
+      local dx, dy = tg[1] - b.x, tg[2] - b.y
+      local d = math.sqrt(dx * dx + dy * dy)
+      local go = math.min(d, math.sqrt(b.vx * b.vx + b.vy * b.vy) * t)
+      if d < 1 then return b.x, b.y end
+      return b.x + dx / d * go, b.y + dy / d * go
+    end
     local x, y = b.x + b.vx * t, b.y + b.vy * t
     local bb = bounds[b.base]
     if bb then x, y = reflect(x, b.vx, bb[1], bb[2]), reflect(y, b.vy, bb[3], bb[4]) end
@@ -150,8 +169,10 @@ return function(env)
       if b.box and b.x > -64 and b.x < 0x200 then
         for t = 0, horizon, STEP do
           local px, py = B.predict(b, t)
-          -- Further ahead is less sure: widen the box with time.
-          local m = margin + t // 16
+          -- Further ahead is less sure: widen the box with time, more so
+          -- for a fast boss (5-8 form 2 re-aims every 16 frames).
+          local spd = math.sqrt(b.vx * b.vx + b.vy * b.vy)
+          local m = margin + t // 16 + math.floor(t * math.max(0, spd - 0.8) * 0.5)
           local x0, x1 = px + b.box[1] - m, px + b.box[2] - 1 + m
           local y0, y1 = py + b.box[3] - m, py + b.box[4] - 1 + m
           local c0, r0 = cellOfPx(x0 - 7, y0 - 7)

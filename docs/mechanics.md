@@ -332,6 +332,28 @@ and each B press sets off the **oldest** remote bomb, one per press
 picked up the remote must press B, about 20 frames apart per bomb, after
 retreating.
 
+## 10b. Glove: lift and throw
+
+* The glove item (cell graphics `$26`, handler at C0:9BF6 via the table at
+  C5:F145) adds 1 to P1 `+$FE`. Whether a death takes it away is not
+  checked yet.
+* **Lift** (`BombButton` C0:3082): pressing the bomb button (an edge:
+  `+$0E` bit 10) while standing on a bomb (tile under P1 `+$B4` has bit 6
+  and `& $3F` = 3) with `+$FE` ≠ 0 and `+$50` ≠ 8 calls C0:2F6E. `+$52`
+  becomes 3, then 6 while the bomb is held overhead (about 14 frames).
+* **Throw**: releasing the button while `+$52` bit 2 is set calls C0:2CAF.
+  It creates a bomb object (`+$7E` = `$0100`) 16 px above P1 with `+$52`
+  = `$10`, flying in the facing direction (`+$5E`). **[probe]** in 5-8:
+  down from P1 y 176: y 160, 160, 172, 182, 191, 199, 206, 212, 217, 220,
+  then it lands (~3 cells). Left from x 128: x drops 4 px/frame for 12
+  frames while y arcs from −14 to −35 and back to −12. Then it is a
+  normal bomb again.
+* A held bomb is thrown by itself when P1 dies (`+$52` bit 1 at the death
+  code C0:A675 -> C0:A743, same object, random direction).
+* Only these objects (`+$52` bit 4) hurt bosses that use
+  `BossBombObjHit` (CC:96D9): 5-8 form 2 (box ±24, CC:97E8). Bombs placed
+  normally (bit 5) are swallowed by it.
+
 ## 11. Stage notes
 
 * **2-2** (`k_w2`, `$21`): three `$69` panels at (5,20), (5,27), (10,3).

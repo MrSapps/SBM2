@@ -469,6 +469,8 @@ local rideFail, rideWait, rideFrom = {}, nil, nil
 -- Rides come when the platform does: never count on one to escape a blast.
 local allowRide = true
 local pushCell, pushNext, lastObjFrame = nil, 0, 0  -- push planner state (think)
+local trapsOK, sacrificeUntil = false, 0  -- crossing a trap on purpose (think)
+local bombWhy  -- why the last bomb was placed, for the log
 local function laneEnds(g, c, r)
   local ends = {}
   for _, d in ipairs({ { 0, -1 }, { 0, 1 }, { -1, 0 }, { 1, 0 } }) do
@@ -536,6 +538,8 @@ local function bfs(g, c0, r0, goal, avoid, windows, t0)
             if not (avoid and avoid[k]) and (walkable(g, cc, rr) or (g[rr] and g[rr][cc] == SPRING))
                 and not (windows and hit(windows, k, arrive - FPT, arrive + FPT)) then
               push(cc, rr, first or dir[3], n + 1)
+            elseif trapsOK and g[rr] and g[rr][cc] == 0x63 then
+              push(cc, rr, first or dir[3], n + 30)
             end
           end
         end
@@ -714,7 +718,7 @@ local function think()
       if r16(P1 + 0xA8) ~= r16(0x5D72) then
         deaths = deaths + 1
         -- A time-up can't be fixed by replaying the last few seconds.
-        rollback = timeLeft() > 1
+        rollback = timeLeft() > 1 and frame >= sacrificeUntil
       end
       local es = {}
       for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
@@ -950,9 +954,10 @@ local function think()
     remoteSince = nil
   end
   visits[here] = (visits[here] or 0) + 1
-  -- World 2 soft blocks grow back (docs/mechanics.md): one already blown
-  -- up is not worth bombing again.
-  if emu.read(0x1A, WRAM, false) >> 4 == 2 then
+  -- World 2 soft blocks grow back
+  -- (docs/mechanics.md): one already blown up is not worth bombing again.
+  local world = emu.read(0x1A, WRAM, false) >> 4
+  if world == 2 then
     for rr = 0, MAP_H - 1 do
       for cc = 0, MAP_W - 1 do
         local k = rr * KEY_W + cc
@@ -962,14 +967,26 @@ local function think()
   end
   -- Unless regrown blocks wall us off from what is left to do (the open
   -- exit, or the last enemies): then they are worth bombing again.
-  local walledIn = next(softGone) ~= nil and not bfs(g, c, r, function(cc, rr)
+  local function leftToDo(cc, rr)
     if gateOpen and #walkers == 0 then return g[rr][cc] == GATE_OPEN end
     for _, e in ipairs(walkers) do
       if math.abs(e[1] - cc) + math.abs(e[2] - rr) <= 1 then return true end
     end
     return #walkers == 0
-  end)
-  if walledIn then softGone = {} end
+  end
+  if next(softGone) ~= nil and not bfs(g, c, r, leftToDo) then
+    -- Only when it is the regrown blocks that are in the way.
+    local open = {}
+    for rr = 0, MAP_H - 1 do
+      local row = {}
+      for cc = 0, MAP_W - 1 do
+        local t = g[rr][cc]
+        row[cc] = (SOFT[t] and softGone[rr * KEY_W + cc]) and 0x00 or t
+      end
+      open[rr] = row
+    end
+    if bfs(open, c, r, leftToDo) then softGone = {} end
+  end
   local soft, todo = 0, 0
   for rr = 0, MAP_H - 1 do for cc = 0, MAP_W - 1 do if SOFT[g[rr][cc]] then soft = soft + 1 end end end
   for _ in pairs(panelTodo) do todo = todo + 1 end
@@ -1173,7 +1190,7 @@ local function think()
           why = "obj"
         elseif panelDone[k] then return nil end
         -- $68: lighting it ($6F) is what kills 3-1's immune $8F enemies.
-        if panelTodo[k] or (SOFT[tt] and not softGone[k]) or tt == BARREL or isSwitchOff(tt) or tt == 0x68 or tt == 0x6B or tt == 0x6A then why = "obj" end
+        if panelTodo[k] or (SOFT[tt] and not softGone[k]) or tt == BARREL or isSwitchOff(tt) or tt == 0x68 or tt == 0x6B or tt == 0x6A or tt == 0x4B then why = "obj" end
         -- A blast pushes an $E2 block one cell on; into a $D3 hole it fills
         -- it and opens the way (docs/mechanics.md, push blocks).
         if tt == 0xE2 and cell[3] then
@@ -1211,31 +1228,42 @@ local function think()
     -- With the remote, one bomb at a time: a remote bomb is never danger, so
     -- a second one placed nearby can seal us in between them.
     local haveBomb = emu.read(P1 + P_BOMBS_LEFT, WRAM, false) > 0 and not (remoteOn and next(remoteCells))
+    -- A cell worth reaching: the gate, an item, a panel, an enemy, a soft block.
+    local function usefulAt(cc, rr, grid)
+      local t = grid[rr][cc]
+      if t == GATE_OPEN or t == ITEM or panelTodo[rr * KEY_W + cc] then return true end
+      for _, d in ipairs(DIRS) do
+        local n = grid[rr + d[2]] and grid[rr + d[2]][cc + d[1]]
+        if n == 0xC9 or n == GATE_OPEN or (SOFT[n] and not softGone[(rr + d[2]) * KEY_W + cc + d[1]]) then return true end
+      end
+      for _, e in ipairs(walkers) do if e[1] == cc and e[2] == rr then return true end end
+      return false
+    end
     -- Nothing to bomb for a while: plan block pushes that open up more of
     -- the map (gate, soft blocks, panels, items, enemies beyond holes).
-    if haveBomb and frame - lastObjFrame > 240 and frame >= pushNext then
+    if frame - lastObjFrame > 240 and frame >= pushNext then
       pushNext = frame + 120
       local hasBlock = false
       for rr = 0, MAP_H - 1 do for cc = 0, MAP_W - 1 do if g[rr][cc] == 0xE2 then hasBlock = true end end end
       pushCell = nil
       if hasBlock then
-        pushCell = planPushes(g, c, r, function(cc, rr, grid)
-          local t = grid[rr][cc]
-          if t == GATE_OPEN or t == ITEM or panelTodo[rr * KEY_W + cc] then return true end
-          for _, d in ipairs(DIRS) do
-            local n = grid[rr + d[2]] and grid[rr + d[2]][cc + d[1]]
-            if n == 0xC9 or n == GATE_OPEN or (SOFT[n] and not softGone[(rr + d[2]) * KEY_W + cc + d[1]]) then return true end
-          end
-          for _, e in ipairs(walkers) do if e[1] == cc and e[2] == rr then return true end end
-          return false
-        end, 600)
-        if pushCell then log(string.format("%6d push plan: bomb at (%d,%d)", frame, pushCell % KEY_W, pushCell // KEY_W)) end
+        pushCell = planPushes(g, c, r, usefulAt, 600)
+        if pushCell then log(string.format("%6d push plan: bomb at (%d,%d)", frame, pushCell % KEY_W, pushCell // KEY_W))
+        elseif os.getenv("SBM2_DBG") then log(string.format("%6d dbg no push plan", frame)) end
       end
     end
     local why = haveBomb and targetsInReach(c, r, 0)
     if why == "enemy" and frame < ambushHold then why = nil end
     if why and canEscape(c, r, 0) then
-      plan = "bomb"
+      plan, bombWhy = "bomb", why
+      if os.getenv("SBM2_DBG") and why == "obj" and lastPlan and not lastPlan:find("^bomb") then
+        local t = {}
+        for _, cell in ipairs(blastCells(g, c, r, rangeAt(g, c, r))) do
+          local k = cell[2] * KEY_W + cell[1]
+          t[#t + 1] = string.format("(%d,%d)%X%s%s", cell[1], cell[2], g[cell[2]][cell[1]], panelTodo[k] and "T" or "", panelDone[k] and "D" or "")
+        end
+        log(string.format("%6d dbg bomb cells %s plan=%s push=%s", frame, table.concat(t, " "), tostring(panelPlan ~= nil), tostring(pushCell)))
+      end
       if why == "obj" then lastObjFrame = frame end
       if pushCell == here then pushCell = nil end
       if not bombTry or bombTry[1] ~= here then bombTry = { here, frame }
@@ -1331,7 +1359,30 @@ local function think()
           end
         end
       end
-      if frame < stallUntil and plan ~= "bomb" and plan ~= "spring" then dir = nil end
+      if not dir and not springTry and not pushCell and frame - lastObjFrame > 900 and frame - sacrificeUntil > 1500 then
+        -- Still nothing: cross a $63 trap (a heart, or a life; the trap is
+        -- gone afterwards, docs/mechanics.md section 3) if that reaches
+        -- something useful. The death that may follow is not rolled back.
+        local base = {}
+        do
+          local list, head = { { c, r } }, 1
+          base[r * KEY_W + c] = true
+          while list[head] do
+            local cc, rr = list[head][1], list[head][2]; head = head + 1
+            for _, d in ipairs(DIRS) do
+              local c2, r2 = cc + d[1], rr + d[2]
+              local k = r2 * KEY_W + c2
+              if not base[k] and walkable(g, c2, r2) then base[k] = true; list[#list + 1] = { c2, r2 } end
+            end
+          end
+        end
+        trapsOK = true
+        local d2 = bfs(g, c, r, function(cc, rr) return not base[rr * KEY_W + cc] and usefulAt(cc, rr, g) end)
+        trapsOK = false
+        if d2 then plan, dir = "trap", d2 end
+        if os.getenv("SBM2_DBG") then log(string.format("%6d dbg trap route %s", frame, tostring(d2))) end
+      end
+      if frame < stallUntil and plan ~= "bomb" and plan ~= "spring" and plan ~= "trap" then dir = nil end
       if not dir and frame < exploreUntil then
         -- After a death or a long stall: walk toward the least visited
         -- neighbour (random tie-break) and sometimes drop a bomb.
@@ -1345,7 +1396,7 @@ local function think()
           end
         end
         if #opts > 0 then dir = opts[math.random(#opts)] end
-        if haveBomb and math.random() < 0.1 then input.a = true end
+        if haveBomb and not remoteOn and math.random() < 0.1 then input.a = true end
       end
       if not dir then plan = "wait" end
     end
@@ -1380,6 +1431,10 @@ local function think()
   if dir and not (step and plan ~= "flee" and plan ~= "dodge") then
     local d = ({ up = { 0, -1 }, down = { 0, 1 }, left = { -1, 0 }, right = { 1, 0 } })[dir]
     step = { c = c, r = r, tc = c + d[1], tr = r + d[2], dir = dir }
+    if plan == "trap" and g[step.tr] and (g[step.tr][step.tc] == 0x63 or g[step.tr][step.tc] == 0x4B) then
+      sacrificeUntil = frame + 240
+      log(string.format("%6d crossing the trap at (%d,%d) on purpose", frame, step.tc, step.tr))
+    end
     springDir = g[step.tr] and g[step.tr][step.tc] == SPRING and dir or nil
     if springDir and springTry and springTry[1] == step.tr * KEY_W + step.tc then springDir = springTry[2] end
   end
@@ -1400,7 +1455,7 @@ local function think()
     end
   end
   if plan ~= "bomb" then bombTry = nil end
-  local s = string.format("%s %s @(%d,%d) px(%d,%d)", plan, dir or "-", c, r, x, y)
+  local s = string.format("%s %s @(%d,%d) px(%d,%d)", plan == "bomb" and "bomb:" .. tostring(bombWhy) or plan, dir or "-", c, r, x, y)
   if s ~= lastPlan then
     log(string.format("%6d %s", frame, s)); lastPlan = s
     recent[#recent + 1] = string.format("%d %s", frame, s)

@@ -149,6 +149,12 @@ C0:EE1C CellCentreXY        ; cell -> $42 = col*16-orgX+8, $44 = row*16-orgY+7
 C0:A380 ObjMove             ; x += +$14.+$16, y += +$1C.+$1E (sign from +0 bits 0/1)
 C0:0CAA RandomPerFrame      ; $000400 = Random each frame
 C1:5518 PlayerEnemyContact  ; P1 shares a cell with a harmful enemy -> heart or death
+C0:20FA ClearOamBuffer      ; every OAM slot y = $E0, $7E2000-$7E21FF zeroed
+C0:28A7 SortObjList         ; $7E2A70 list sorted by low byte, largest first
+C0:DE63 FreeSlotsA          ; non-negative entries of 16 at $7E3D88 -> $7E2860
+C0:DEA5 FreeSlotsB          ; non-negative entries of 32 at $7F0000 -> $7E2860
+C1:540F BuildObjLists       ; live objects -> $7E2620, cells $7E26A0, targets $7E2720
+C1:0F10 DrawObjects         ; draw order by y (+$18) via SortObjList, then draw each
 C1:558E EnemyOnPlayerCell   ; carry: harmful enemy with +$A8 == P1 +$A8
 C1:5624 HarmlessTypeCheck   ; carry: (type & $7F) in list C5:D850
 C1:2C52 EnemyInitFromRecord ; record C2:DAC6[+4]: +$40 type, +$41, +$43 hp, +$46/+$48 speed

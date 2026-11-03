@@ -2207,6 +2207,296 @@ static void PlayerHitCheck(void)
 }
 
 
+/* C0:20FA  Every OAM slot off screen (y = $E0) and the $7E2000 shadow
+ * zeroed, 128 slots. Leaves A = 0, X = $200, Y = 0, Z set. */
+static void ClearOamBuffer(void)
+{
+    Cpu *c = g_cpu;
+    for (uint16_t x = 0; x < 0x200; x += 4) {
+        ram16_set(OamBuffer + x, 0xE0FF);
+        ram16_set(0x7E2000 + x, 0);
+        ram16_set(0x7E2002 + x, 0);
+    }
+    c->a = 0;
+    c->x = 0x200;
+    c->y = 0;
+    SetNZ16(0);
+    Ret_RTL();
+}
+
+/* C0:28A7  Sorts the $FFFF-terminated word list $7E2A70 by low byte,
+ * largest first ($22 = position, $40 = best low byte, $42 = swap temp). */
+static void SortObjList(void)
+{
+    Cpu *c = g_cpu;
+    const uint32_t list = 0x7E2A70;
+    ram16_set(0x22, 0);
+    for (;;) {
+        uint16_t i = ram16(0x22), x = i;
+        uint16_t a = ram16(list + x);
+        if (a == 0xFFFF) {
+            c->a = a;
+            c->x = x;
+            SetNZ16(0);
+            SetFlag(FC, 1);
+            Ret_RTL();
+            return;
+        }
+        ram16_set(0x40, a & 0xFF);
+        for (;;) {
+            x += 2;
+            c->y = x;
+            a = ram16(list + x);
+            if (a == 0xFFFF) break;
+            if ((a & 0xFF) > ram16(0x40)) {
+                ram16_set(0x42, a);
+                ram16_set(list + x, ram16(list + i));
+                ram16_set(list + i, a);
+                ram16_set(0x40, a & 0xFF);
+            }
+        }
+        ram16_set(0x22, i + 2);
+    }
+}
+
+/* C1:5624  Carry: (type +$7E & $7F) of the object at [$97] is in the
+ * $FFFF-ended list C5:D850 (types that never hurt on contact). $5E = type;
+ * X = where the scan stopped, Y = $7E. */
+static int HarmlessTypeCheck_core(void)
+{
+    Cpu *c = g_cpu;
+    uint16_t t = ind16(0x97, 0x7E) & 0x7F;
+    ram16_set(0x5E, t);
+    c->y = 0x7E;
+    for (uint16_t x = 0;; x += 2) {
+        uint16_t e = PeekLong16(0xC5D850 + x);
+        if (e & 0x8000 || e == t) {
+            c->x = x;
+            c->a = e;
+            SetNZ16(e == t ? 0 : e);
+            return e == t;
+        }
+    }
+}
+
+static void HarmlessTypeCheck(void) { SetFlag(FC, HarmlessTypeCheck_core()); Ret_RTL(); }
+
+/* C1:558E  Carry: a harmful enemy shares the cell +$A8 of the object at
+ * [$6A] (docs/enemies.md section 3). Walks the live list $7E2620 ($22 =
+ * position, [$97] = enemy, $40 = the cell). Skipped: hidden (+4 & $60),
+ * harmless types, $99 without +$D0 bit 8, $90/$98 with +$BE bit 15, not an
+ * enemy (+$7E bit 7 clear, or bit 6 set), +$41 bit 7, dormant (+4 bit 15),
+ * +$68 bit 1. */
+static void EnemyOnPlayerCell(void)
+{
+    Cpu *c = g_cpu;
+    ram8_set(0x99, ram8(0x6C));
+    ram16_set(0x40, ind16(0x6A, OBJ_CELL));
+    ram16_set(0x22, 0);
+    c->y = OBJ_CELL;
+    for (;; ram16_set(0x22, ram16(0x22) + 2)) {
+        c->x = ram16(0x22);
+        uint16_t p = ram16(0x7E2620 + c->x);
+        if (p == 0xFFFF) {
+            c->a = p;
+            SetNZ16(0);
+            SetFlag(FC, 0);
+            Ret_RTL();
+            return;
+        }
+        ram16_set(0x97, p);
+        c->y = 0x04;
+        if (ind16(0x97, 0x04) & 0x60) continue;
+        if (HarmlessTypeCheck_core()) continue;
+        c->y = 0x7E;
+        uint16_t t = ind16(0x97, 0x7E);
+        if (t == 0x99) {
+            c->y = 0xD0;
+            if (!(ind16(0x97, 0xD0) & 0x100)) continue;
+        } else if (t == 0x98 || t == 0x90) {
+            c->y = 0xBE;
+            if (ind16(0x97, 0xBE) & 0x8000) continue;
+        }
+        c->y = 0x7E;
+        t = ind16(0x97, 0x7E);
+        if (!(t & 0x80) || (t & 0x40)) continue;
+        c->y = 0x41;
+        if (ind8(0x97, 0x41) & 0x80) continue;
+        c->y = 0x04;
+        if (ind16(0x97, 0x04) & 0x8000) continue;
+        c->y = OBJ_CELL;
+        if (ind16(0x97, OBJ_CELL) != ram16(0x40)) continue;
+        c->y = 0x68;
+        uint16_t f = ind16(0x97, 0x68);
+        if (f & 2) continue;
+        c->a = f;
+        SetFlag(FN, f & 0x8000);
+        SetFlag(FZ, 1);
+        SetFlag(FC, 1);
+        Ret_RTL();
+        return;
+    }
+}
+
+
+/* Pointers to the n entries of `stride` bytes from bank:addr whose first
+ * word is not negative go to the $FFFF-ended list $7E2860 ([$6A] walks
+ * them, $1E counts down). Leaves A = $6A, X = 2 * found, Y = 0. */
+static void FreeSlotList_core(uint8_t bank, uint16_t addr, uint16_t n, uint16_t stride)
+{
+    Cpu *c = g_cpu;
+    load_cv();
+    ram16_set(0x6A, addr);
+    ram8_set(0x6C, bank);
+    ram16_set(0x1E, n);
+    ram16_set(0x7E2860, 0xFFFF);
+    uint16_t x = 0;
+    do {
+        if (!(ind16(0x6A, 0) & 0x8000)) {
+            ram16_set(0x7E2860 + x, ram16(0x6A));
+            x += 2;
+            ram16_set(0x7E2860 + x, 0xFFFF);
+        }
+        ram16_set(0x6A, adc16(ram16(0x6A), stride, 0));
+        ram16_set(0x1E, ram16(0x1E) - 1);
+    } while (ram16(0x1E));
+    c->a = ram16(0x6A);
+    c->x = x;
+    c->y = 0;
+    SetNZ16(0);
+    store_cv();
+    Ret_RTL();
+}
+
+/* C0:DE63  Free entries of the 16 at $7E3D88. */
+static void FreeSlotsA(void) { FreeSlotList_core(0x7E, 0x3D88, 0x10, 0x10); }
+/* C0:DEA5  Free entries of the 32 at $7F0000. */
+static void FreeSlotsB(void) { FreeSlotList_core(0x7F, 0x0000, 0x20, 0x10); }
+
+/* C1:540F  Rebuilds the live-object lists from the 29 slots at $7E8000
+ * (+$100 each; a slot is live when its first word is negative): $7E2620 =
+ * object, $7E26A0 = cell +$A8, $7E2720 = target cell +$4C (both 0 for a
+ * dormant object, +4 bit 15, or type +$7E = $400). $FFFF-ended; $B7 = 0. */
+static void BuildObjLists(void)
+{
+    Cpu *c = g_cpu;
+    load_cv();
+    ram16_set(0x6A, 0x8000);
+    ram8_set(0x6C, 0x7E);
+    ram16_set(0x1E, 0x1D);
+    ram16_set(0xB7, 0);
+    ram16_set(0x7E2620, 0xFFFF);
+    uint16_t x = 0;
+    do {
+        if (ind16(0x6A, 0) & 0x8000) {
+            ram16_set(0x7E2620 + x, ram16(0x6A));
+            c->y = 0x04;
+            int quiet = (ind16(0x6A, 0x04) & 0x8000) != 0;
+            if (!quiet) { c->y = 0x7E; quiet = ind16(0x6A, 0x7E) == 0x400; }
+            if (quiet) {
+                ram16_set(0x7E26A0 + x, 0);
+                ram16_set(0x7E2720 + x, 0);
+            } else {
+                c->y = 0xA8;
+                ram16_set(0x7E26A0 + x, ind16(0x6A, 0xA8));
+                c->y = 0x4C;
+                ram16_set(0x7E2720 + x, ind16(0x6A, 0x4C));
+            }
+            x += 2;
+            ram16_set(0x7E2620 + x, 0xFFFF);
+            ram16_set(0x7E26A0 + x, 0xFFFF);
+            ram16_set(0x7E2720 + x, 0xFFFF);
+        }
+        ram16_set(0x6A, adc16(ram16(0x6A), 0x100, 0));
+        ram16_set(0x1E, ram16(0x1E) - 1);
+    } while (ram16(0x1E));
+    c->a = ram16(0x6A);
+    c->x = x;
+    SetNZ16(0);
+    store_cv();
+    Ret_RTL();
+}
+
+/* C1:0F10  Draw order: $7E2A70 = the live objects, each with its +$18
+ * low byte (y) in the low byte, sorted by it (C0:28A7); then each is drawn
+ * front to back: types $00-$0F by C0:9C7B, others (unless +4 is negative)
+ * by C1:4DBB. $9A = object being keyed, $1C = position. */
+static void DrawObjects(void)
+{
+    Cpu *c = g_cpu;
+    ram8_set(0x9C, 0x7E);
+    for (uint16_t x = 0;; x += 2) {
+        uint16_t p = ram16(0x7E2620 + x);
+        ram16_set(0x7E2A70 + x, p);
+        ram16_set(0x9A, p);
+        if (p == 0xFFFF) { c->x = x; break; }
+        c->y = 0x18;
+        ram16_set(0x7E2A70 + x, (ind16(0x9A, 0x18) & 0xFF) | p);
+    }
+    c->a = 0xFFFF;
+    CallLong(0xC028A7);
+    ram8_set(0x6C, 0x7E);
+    ram16_set(0x1C, 0);
+    for (;; ram16_set(0x1C, ram16(0x1C) + 2)) {
+        c->x = ram16(0x1C);
+        uint16_t e = ram16(0x7E2A70 + c->x);
+        if (e == 0xFFFF) break;
+        ram16_set(0x6A, e & 0xFF00);
+        c->y = 0x7E;
+        if (!(ind16(0x6A, 0x7E) & 0xF0)) { CallLong(0xC09C7B); continue; }
+        c->y = 0x04;
+        if (!(ind16(0x6A, 0x04) & 0x8000)) CallLong(0xC14DBB);
+    }
+    c->a = 0xFFFF;
+    SetNZ16(0);
+    SetFlag(FC, 1);
+    Ret_RTL();
+}
+
+
+/* C1:64FE  Notes the enemy at [$6A] in the live lists (from index 8):
+ * $7E26A0 = cell +$A8, $7E2720 = target cell +$4C, both 0 while it is
+ * hidden (+4 bit 6, or a $90/$98 with +$BE bit 14). */
+static void EnemyNoteCells(void)
+{
+    Cpu *c = g_cpu;
+    uint16_t x = 8, p;
+    while ((p = ram16(0x7E2620 + x)) != 0xFFFF && p != ram16(0x6A)) x += 2;
+    c->x = x;
+    SetFlag(FC, 1);
+    if (p == 0xFFFF) {
+        c->a = p;
+        SetNZ16(0);
+        Ret_RTL();
+        return;
+    }
+    c->y = 0x04;
+    int hidden = (ind16(0x6A, 0x04) & 0x40) != 0;
+    if (!hidden) {
+        c->y = 0x7E;
+        uint16_t t = ind16(0x6A, 0x7E);
+        SetFlag(FC, t == 0x98 || t >= 0x90);
+        if (t == 0x98 || t == 0x90) {
+            c->y = 0xBE;
+            hidden = (ind16(0x6A, 0xBE) & 0x4000) != 0;
+        }
+    }
+    if (hidden) {
+        c->a = 0;
+        ram16_set(0x7E2720 + x, 0);
+        ram16_set(0x7E26A0 + x, 0);
+    } else {
+        c->y = 0x4C;
+        ram16_set(0x7E2720 + x, ind16(0x6A, 0x4C));
+        c->y = OBJ_CELL;
+        c->a = ind16(0x6A, OBJ_CELL);
+        ram16_set(0x7E26A0 + x, c->a);
+    }
+    SetNZ16(c->a);
+    Ret_RTL();
+}
+
+
 const Hook g_hooks[] = {
     { 0xC0BFE2, "MapTileAtXY",       MapTileAtXY,       FM | FX, 0, 0 },
     { 0xC14031, "PlayerTileHandler", PlayerTileHandler, FX,      0, 0 },
@@ -2255,6 +2545,15 @@ const Hook g_hooks[] = {
       IGN_A | IGN_X | IGN_Y | IGN_NZ | IGN_C | IGN_V },
     { 0xC11BA3, "ScoreDigits",       ScoreDigits,       FM | FX, 0,
       IGN_A | IGN_X | IGN_Y | IGN_NZ | IGN_C | IGN_V },
+    { 0xC020FA, "ClearOamBuffer",    ClearOamBuffer,    FM | FX, 0, 0 },
+    { 0xC028A7, "SortObjList",       SortObjList,       FM | FX, 0, 0 },
+    { 0xC15624, "HarmlessTypeCheck", HarmlessTypeCheck, FM | FX, 0, 0 },
+    { 0xC1558E, "EnemyOnPlayerCell", EnemyOnPlayerCell, FM | FX, 0, 0 },
+    { 0xC0DE63, "FreeSlotsA",        FreeSlotsA,        FM | FX, 0, 0 },
+    { 0xC0DEA5, "FreeSlotsB",        FreeSlotsB,        FM | FX, 0, 0 },
+    { 0xC1540F, "BuildObjLists",     BuildObjLists,     FM | FX, 0, 0 },
+    { 0xC10F10, "DrawObjects",       DrawObjects,       FM | FX, 0, 0 },
+    { 0xC164FE, "EnemyNoteCells",    EnemyNoteCells,    FM | FX, 0, 0 },
     { 0xC0E0AA, "BombsUpdate",       BombsUpdate,       FM | FX, 0,
       IGN_A | IGN_X | IGN_Y | IGN_NZ | IGN_C | IGN_V },
 };

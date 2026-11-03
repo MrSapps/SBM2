@@ -20,6 +20,8 @@
  *   -x NAME     disable this hook (repeatable)
  *   -c          shadow-check every hooked call (interpreter on a copy)
  *   -w ADDR     log A's writes to WRAM address ADDR (hex offset)
+ *   -P FILE     profile: B's interpreted instructions per 24-bit PC, written
+ *               as "pc count" lines (tools/sbm2/profile.py sums them up)
  *
  * The dead stack ($0100 up to SP) is not compared: native code does not
  * leave the return addresses of its internal calls there. */
@@ -163,13 +165,14 @@ int main(int argc, char **argv)
     int logic_input = 0, hooks = 1;
     uint8_t enable[64];
     int only = 0;
-    const char *wpath = NULL, *rpath = NULL;
+    const char *wpath = NULL, *rpath = NULL, *ppath = NULL;
     memset(enable, 1, sizeof enable);
     for (int i = 3; i < argc; i++) {
         if (!strcmp(argv[i], "-n") && i + 1 < argc) frames = atol(argv[++i]);
         else if (!strcmp(argv[i], "-L")) logic_input = 1;
         else if (!strcmp(argv[i], "-N")) hooks = 0;
         else if (!strcmp(argv[i], "-c")) g_hook_check = 1;
+        else if (!strcmp(argv[i], "-P") && i + 1 < argc) ppath = argv[++i];
         else if (!strcmp(argv[i], "-W") && i + 1 < argc) wpath = argv[++i];
         else if (!strcmp(argv[i], "-w") && i + 1 < argc) watch = strtol(argv[++i], NULL, 16) & 0x1FFFF;
         else if (!strcmp(argv[i], "-R") && i + 1 < argc) rpath = argv[++i];
@@ -232,6 +235,7 @@ int main(int argc, char **argv)
         else { m[k]->input = script; m[k]->input_len = vlen; }
     }
     if (hooks) hook_install(&mb, enable);
+    if (ppath) mb.prof = calloc(1 << 24, 4);
     if (watch >= 0) { real_write = ma.cpu.write; ma.cpu.write = watch_write; }
 
     long n;
@@ -273,6 +277,11 @@ int main(int argc, char **argv)
         for (int i = 0; i < g_nhooks; i++)
             printf("  %-18s %06X %9ld (%ld)%s\n", g_hooks[i].name, g_hooks[i].addr,
                    g_hook_calls[i], g_hook_fallbacks[i], enable[i] ? "" : "  [off]");
+    }
+    if (ppath) {
+        FILE *f = fopen(ppath, "w");
+        for (uint32_t pc = 0; f && pc < 1 << 24; pc++) if (mb.prof[pc]) fprintf(f, "%06X %u\n", pc, mb.prof[pc]);
+        if (f) fclose(f);
     }
     snes_free(&ma);
     snes_free(&mb);

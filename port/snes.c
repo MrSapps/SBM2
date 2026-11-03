@@ -812,5 +812,6 @@ void snes_step(Snes *s)
         if (s->pad_record) record_nmi(s);
     }
     if (s->hook && !s->cpu.nmi && !s->cpu.wai && !s->cpu.stp && s->hook(s)) return;
+    if (s->prof) s->prof[(uint32_t)s->cpu.pb << 16 | s->cpu.pc]++;
     cpu_step(&s->cpu);
 }

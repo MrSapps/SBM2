@@ -89,6 +89,8 @@ typedef struct Snes {
     /* Called before each instruction (not before taking an interrupt); if it
      * returns nonzero it has executed in place of the interpreter. */
     int (*hook)(struct Snes *s);
+    /* Optional profile: interpreted instructions per 24-bit PC. */
+    uint32_t *prof;
 } Snes;
 
 enum { WAIT_CMP = 1, WAIT_EXIT = 2, WAIT_LDA = 4, WAIT_BEQ = 8 };

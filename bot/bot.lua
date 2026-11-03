@@ -982,11 +982,12 @@ local ENEMY_MARGIN = 6             -- frames of slack around predicted contact
 -- Bosses (bot/boss.lua): boss-engine objects, not enemy structs.
 local Boss = dofile(BOT_DIR .. "/boss.lua")({ r16 = r16, rd8 = function(a) return emu.read(a, WRAM, false) end,
   origin = origin, MAP_W = MAP_W, MAP_H = MAP_H, KEY_W = KEY_W })
-local BOSS_MARGIN, BOSS_SLACK = 6, 12  -- pixels around a boss box; frames either side of its pass
-local bossHp = nil  -- total boss HP last frame (nil: no boss)
+-- (Kept in the Boss table: the main chunk is near Lua's 200-local limit.)
+Boss.MARGIN, Boss.SLACK = 6, 12  -- pixels around a boss box; frames either side of its pass
+Boss.hp = nil  -- total boss HP last frame (nil: no boss)
 -- 5-8 form 2 (docs/enemies.md 7.4) is hurt only by a thrown bomb: with the
 -- glove (+$FE), lift a bomb of our own and throw it when the body is ahead.
-local throwFace, throwFaceFrames, liftAt = nil, 0, nil
+local throw = { face = nil, faceFrames = 0, liftAt = nil }
 -- A thrown bomb's offset from P1, frame by frame from the release
 -- (measured in 5-8; it lands after ~12 frames). Left mirrors right, up
 -- mirrors down around the start 16 px above P1.
@@ -1133,6 +1134,15 @@ local function think()
       end
       for _, b in ipairs(lastBombs or {}) do bs[#bs + 1] = string.format("seen(%d,%d)t%d", b[1], b[2], b[3]) end
       cause = cause .. " bombs " .. table.concat(bs, ",")
+      -- Boss-engine objects alive now (state, position): which part killed us.
+      local bo = {}
+      for base = 0x1000, 0x17C0, 0x40 do
+        local st = emu.read(base + 2, WRAM, false)
+        if st >= 0xC0 then
+          bo[#bo + 1] = string.format("%04X@%02X%04X(%d,%d)", base, st, r16(base), r16(base + 0x11), r16(base + 0x14))
+        end
+      end
+      if #bo > 0 then cause = cause .. " boss " .. table.concat(bo, ",") end
       log(string.format("%6d DEATH %s at px(%d,%d) enemies %s", frame, cause,
         r16(P1 + P_X), r16(P1 + P_Y), table.concat(es, " ")) .. string.format(" stats[E0..FF] %s after: %s",
         table.concat(st, " "), table.concat(recent, " | ")))
@@ -1245,8 +1255,8 @@ local function think()
   local bosses = Boss.read()
   local bossNow, bossSense, bossEat = {}, {}, {}
   if #bosses > 0 then
-    bossNow = Boss.contactCells(bosses, BOSS_MARGIN, 0)
-    for k, l in pairs(Boss.windows(bosses, HORIZON, BOSS_MARGIN, BOSS_SLACK)) do
+    bossNow = Boss.contactCells(bosses, Boss.MARGIN, 0)
+    for k, l in pairs(Boss.windows(bosses, HORIZON, Boss.MARGIN, Boss.SLACK)) do
       local e = eWin[k] or {}
       for _, iv in ipairs(l) do e[#e + 1] = iv end
       eWin[k] = e
@@ -1447,12 +1457,12 @@ local function think()
   -- Not the enemy count: spawners (the 2-1 furnace) keep adding enemies.
   local sig = string.format("%d/%d/%d", score(), soft, todo)
   -- A boss losing HP is progress too (+$20, docs/enemies.md section 7).
-  bossHp = nil
+  Boss.hp = nil
   if #bosses > 0 then
     local hp = 0
     for _, b in ipairs(bosses) do hp = hp + r16(b.base + 0x20) end
     sig = sig .. "/hp" .. hp
-    bossHp = hp
+    Boss.hp = hp
   end
   -- Assist (logged): a stage whose panels we can't finish (unsolved gimmick)
   -- gets the game's own "all panels lit" bit ($5D94 bit 15, as C1:2335
@@ -2045,14 +2055,14 @@ local function think()
     for _, b in ipairs(bosses) do if b.base == 0x1000 then body = b end end
     local bx, by = r16(0x1011), r16(0x1014)
     local DV = { up = { 0, -1 }, down = { 0, 1 }, left = { -1, 0 }, right = { 1, 0 } }
-    for d in pairs(DV) do if input[d] then throwFace = d end end
+    for d in pairs(DV) do if input[d] then throw.face = d end end
     if holding then
       input.a = true
       -- A throw hits if the bomb is inside the body's +-24 box (CC:97E8)
       -- on some frame of its flight; turning first costs ~2 frames.
       local want
       for d, path in pairs(THROW_PATH) do
-        local delay = (throwFace == d and throwFaceFrames >= 2) and 0 or 3
+        local delay = (throw.face == d and throw.faceFrames >= 2) and 0 or 3
         for k, o in ipairs(path) do
           local px, py = bx, by
           if body then px, py = Boss.predict(body, k + delay) end
@@ -2061,26 +2071,26 @@ local function think()
         if want then break end
       end
       if want then
-        if throwFace == want and throwFaceFrames >= 2 then
+        if throw.face == want and throw.faceFrames >= 2 then
           input.a = nil
           log(string.format("%6d throw %s at boss (%.0f,%.0f) from px(%d,%d)", frame, want, bx, by, x, y))
-          throwFaceFrames = 0
+          throw.faceFrames = 0
         else
           input = { a = true, [want] = true }
-          if throwFace == want then throwFaceFrames = throwFaceFrames + 1 else throwFace, throwFaceFrames = want, 1 end
+          if throw.face == want then throw.faceFrames = throw.faceFrames + 1 else throw.face, throw.faceFrames = want, 1 end
         end
       end
-      liftAt = nil
+      throw.liftAt = nil
     else
       local dist = math.abs(bx - x) + math.abs(by - y)
       local onBomb = isBomb(g[r][c])
-      if onBomb and liftAt and frame - liftAt < 60 then
+      if onBomb and throw.liftAt and frame - throw.liftAt < 60 then
         -- Our bomb is here: release, then press again to lift it (edge).
         input = { a = frame % 2 == 0 }
       elseif not onBomb and dist >= 40 and dist <= 140 and not danger[here] and not nearEnemy[here]
           and emu.read(P1 + P_BOMBS_LEFT, WRAM, false) > 0 then
         input.a = frame % 2 == 0
-        liftAt = frame
+        throw.liftAt = frame
       end
     end
   end
@@ -2206,7 +2216,7 @@ local function onFrame()
     end)
   end
   if ambush and frame >= ambush[1] + AMBUSH_FRAMES then
-    if liveEnemies() < ambush[3] or score() > ambush[5] or (bossHp and ambush[7] and bossHp < ambush[7]) then
+    if liveEnemies() < ambush[3] or score() > ambush[5] or (Boss.hp and ambush[7] and Boss.hp < ambush[7]) then
       ambushHits = ambushHits + 1
       log(string.format("%6d ambush hit (try %d; %d/%d)", frame, ambush[4], ambushHits, ambushes))
       ambush = nil
@@ -2233,7 +2243,7 @@ local function onFrame()
     ambushStart = false
     if not ambush then
       ambushes = ambushes + 1
-      local a = { frame, nil, liveEnemies(), 0, score(), nil, bossHp }
+      local a = { frame, nil, liveEnemies(), 0, score(), nil, Boss.hp }
       ambush = a
       onNextInstruction(function() a[2], a[6] = emu.createSavestate(), inputlog.mark() end)
     end

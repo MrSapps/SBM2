@@ -1,0 +1,11 @@
+# Invented. Nothing opens P1's room: solid walls all round (no push
+# block, soft block, trap or hole). The planner must give up, not loop.
+stage 50
+p1 2 2
+panels none
+grid
+C5 C5 C5 C5 C5 C5 C5 C5 C5
+C5  .  .  . C5  .  .  . C5
+C5  .  .  . C5  .  . C2 C5
+C5  .  .  . C5  .  .  . C5
+C5 C5 C5 C5 C5 C5 C5 C5 C5

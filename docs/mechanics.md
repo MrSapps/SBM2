@@ -129,8 +129,12 @@ needed later. A crumbled hole can be refilled with a push block
   showed `$41` and then became `$00`, so a sprung trap is gone for good.
 * `$63` looks like floor. `TrapUpdate` C1:4C4A (list `$7E5928` from
   `FindTraps` C1:4D5E) makes a trap blink only while P1 is on one of the 4
-  neighbouring cells. `$63` is not special to blasts: flames pass over
-  it and it stays.
+  neighbouring cells. **A blast clears a `$63`** **[probe]**: 5-5
+  (`stage_54.mss`, bot seed 0), the bomb at (4,10) with fire 2 went off
+  at f115; the flame wrote `$01` on (4,10), (5,10) and (6,10), and the
+  trap at (5,10) read `$00` from then on (P1 walked over it at f223 with
+  its heart kept). (An earlier note here said flames leave `$63` alone;
+  the blast code for type `$23` is not traced yet.)
 * `$4B` (type `$0B`) is the visible kind. A blast destroys it like a soft
   block (break kind 4, the flame stops there) and leaves floor.
 
@@ -160,15 +164,16 @@ is the **heart**: `+$EF` += 1. Kinds 0/2 raise `+$E1`/`+$E2`, 1/5/9/10 set
 14/15 add score. Bench start states: 5-2 hides a heart at (26,11) and 5-6
 one at (13,4); 5-3 and 5-5 hide none (5-3 starts with 0 hearts, 5-5 with
 1). 5-3 still clears without crossing (bench seed 1, frame 14230); 5-5's
-corridors to the holes at column 25 need about 8 separate crossings, so
-from its bench state they cannot be opened.
+corridors to the holes at column 25 would need about 8 separate
+crossings on foot, but bombs clear the traps, so no heart is needed.
 
 **Bot recipe.** Never step on `$63` or `$4B` without a heart (treat them
-as solid). Bomb a `$4B` to clear it. A `$63` can only be cleared by walking
-on it, and only a heart (`+$EF`) or the flash after one makes that stick.
-Chain traps that lie close together inside one flash. In 5-3 (`c_w5`)
-row 8 is a full line of `$63`. In 5-5 the corridors to the holes at column 25 need about
-8 trap crossings between block pushes: more hearts than the start gives.
+as solid). Bomb them: a blast clears both. Walking on one with a heart (or
+during the flash after one) also clears it, but costs the heart; the
+planner only does that when no bomb will. Chain traps that lie close
+together inside one flash. In 5-3 (`c_w5`) row 8 is a full line of `$63`;
+in 5-5 the corridors to the holes at column 25 hold 8 traps between block
+pushes (`bot/test/maps/5-5_start.map`).
 
 ## 4. Gold panels and the light switch
 
@@ -227,6 +232,23 @@ cell 5 cells away in each direction. Whether P1 can leave a pad it
 landed on without being launched again (by releasing the pad) was not
 tested. Enemies near the landing cell are dangerous: in the run with
 nothing held, P1 died to an enemy right after landing.
+
+## 5b. Submarines `$DA`/`$DB` (3-5)
+
+The two `$66` stairs on 3-5's top corridor, (10,4) and (20,4), each hold a
+purple submarine object (enemy-slot type `$DA` code C2:84FC, `$DB` code
+C2:85E4). Walking onto one boards it (P1 `+2` bit 15 set, as on a world 4
+platform) and it carries P1 along a fixed path through the `$D0` water to
+the island's stairs, (12,10) or (18,10), where P1 steps off **[probe]**.
+Holding Down on the island beside the docked sub boards it again and it
+goes back: from (18,9), (18,12) at +30 frames, (23,11) at +90, (21,6) at
++170. So the island in the middle (gold panels at (13,7) and (17,7)) is
+reached only by sub.
+
+P1 walks rows at y = r\*16+7 (origin 0), not +8: off the sub at (18,9)
+P1 stood at y 152, and holding Right moved it to 150 and then 151 as it
+walked. Steering that wants the cross axis within 1 px of +8 fights this
+nudge (`steer` in bot.lua allows 2).
 
 ## 6. Crystals `$68` (world 3)
 
@@ -335,8 +357,19 @@ retreating.
 ## 10b. Glove: lift and throw
 
 * The glove item (cell graphics `$26`, handler at C0:9BF6 via the table at
-  C5:F145) adds 1 to P1 `+$FE`. Whether a death takes it away is not
-  checked yet.
+  C5:F145) adds 1 to P1 `+$FE`.
+* **Keeping it.** Stage start (C1:3B9B) copies P1's stats from the entry
+  copy at `$7E5ECE` once `$7E5DCC` bit 15 is set, so a death goes back to
+  what P1 entered the stage with: a glove carried into a stage stays
+  through its deaths, one picked up there is lost by a death before the
+  clear. The first time (bit 15 clear) passwords 5-9 (`PasswordIndex`
+  `$1C6A` >= 5: the same worlds as 0-4) give bombs 6, fire 5, the remote
+  and the glove; passwords 0-4 give nothing.
+* **5-8 needs one carried in.** Form 2 is hurt only by thrown bombs and the
+  5-8 arena has no soft blocks (so no items); the routine CC:CCDE that runs
+  as form 1 dies only fills effect slots (`$7F1000`, CC:E998), it drops
+  nothing. 5-7 hides a glove at (13,10). A 5-8 start state without a glove
+  (as made from a password 0-4 run that never picked one up) cannot be won.
 * **Lift** (`BombButton` C0:3082): pressing the bomb button (an edge:
   `+$0E` bit 10) while standing on a bomb (tile under P1 `+$B4` has bit 6
   and `& $3F` = 3) with `+$FE` ≠ 0 and `+$50` ≠ 8 calls C0:2F6E. `+$52`

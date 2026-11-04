@@ -82,7 +82,7 @@ return function(env)
       local x, y = s16(r16(base + 0x11)), s16(r16(base + 0x14))
       -- Speed over the last 16 frames (a blink adds $100 to x: skip those).
       local t = track[base]
-      if not t or tick - t.tick > 2 then t = { n = 0 }; track[base] = t end
+      if not t or tick - t.tick > 2 then t = { n = 0 }; track[base] = t; bounds[base] = nil end
       t.tick = tick
       local vx, vy = 0, 0
       if x < 0x100 then
@@ -94,14 +94,17 @@ return function(env)
           bb[1], bb[2] = math.min(bb[1], x), math.max(bb[2], x)
           bb[3], bb[4] = math.min(bb[3], y), math.max(bb[4], y)
         end
-        local old = t.n >= 16 and t[(t.n + 1) % 16]
+        -- A new object (a thrown ball) gets a speed from its first frames.
+        local span = math.min(t.n - 1, 15)
+        local old = span >= 3 and t[(t.n - span) % 16]
         if old and math.abs(x - old[1]) < 48 and math.abs(y - old[2]) < 48 then
-          vx, vy = (x - old[1]) / 15, (y - old[2]) / 15
+          vx, vy = (x - old[1]) / span, (y - old[2]) / span
         end
       else
         x = x - 0x100
       end
-      list[#list + 1] = { base = base, x = x, y = y, vx = vx, vy = vy, box = o.box, sense = o.sense, hurt = o.hurt }
+      local state = r16(base) | (rd8(base + 2) << 16)
+      list[#list + 1] = { base = base, state = state, x = x, y = y, vx = vx, vy = vy, box = o.box, sense = o.sense, hurt = o.hurt }
     end
     return list
   end
@@ -145,7 +148,53 @@ return function(env)
   -- A known destination (B.target[base] = {x, y}, e.g. 5-8 form 2's
   -- waypoint): straight there at the current speed, then stay.
   B.target = {}
+  -- 5-8 form 1 slam (CC:CAC4): $36 counts down from $A0; while it is
+  -- >= $89 the body drops 3 px a frame, below $49 it rises 1 px a frame,
+  -- in between it stays (72 px down and back, x fixed).
+  local SLAM, PATROL, BALL = 0xCCCAC4, 0xCCC8D6, 0xCCDAA8
+  -- 5-8 balls (CC:DAA8): 1 px a frame in direction $36&3 (table CC:DC19:
+  -- up, right, down, left) after a $2E hold; when $38 runs out they turn
+  -- toward P1 (or at random), so after that any way; gone when $34 does.
+  local BALL_V = { [0] = { 0, -1 }, { 1, 0 }, { 0, 1 }, { -1, 0 } }
+  local function ballAt(b, t)  -- centre and spread at t, or nil once gone
+    local base = b.base
+    if t >= r16(base + 0x34) then return nil end
+    local hold, run = r16(base + 0x2E), r16(base + 0x38)
+    local v = BALL_V[rd8(base + 0x36) & 3]
+    local go = math.min(math.max(t - hold, 0), run)
+    return b.x + v[1] * go, b.y + v[2] * go, math.max(t - hold - run, 0)
+  end
+  local function slamDy(T, t)
+    local dy = 0
+    for _ = 1, t do
+      if T <= 0 then break end
+      if T >= 0x89 then dy = dy + 3 elseif T < 0x49 then dy = dy - 1 end
+      T = T - 1
+    end
+    return dy
+  end
+  -- 5-8 form 1 patrol (CC:C8D6): while $34 >= $50 the body moves 1 px a
+  -- frame the way it faces ($0F bit 7, learned from its motion); at 0 it
+  -- turns round and $34 restarts at $D8.
+  local faceSign = {}  -- $0F bit 7 -> +1/-1
+  local function patrolDx(b, t)
+    local bit = rd8(b.base + 0x0F) & 0x80
+    if math.abs(b.vx) > 0.5 then faceSign[bit] = b.vx > 0 and 1 or -1; faceSign[bit ~ 0x80] = -faceSign[bit] end
+    local d = faceSign[bit]
+    if not d then return nil end
+    local T, dx = r16(b.base + 0x34), 0
+    for _ = 1, t do
+      if T >= 0x50 then dx = dx + d end
+      if T == 0 then d, T = -d, 0xD8 else T = T - 1 end
+    end
+    return dx
+  end
   function B.predict(b, t)
+    if b.state == SLAM then return b.x, b.y + slamDy(r16(b.base + 0x36), t) end
+    if b.state == PATROL then
+      local dx = patrolDx(b, t)
+      if dx then return b.x + dx, b.y end
+    end
     local tg = B.target[b.base]
     if tg then
       local dx, dy = tg[1] - b.x, tg[2] - b.y
@@ -168,11 +217,14 @@ return function(env)
     for _, b in ipairs(list) do
       if b.box and b.x > -64 and b.x < 0x200 then
         for t = 0, horizon, STEP do
-          local px, py = B.predict(b, t)
+          local px, py, spread = B.predict(b, t)
+          if b.state == BALL then px, py, spread = ballAt(b, t) end
+          if not px then break end
           -- Further ahead is less sure: widen the box with time, more so
           -- for a fast boss (5-8 form 2 re-aims every 16 frames).
           local spd = math.sqrt(b.vx * b.vx + b.vy * b.vy)
           local m = margin + t // 16 + math.floor(t * math.max(0, spd - 0.8) * 0.5)
+          if b.state == BALL then m = margin + (spread or 0) end
           local x0, x1 = px + b.box[1] - m, px + b.box[2] - 1 + m
           local y0, y1 = py + b.box[3] - m, py + b.box[4] - 1 + m
           local c0, r0 = cellOfPx(x0 - 7, y0 - 7)
@@ -186,6 +238,30 @@ return function(env)
               if last and last[2] >= t - STEP - slack then last[2] = t + STEP + slack
               else l[#l + 1] = { math.max(0, t - slack), t + STEP + slack } end
             end
+          end
+        end
+      end
+    end
+    -- 5-8 form 1 patrol (CC:C8D6): with $3A set and $38 run out, P1 within
+    -- x-16..x+15 anywhere below the body (sight box CC:D59B) starts a slam
+    -- that lands 72 px down within 24 frames with the contact box (CC:CA20,
+    -- y -48..+35) under it: too fast to step out of. So the column under
+    -- the body, down to the slam's reach, is closed while it is armed.
+    for _, b in ipairs(list) do
+      if b.state == PATROL and r16(b.base + 0x3A) ~= 0 and r16(b.base + 0x38) < 16 then
+        -- Cells whose centre (where P1 stands) is in reach; P1 only passes
+        -- the column's edge cells off-centre, so the column is no wider.
+        local ox, oy = env.origin()
+        local function centred(lo, hi, o)  -- cells with centre in (lo, hi]
+          return math.floor((lo + o - 8) / 16) + 1, math.floor((hi + o - 8) / 16)
+        end
+        local c0, c1 = centred(b.x - 16 - 3, b.x + 15 + 3, ox)
+        local r0, r1 = centred(b.y, b.y + 72 + 35 + margin, oy)
+        for r = math.max(r0, 0), math.min(r1, MAP_H - 1) do
+          for c = math.max(c0, 0), math.min(c1, MAP_W - 1) do
+            local k = r * KEY_W + c
+            w[k] = w[k] or {}
+            table.insert(w[k], { 0, horizon + slack })
           end
         end
       end

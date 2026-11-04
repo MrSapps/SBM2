@@ -22,6 +22,8 @@
  *   -w ADDR     log A's writes to WRAM address ADDR (hex offset)
  *   -P FILE     profile: B's interpreted instructions per 24-bit PC, written
  *               as "pc count" lines (tools/sbm2/profile.py sums them up)
+ *   -D N:FILE   write A's WRAM (128 KiB) after logic frame N, or after the
+ *               last one for N = end (repeatable; bot/test reads these)
  *
  * The dead stack ($0100 up to SP) is not compared: native code does not
  * leave the return addresses of its internal calls there. */
@@ -37,6 +39,17 @@ static uint8_t ref[WRAM], ignore[WRAM];
 static long ever[WRAM];
 static long watch = -1, cur_frame;
 static void (*real_write)(void *, uint32_t, uint8_t);
+#define MAX_DUMPS 64
+static long dump_at[MAX_DUMPS];
+static const char *dump_path[MAX_DUMPS];
+static int ndumps;
+
+static void dump_wram(const char *path)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f || fwrite(ma.wram, 1, WRAM, f) != WRAM) fprintf(stderr, "can't write %s\n", path);
+    if (f) fclose(f);
+}
 
 static void watch_write(void *ctx, uint32_t addr, uint8_t v)
 {
@@ -158,7 +171,7 @@ int main(int argc, char **argv)
 {
     if (argc < 3) {
         fprintf(stderr, "usage: hybrid <rom> <input> [-n N] [-L] [-N] [-c] [-W FILE] "
-                "[-R TRACE] [-i LO-HI]... [-o NAME]... [-x NAME]...\n");
+                "[-R TRACE] [-i LO-HI]... [-o NAME]... [-x NAME]... [-D N:FILE]...\n");
         return 2;
     }
     long frames = -1;
@@ -176,6 +189,12 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-W") && i + 1 < argc) wpath = argv[++i];
         else if (!strcmp(argv[i], "-w") && i + 1 < argc) watch = strtol(argv[++i], NULL, 16) & 0x1FFFF;
         else if (!strcmp(argv[i], "-R") && i + 1 < argc) rpath = argv[++i];
+        else if (!strcmp(argv[i], "-D") && i + 1 < argc && ndumps < MAX_DUMPS) {
+            char *arg = argv[++i], *colon = strchr(arg, ':');
+            if (!colon) { fprintf(stderr, "-D wants N:FILE\n"); return 2; }
+            dump_at[ndumps] = strncmp(arg, "end:", 4) ? strtol(arg, NULL, 10) : -1;
+            dump_path[ndumps++] = colon + 1;
+        }
         else if (!strcmp(argv[i], "-i") && i + 1 < argc) {
             unsigned lo, hi;
             if (sscanf(argv[++i], "%x-%x", &lo, &hi) == 2)
@@ -253,6 +272,7 @@ int main(int argc, char **argv)
         }
         if (g_hook_check_failed) { printf("frame %ld: shadow check failed\n", n); bad = 1; break; }
         if (compare(n)) { bad = 1; break; }
+        for (int k = 0; k < ndumps; k++) if (dump_at[k] == n) dump_wram(dump_path[k]);
         if (rf && n >= ref_start && fread(ref, 1, WRAM, rf) == WRAM) {
             ref_frames++;
             long d = compare_ref(n, 0);
@@ -270,6 +290,7 @@ int main(int argc, char **argv)
         printf("\n");
         fclose(rf);
     }
+    for (int k = 0; k < ndumps; k++) if (dump_at[k] < 0) dump_wram(dump_path[k]);
     if (!bad) printf("OK: %ld logic frames match\n", n);
     if (pads) printf("pad log: %u of %u entries used, %u did not fit\n", ma.pad_pos, len, ma.pad_desync);
     if (hooks) {

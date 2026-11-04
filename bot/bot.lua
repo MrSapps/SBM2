@@ -18,6 +18,8 @@ local inputlog = dofile(BOT_DIR .. "/inputlog.lua")
 --   SBM2_CKPT    checkpoint interval in frames (default 1000)
 --   SBM2_SHOTS   frames to screenshot (the tile map is logged too)
 --   SBM2_LOAD    savestate to start from
+--   SBM2_SAVE_AT "<frame>:<path>" also write a savestate (+ .inputs) at that
+--                frame (debugging: probe the game from where the bot was)
 
 local OUT = os.getenv("SBM2_OUT") or "build/bot"
 local FRAMES = tonumber(os.getenv("SBM2_FRAMES") or "3600")
@@ -142,7 +144,12 @@ local function heartCells()
   for r = 0, MAP_H - 1 do
     for c = 0, MAP_W - 1 do
       local o = r * ROW + c * 2
-      if emu.read(MAP + o, WRAM, false) == 0x44 and emu.read(GFX + o, WRAM, false) == 0x40 then
+      local gfx = emu.read(GFX + o, WRAM, false)
+      -- The glove ($26, +$FE) too while we have none: 5-8 form 2 is hurt
+      -- only by thrown bombs, its arena has no blocks, and stats go back to
+      -- the stage's entry stats on a death, so one must be carried in.
+      if emu.read(MAP + o, WRAM, false) == 0x44 and (gfx == 0x40
+          or (gfx == 0x26 and emu.read(P1 + 0xFE, WRAM, false) == 0)) then
         t[r * KEY_W + c] = "item"
       end
     end
@@ -526,14 +533,15 @@ end
 -- a crystal; enemies only at a penalty). Actions:
 --   bomb at a reachable cell: pushes the $E2 blocks its blast reaches one
 --     cell on (onto $00, or into a $D3 hole, which it fills; section 1),
---     breaks soft blocks and $4B, presses $6B ($F5 becomes an $E2);
+--     breaks soft blocks and traps ($4B and $63), presses $6B ($F5 becomes
+--     an $E2);
 --   trap: walk onto a $63 next to the region (a heart or a life; it is $00
 --     afterwards, section 3).
 -- Walking includes platform rides and spring jumps, as bfs does. A* with a
 -- relaxed distance (blocks, holes, traps and soft blocks passable at a cost)
 -- as the heuristic. Returns the first action {kind, k, chain} or nil.
-local TRAP_COST, BOMB_COST, ENEMY_PEN, H_WEIGHT = 8, 2, 4, 4
-local RELAX = { [0xE2] = 2, [0xD3] = 2, [0x63] = 4, [0x4B] = 1, [0xF5] = 3 }
+local TRAP_COST, BOMB_COST, ENEMY_PEN, H_WEIGHT = 8, 2, 4, 8
+local RELAX = { [0xE2] = 2, [0xD3] = 2, [0x63] = 1, [0x4B] = 1, [0xF5] = 3 }
 local function regionOf(g, c0, r0)
   local seen, list, head = { [r0 * KEY_W + c0] = true }, { { c0, r0 } }, 1
   local function add(c, r)
@@ -617,7 +625,8 @@ local function bombEffect(grid, bc, br)
     local cc, rr = cell[1], cell[2]
     blast[rr * KEY_W + cc] = true
     local t = grid[rr][cc]
-    if SOFT[t] or t == 0x4B then changes[#changes + 1] = { cc, rr, 0x00 }
+    -- A blast clears traps, $63 as well as $4B (docs/mechanics.md section 3).
+    if SOFT[t] or t == 0x4B or t == 0x63 then changes[#changes + 1] = { cc, rr, 0x00 }
     elseif t == 0x6B then
       changes[#changes + 1] = { cc, rr, 0x72 }
       for r = 0, MAP_H - 1 do
@@ -640,7 +649,8 @@ end
 local function keyChanges(changes, grid)
   local t = {}
   for _, ch in ipairs(changes) do
-    if not (ch[3] == 0x00 and (SOFT[grid[ch[2]][ch[1]]] or grid[ch[2]][ch[1]] == 0x4B)) then
+    local was = grid[ch[2]][ch[1]]
+    if not (ch[3] == 0x00 and (SOFT[was] or was == 0x4B or was == 0x63)) then
       t[#t + 1] = (ch[2] * KEY_W + ch[1]) * 256 + ch[3]
     end
   end
@@ -649,8 +659,10 @@ local function keyChanges(changes, grid)
 end
 
 -- Runs as a coroutine when called from one: yields every SLICE seconds.
--- ctx: objGoal(c, r, grid), enemyGoal(c, r) or nil, avoid = set of cells no
--- planned blast may touch, maxExp, slice.
+-- ctx: objGoal(c, r, grid), enemyGoal(c, r) or nil, avoid = set of cells a
+-- planned blast should not touch (finished mode-1 panels: each one costs
+-- AVOID_COST, a bomb to flip it back; 5-5's last push flips (10,4) with
+-- fire 4), maxExp, slice.
 -- Returns the list of steps {kind, k, changes, desc} (or nil), the
 -- expansion count.
 local function stagePlan(g, c0, r0, ctx)
@@ -717,7 +729,7 @@ local function stagePlan(g, c0, r0, ctx)
       local row = grid[r]
       for c = 0, MAP_W - 1 do
         local t = row[c]
-        if t == 0xE2 or SOFT[t] or t == 0x4B or t == 0x6B then
+        if t == 0xE2 or SOFT[t] or t == 0x4B or t == 0x63 or t == 0x6B then
           for _, d in ipairs(DIRS) do
             for j = 1, math.max(RANGE, 1) do
               local bc, br = c - d[1] * j, r - d[2] * j
@@ -850,7 +862,7 @@ local function stagePlan(g, c0, r0, ctx)
           if ctx.enemyGoal and ctx.enemyGoal(c, r) then enemy = true end
         end
       end
-      if enemy then heapPush(heap, { terminal = true, state = s, f = s.g + ENEMY_PEN }) end
+      if enemy then heapPush(heap, { terminal = true, state = s, f = (s.g + ENEMY_PEN) * 1000 }) end
     end
     exp = exp + 1
     if exp > ctx.maxExp then return nil, exp end
@@ -862,10 +874,10 @@ local function stagePlan(g, c0, r0, ctx)
     for bk in pairs(bombCells(s.grid, s.region)) do
       local bc, br = bk % KEY_W, bk // KEY_W
       local changes, blast = bombEffect(s.grid, bc, br)
-      local bad = false
-      for k in pairs(blast) do if ctx.avoid[k] then bad = true; break end end
-      if not bad and #changes > 0 and escapable(s.grid, bc, br, blast) then
-        kids[#kids + 1] = child(s, changes, bk, BOMB_COST, { kind = "bomb", k = bk,
+      local AVOID_COST, undo = 6, 0
+      for k in pairs(blast) do if ctx.avoid[k] then undo = undo + AVOID_COST end end
+      if #changes > 0 and escapable(s.grid, bc, br, blast) then
+        kids[#kids + 1] = child(s, changes, bk, BOMB_COST + undo, { kind = "bomb", k = bk,
           key = keyChanges(changes, s.grid), changes = changes, desc = string.format("bomb(%d,%d)", bc, br) })
       end
     end
@@ -894,10 +906,12 @@ local function stagePlan(g, c0, r0, ctx)
     for _, kid in ipairs(kids) do
       if not best[kid.key] or best[kid.key] > kid.g then
         best[kid.key] = kid.g
-        -- Greedy on the relaxed distance, deepest first among equals (a
-        -- breadth-first plateau of pointless pushes is what costs time);
-        -- the plan is shortened afterwards.
-        kid.f = hcost(kid.grid, kid.region) * 1000 - kid.g
+        -- Weighted A* (cost + H_WEIGHT x relaxed distance), deepest first
+        -- among equals. Pure greedy on the distance dived into plateaus of
+        -- pointless pushes: 5-5 with blocks at (15,12) and (17,12) found
+        -- nothing in 100000 states, where this takes 323
+        -- (bot/test/test_planner.lua). The plan is shortened afterwards.
+        kid.f = (kid.g + H_WEIGHT * hcost(kid.grid, kid.region)) * 1000 - kid.depth
         heapPush(heap, kid)
       end
     end
@@ -912,13 +926,19 @@ local function playerTile()
 end
 
 -- Steer toward the centre of the next tile; align on the cross axis first,
--- since the engine does not slide the player around corners.
+-- since the engine does not slide the player around corners far.
+-- Within STEER_SLACK px it does: P1 walks a row at y = r*16+7 (not +8:
+-- (21,3) at y 55 in 3-5), and holding a direction nudges P1 onto that line
+-- (3-5, off the sub at y 152, Right went to 150 and on to 151). With a 1 px
+-- slack that nudge read as misaligned, Down undid it, and P1 shook in
+-- place until the frozen check gave up on the sub for good.
 local function steer(dir, x, y, c, r)
+  local STEER_SLACK = 2  -- (not a chunk local: the main chunk is at Lua's 200-local limit)
   local cx, cy = tileCentre(c, r)
   if dir == "up" or dir == "down" then
-    if x < cx - 1 then return "right" elseif x > cx + 1 then return "left" end
+    if x < cx - STEER_SLACK then return "right" elseif x > cx + STEER_SLACK then return "left" end
   else
-    if y < cy - 1 then return "down" elseif y > cy + 1 then return "up" end
+    if y < cy - STEER_SLACK then return "down" elseif y > cy + STEER_SLACK then return "up" end
   end
   return dir
 end
@@ -987,7 +1007,7 @@ Boss.MARGIN, Boss.SLACK = 6, 12  -- pixels around a boss box; frames either side
 Boss.hp = nil  -- total boss HP last frame (nil: no boss)
 -- 5-8 form 2 (docs/enemies.md 7.4) is hurt only by a thrown bomb: with the
 -- glove (+$FE), lift a bomb of our own and throw it when the body is ahead.
-local throw = { face = nil, faceFrames = 0, liftAt = nil }
+local throw = { face = nil, faceFrames = 0, liftAt = nil, dodgeAt = -100 }  -- (also the dodge hold)
 -- A thrown bomb's offset from P1, frame by frame from the release
 -- (measured in 5-8; it lands after ~12 frames). Left mirrors right, up
 -- mirrors down around the start 16 px above P1.
@@ -1438,15 +1458,14 @@ local function think()
     remoteSince = nil
   end
   visits[here] = (visits[here] or 0) + 1
-  -- World 2 soft blocks grow back
-  -- (docs/mechanics.md): one already blown up is not worth bombing again.
-  local world = emu.read(0x1A, WRAM, false) >> 4
-  if world == 2 then
-    for rr = 0, MAP_H - 1 do
-      for cc = 0, MAP_W - 1 do
-        local k = rr * KEY_W + cc
-        if SOFT[g[rr][cc]] then softSeen[k] = true elseif softSeen[k] then softGone[k] = true end
-      end
+  -- Soft blocks grow back in world 2 and in 5-5 at least (5-5: (25,4)
+  -- broke ~50 frames after its blast and was back later; the bot bombed it
+  -- five times while the last panel waited): one already blown up is not
+  -- worth bombing again. Where blocks don't grow back this changes nothing.
+  for rr = 0, MAP_H - 1 do
+    for cc = 0, MAP_W - 1 do
+      local k = rr * KEY_W + cc
+      if SOFT[g[rr][cc]] then softSeen[k] = true elseif softSeen[k] then softGone[k] = true end
     end
   end
   -- Regrown blocks that wall us off from what is left to do are the stage
@@ -1638,7 +1657,10 @@ local function think()
     dir = bfs(g, c, r, safeGoal(windows), nearEnemy, cw)
       or bfs(g, c, r, safeGoal(windows), enemyNow, windows)
       or bfs(g, c, r, function(cc, rr) return not windows[rr * KEY_W + cc] end, enemyNow)
-  elseif nearEnemy[here] then
+  elseif nearEnemy[here] or (frame - throw.dodgeAt < 12 and hit(eWin, here, 0, 90)) then
+    -- Keep at a dodge for a few frames: nearEnemy flickers as predictions
+    -- shift, and turning back each other frame is how the 5-8 body corners us.
+    if nearEnemy[here] then throw.dodgeAt = frame end
     plan = "dodge"
     dir = bfs(g, c, r, safeGoal(windows), nil, cw)
       or bfs(g, c, r, function(cc, rr)
@@ -1657,12 +1679,16 @@ local function think()
       for _, cell in ipairs(blastCells(g, cc, rr, rangeAt(g, cc, rr))) do
         local k = cell[2] * KEY_W + cell[1]
         local tt = g[cell[2]][cell[1]]
-        if panelPlan and (panelDone[k] or panelTodo[k]) then
+        -- The planner's own step may flip a finished panel: it priced that
+        -- in, and the parity plan sets the panel right afterwards.
+        if pushCell == rr * KEY_W + cc then
+          -- (why is "obj" already)
+        elseif panelPlan and (panelDone[k] or panelTodo[k]) then
           if not panelPlan[rr * KEY_W + cc] then return nil end
           why = "obj"
         elseif panelDone[k] then return nil end
         -- $68: lighting it ($6F) is what kills 3-1's immune $8F enemies.
-        if panelTodo[k] or (SOFT[tt] and not softGone[k]) or tt == BARREL or isSwitchOff(tt) or tt == 0x68 or tt == 0x6B or tt == 0x6A or tt == 0x4B then why = "obj" end
+        if panelTodo[k] or (SOFT[tt] and not softGone[k]) or tt == BARREL or isSwitchOff(tt) or tt == 0x68 or tt == 0x6B or tt == 0x6A or tt == 0x4B or tt == 0x63 then why = "obj" end
         -- A blast pushes an $E2 block one cell on; into a $D3 hole it fills
         -- it and opens the way (docs/mechanics.md, push blocks).
         -- While a plan is on, only its own bombs move blocks.
@@ -1818,7 +1844,7 @@ local function think()
             local nk = (rr + d[2]) * KEY_W + cc + d[1]
             local n = grid[rr + d[2]] and grid[rr + d[2]][cc + d[1]]
             if n == GATE_OPEN or (SOFT[n] and not sGone[nk]) or pTodo[nk] or n == 0x6B or n == 0x68
-                or n == 0x6A or n == 0x4B then return true end
+                or n == 0x6A or n == 0x4B or n == 0x63 then return true end
           end
           return false
         end,
@@ -1878,7 +1904,10 @@ local function think()
       -- An open, unblocked gate is the way out whatever is still alive
       -- (PlayerOnExitTile C1:41A8 checks only Exit_Blocked and the panels;
       -- 2-1's furnace never stops making enemies).
-      if gateOpen and r16(0x5D70) < 0x8000 then
+      -- A heart or glove lying in reach comes before the exit.
+      plan = "item"
+      dir = bfs(g, c, r, function(cc, rr) return g[rr][cc] == ITEM and heartNow[rr * KEY_W + cc] == "item" end, nearEnemy, cw)
+      if not dir and gateOpen and r16(0x5D70) < 0x8000 then
         plan = "exit"
         dir = bfs(g, c, r, function(cc, rr) return g[rr][cc] == GATE_OPEN end, nearEnemy, cw)
       end
@@ -1900,6 +1929,7 @@ local function think()
             return ok
           end, nearEnemy, cw)
           if dir then
+            if os.getenv("SBM2_DBG") and goalK then log(string.format("%6d dbg seek %s at (%d,%d)", frame, want, goalK % KEY_W, goalK // KEY_W)) end
             -- A planned step is not a target of its own: the planner keeps
             -- going after it.
             if want == "obj" and goalK ~= pushCell then lastObjFrame = frame end
@@ -2207,6 +2237,10 @@ local function onFrame()
       end
     end
   end
+  local saveF, savePath = (os.getenv("SBM2_SAVE_AT") or ""):match("^(%d+):(.+)$")
+  if saveF and tonumber(saveF) == frame then
+    onNextInstruction(function() inputlog.saveState(savePath, emu.createSavestate()) end)
+  end
   if frame % SNAP_EVERY == 0 and (r16(P1 + P_LOCK) & 1) == 0
       and (#snaps == 0 or snaps[#snaps][1] < frame) then
     local f = frame
@@ -2286,3 +2320,15 @@ emu.addEventCallback(function()
     emu.stop(4)
   end
 end, emu.eventType.endFrame)
+
+-- bot/test (unit tests on WRAM images, outside Mesen): the planner's parts.
+-- No locals here: the main chunk is near Lua's 200-local limit.
+if BOT_TEST then
+  BOT_TEST.bot = {
+    readMap = readMap, walkable = walkable, bfs = bfs, regionOf = regionOf, stagePlan = stagePlan,
+    blastCells = blastCells, blastWindows = blastWindows, bombEffect = bombEffect, panels = panels,
+    heartCells = heartCells, playerTile = playerTile, structSig = structSig, steer = steer,
+    log = logLines, frame = function() return frame end,
+    KEY_W = KEY_W, MAP_W = MAP_W, MAP_H = MAP_H, MAP = MAP, ROW = ROW, P1 = P1,
+  }
+end

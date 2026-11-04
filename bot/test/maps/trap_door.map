@@ -1,0 +1,12 @@
+# Invented. The only way out of P1's room is the trap 63 at (4,2): it costs
+# a heart (or a life without one; docs/mechanics.md 3).
+stage 52
+p1 2 2
+hearts 1
+panels none
+grid
+C5 C5 C5 C5 C5 C5 C5 C5 C5
+C5  .  .  . C5 C5 C5 C5 C5
+C5  .  .  . 63  .  . C2 C5
+C5  .  .  . C5 C5 C5 C5 C5
+C5 C5 C5 C5 C5 C5 C5 C5 C5

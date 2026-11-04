@@ -1,0 +1,13 @@
+# Invented. P1's room is shut by a push block E2 and a hole D3 behind it;
+# the soft block C2 on the far side is the goal. A bomb west of the block
+# pushes it east into the hole, which opens the way (docs/mechanics.md 1).
+stage 50
+p1 2 2
+fire 1
+panels none
+grid
+C5 C5 C5 C5 C5 C5 C5 C5 C5
+C5  .  .  . C5 C5 C5 C5 C5
+C5  .  .  . E2 D3  . C2 C5
+C5  .  .  . C5 C5 C5 C5 C5
+C5 C5 C5 C5 C5 C5 C5 C5 C5

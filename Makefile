@@ -1,7 +1,7 @@
 ASAR := tools/asar
 ROM  := build/sbm2.sfc
 
-.PHONY: all compare disasm coverage clean verify trace verify-hybrid
+.PHONY: all compare disasm coverage clean verify trace verify-hybrid bot-test
 all: compare
 
 $(ROM): $(wildcard src/*.asm)
@@ -63,3 +63,16 @@ build/port/play: $(PLAY_SRC) port/hook.h port/snes.h port/cpu.h port/ppu.h
 HYBRID_INPUT ?= port/input_hybrid.txt
 verify-hybrid: build/port/hybrid
 	build/port/hybrid baserom.sfc $(HYBRID_INPUT) $(HYBRID_FLAGS)
+
+# Standalone Lua 5.4 (Mesen's bundled sources) for the bot's offline tests.
+LUA_SRC := tools/mesen2-src/Lua
+LUA_CORE := lapi lcode lctype ldebug ldo ldump lfunc lgc llex lmem lobject lopcodes lparser lstate \
+	lstring ltable ltm lundump lvm lzio lauxlib lbaselib lcorolib ldblib liolib lmathlib loslib \
+	lstrlib ltablib lutf8lib loadlib linit
+build/tools/lua: tools/lua/main.c $(LUA_CORE:%=$(LUA_SRC)/%.c)
+	@mkdir -p build/tools
+	$(CC) -O2 -std=gnu99 -DLUA_USE_LINUX -I$(LUA_SRC) -o $@ $^ -lm -ldl
+
+# Planner / steering unit tests on text maps (bot/test/maps), no emulator.
+bot-test: build/tools/lua
+	build/tools/lua bot/test/test_planner.lua

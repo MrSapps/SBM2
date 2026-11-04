@@ -1,0 +1,35 @@
+# 5-5 mid-stage (a bot run, seed 0, f15000): P1 at (6,10) in the trap
+# corridor; blocks at (15,12), (17,12) and (17,10). Bombs at (16,12) then
+# (17,12) open (18,11) up to the trap (19,10). Greedy search found no plan
+# to a panel from here in 100000 states.
+stage 54
+p1 6 10
+hearts 1
+fire 3
+bombs 1
+gate 4 3
+panels 1
+panel 2 4
+panel 10 4
+panel 12 4
+panel 14 4
+panel 16 4
+panel 18 4
+panel 20 4
+panel 22 4
+grid
+C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5
+C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C5
+C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C5
+C6 C6 C6 C6 C9 C6 C6 C5 C2 C5  . C5  . C5  . C5  . C5  . C5  . C5  . C5 C2 C5 C2 C5 C2 C6 C6 C5
+C6 C6 74 D3 E2 D3 E2 C2  . C2 74  . 74  . 74  . 74  . 74  . 74  . 74 C2  . C2  . C2  . C6 C6 C5
+C6 C6 D3 C5  . C5  . C5  . C5  . C5  . C5  . C5  . C5  . C5  . C5  . C5  . C5  . C5  . C6 C6 C5
+C6 C6  .  .  .  .  .  .  .  .  .  .  .  .  .  .  .  .  .  .  .  .  .  .  .  .  .  .  . C6 C6 C5
+C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6  . C6 C6 C5
+C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6  . C6 C6 C5
+C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C2 C6 C6 C5
+C6 C6 C2 C2  .  .  . E2  .  .  . E2  .  .  .  .  . E2  . 63  .  .  .  . 63 D3  .  .  . C6 C6 C5
+C6 C6 C2 C5 64 C5  . C5  . C5  . C5  . C5  . C5  . C5  . C5  . C5 E2 C5  . C5 C2 C5 C2 C6 C6 C5
+C6 C6  .  .  . E2  .  .  . E2  .  .  .  .  . E2  . E2  .  .  .  . 63  .  . D3  .  .  . C6 C6 C5
+C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C5
+C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5

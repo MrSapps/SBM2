@@ -1770,6 +1770,10 @@ local function think()
   elseif frame - progressAt > STALL then
     progressAt = frame
     exploreUntil, stallUntil = frame + 600, frame + 600
+    -- Blocks once seen to grow back are skipped (softGone); stalled with
+    -- the gate shut, they are targets again: a dormant enemy may sit in
+    -- the last one (1-5 ended with one block and the gate shut).
+    if not gateOpen then softGone = {} end
     local es = {}
     for k in pairs(panelTodo) do es[#es + 1] = string.format("panel@(%d,%d)", k % KEY_W, k // KEY_W) end
     for _, d in ipairs(dormant) do es[#es + 1] = string.format("dormant@(%d,%d)", d[1], d[2]) end
@@ -1936,6 +1940,15 @@ local function think()
         local t0 = (t or 0) + NEW_FUSE
         local _, best = Enemies.killChance(samples, elist, cells, t0 - 4, t0 + FLAME_FRAMES, EATER_SKIP)
         if math.max(best, eatK) >= KILL_P then why = "enemy" end
+      end
+      -- A chaser (4-3's $93: 2 hp, faster after a hit) follows P1 and is
+      -- stopped by the bomb in its way, waiting next to it: a bomb dropped
+      -- with one 4 cells or less behind catches it (the rollouts don't see
+      -- the bomb block it).
+      if not why and t == nil then
+        for _, e in ipairs(elist) do
+          if e.chaser and e.killable and math.abs(e.c - cc) + math.abs(e.r - rr) <= 4 then why = "enemy"; break end
+        end
       end
       return why
     end

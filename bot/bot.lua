@@ -1938,7 +1938,75 @@ local function think()
         local row12 = function(cc, rr) return rr == 12 end
         return bfs(g, c, r, row12, nearEnemy, cw) or bfs(g, c, r, row12, nil, cw)
       end
-      if myCell == HK and slamHere and (ride.running or not ride.ballRisk) then
+      -- Two bombs (5-7's items): no run at all. The remote sets off the
+      -- OLDEST bomb first [port probe], so keep an attack bomb at (6,11)
+      -- (row 11 is never a sense cell; its blast up column 6 reaches the
+      -- slammed block for body columns 4-8) older than a shield bomb at
+      -- (7,12) that P1 stands on (out of the attack bomb's row and column).
+      -- A slam over P1: press B, the attack bomb goes off, P1 stays shielded.
+      -- Rebuild when calm and the body is away: from (6,11) drop a new
+      -- attack bomb, set off the old shield, walk back to (7,12), drop one.
+      local two = emu.read(P1 + 0xE0, WRAM, false) >= 2
+      local AK, SK = 11 * KEY_W + 6, 12 * KEY_W + 7
+      local order = ride.order or {}
+      ride.order = order
+      local live = {}
+      for _, b in ipairs(lastBombs) do if b[5] then live[b[2] * KEY_W + b[1]] = true end end
+      for i = #order, 1, -1 do if not live[order[i]] then table.remove(order, i) end end
+      for k in pairs(live) do
+        local seen = false
+        for _, o in ipairs(order) do if o == k then seen = true end end
+        if not seen then order[#order + 1] = k end
+      end
+      local hasA, hasS = live[AK], live[SK]
+      local aOlder = hasA and hasS and order[1] == AK
+      -- away, or rising from the slam that just hit (its box is then above
+      -- rows 11-12)
+      local bodyFar = math.abs(bx - 96) > 72 or (st == 0xCCCAC4 and r16(0x1014) < 150 and frame - (ride.attackAt or -1000) < 200)
+      local function goTo(k)
+        local tc, tr = k % KEY_W, k // KEY_W
+        if here == k then return nil end
+        return bfs(g, c, r, function(cc, rr) return cc == tc and rr == tr end, nearEnemy, cw)
+          or bfs(g, c, r, function(cc, rr) return cc == tc and rr == tr end, nil, cw)
+      end
+      if two and (#order <= 2) then
+        f1plan, step = true, nil
+        ride.f1Home = true  -- no generic remote detonations: this plan picks them
+        if hasA and hasS and aOlder and here == SK then
+          plan, dir = "shield2", nil
+          -- (column 6 is in the block for body x 56..135: columns c-2..c+2)
+          if st == 0xCCCAC4 and bx >= 56 and bx <= 135 and r16(0x1014) >= 144 and frame >= nextDetonate
+              and frame - (ride.attackAt or -1000) > 150 then  -- once per slam (the next press is the shield)
+            input.b = true; nextDetonate = frame + 30; ride.attackAt = frame
+            log(string.format("%6d detonate (5-8: attack bomb under the slam at %d,%d)", frame, bx, r16(0x1014)))
+          end
+        elseif hasS and not hasA and here == SK and not (calm and bodyFar) then
+          plan, dir = "shield2", nil  -- wait on the shield for a calm moment
+        elseif hasS and not hasA then
+          -- rebuild: to (6,11) (via (6,12)), drop the new attack bomb there
+          plan = "rebuild"
+          if here == AK then dir = nil; input.a = frame % 2 == 0
+          else dir = goTo(AK) end
+        elseif hasS and hasA and not aOlder then
+          -- the shield is the older: set it off from the attack bomb's cell
+          plan = "rebuild"
+          if here == AK and frame >= nextDetonate then
+            dir = nil; input.b = true; nextDetonate = frame + 30
+            log(string.format("%6d detonate (5-8: old shield)", frame))
+          elseif here ~= AK then dir = nil end
+        elseif hasA and not hasS then
+          plan = "place2"
+          if here == SK then dir = nil; input.a = frame % 2 == 0 else dir = goTo(SK) end
+        elseif not hasA and not hasS then
+          plan = "place2"
+          if here == AK then dir = nil; input.a = frame % 2 == 0 else dir = goTo(AK) end
+        else
+          f1plan = nil  -- something else out (a stray bomb): the one-bomb logic below
+        end
+      end
+      if f1plan then
+        -- (two-bomb plan above)
+      elseif myCell == HK and slamHere and (ride.running or not ride.ballRisk) then
         if not ride.running and os.getenv("SBM2_DBG") then
           local t = {}
           for _, b in ipairs(bosses) do t[#t + 1] = string.format("%04X:%06X(%d,%d)", b.base, b.state, b.x, b.y) end

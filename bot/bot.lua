@@ -1075,7 +1075,7 @@ local deaths, rollbacks = 0, 0
 -- Ambush search: a bomb placed only for an enemy is tried from a savestate;
 -- if nobody died AMBUSH_FRAMES later, reload and retry with a random delay
 -- and shuffled tie-breaks, up to AMBUSH_TRIES times.
-local AMBUSH_FRAMES, AMBUSH_TRIES = 220, 5
+local AMBUSH_FRAMES, AMBUSH_TRIES = 220, 10  -- (retries cost CPU, not game time: the port makes them cheap)
 local ambush = nil        -- { frame, data, alive, tries }
 local ambushStart = false -- think() wants to bomb for an enemy
 local ambushHold = 0      -- no enemy-only bombs before this frame

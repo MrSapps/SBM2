@@ -2672,10 +2672,14 @@ local function think()
         if want then break end
       end
       if want then
-        if throw.face == want and throw.faceFrames >= 2 then
+        -- (a retried ambush waits a random while: another moment, another try)
+        if throw.face == want and throw.faceFrames >= 2 and frame >= ambushHold then
           input.a = nil
           log(string.format("%6d throw %s at boss (%.0f,%.0f) from px(%d,%d)", frame, want, bx, by, x, y))
           throw.faceFrames = 0
+          -- An ambush: if no hit follows, reload and throw again (retries
+          -- cost CPU, not game time).
+          if not ambush then ambushStart = true end
         else
           input = { a = true, [want] = true }
           if throw.face == want then throw.faceFrames = throw.faceFrames + 1 else throw.face, throw.faceFrames = want, 1 end
@@ -2795,7 +2799,8 @@ local function onFrame()
       i = math.max(1, i - (triesAt[snaps[i][1]] or 0) // 3)
       local snap = snaps[i]
       local tries = (triesAt[snap[1]] or 0) + 1
-      if tries <= MAX_TRIES then
+      -- (5-8: a death there costs the fight, and retries only cost CPU)
+      if tries <= (emu.read(0x1A, WRAM, false) == 0x57 and 40 or MAX_TRIES) then
         triesAt[snap[1]] = tries
         for k = #snaps, i + 1, -1 do snaps[k] = nil end
         rollbacks = rollbacks + 1

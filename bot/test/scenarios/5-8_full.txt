@@ -1,0 +1,10 @@
+# 5-8 whole fight from the stage start (glove carried in from 5-7): both forms, to the ending. The stage timer is 10:00 (36000 frames).
+# cut from build/t56/56 at frame 30
+start 57g
+budget 40000
+pass STAGE 60
+pads
+7 0001,0000
+1 0001,0000,0002
+8 0001
+14 0001,0000

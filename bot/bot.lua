@@ -1341,6 +1341,13 @@ local function think()
         end
       end
       if #bo > 0 then cause = cause .. " boss " .. table.concat(bo, ",") end
+      -- Killed by a blast: after the rollback, don't bomb those cells for
+      -- a while (the replay made the same choice: 3-6 died 16 times alike).
+      if cause:find("^blast") then
+        for _, b in ipairs(lastBombs or {}) do
+          if b[3] < 100000 then noBombUntil[b[2] * KEY_W + b[1]] = frame + 600 end
+        end
+      end
       log(string.format("%6d DEATH %s at px(%d,%d) enemies %s", frame, cause,
         r16(P1 + P_X), r16(P1 + P_Y), table.concat(es, " ")) .. string.format(" stats[E0..FF] %s after: %s",
         table.concat(st, " "), table.concat(recent, " | ")))

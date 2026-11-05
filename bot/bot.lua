@@ -2293,7 +2293,9 @@ local function think()
           local want
           dir = bfs(g, c, r, function(cc, rr)
             for _, e in ipairs(elist) do
-              if e.gadget and e.type ~= 0xE0 and e.type ~= 0xA0 and walkable(g, e.c, e.r) then
+              -- Known rides only: 3-5's subs $DA/$DB, world 4's $DC platform
+              -- (pushing into $E1 or world 5's $C0 kills: 3-2, 2-8).
+              if (e.type == 0xDA or e.type == 0xDB or e.type == 0xDC) and walkable(g, e.c, e.r) then
                 for _, d in ipairs(DIRS) do
                   if cc + d[1] == e.c and rr + d[2] == e.r and not ride.tried[(rr * KEY_W + cc) .. d[3]] then
                     want = { rr * KEY_W + cc, d[3] }; return true

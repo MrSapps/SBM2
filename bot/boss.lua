@@ -191,6 +191,9 @@ return function(env)
   end
   function B.predict(b, t)
     if b.state == SLAM then return b.x, b.y + slamDy(r16(b.base + 0x36), t) end
+    -- 5-8 form 2 hurt (FinalBossForm2Hurt CC:D2E7, 63 frames): it stays put
+    -- (the waypoint prediction had it fly on, and dodges walked into it)
+    if b.state == 0xCCD2E7 then return b.x, b.y end
     if b.state == PATROL then
       local dx = patrolDx(b, t)
       if dx then return b.x + dx, b.y end

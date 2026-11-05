@@ -550,6 +550,56 @@ int main(int argc, char **argv)
     cdl = calloc(m.rom_size, 1);
     cb_bounds();
 
+    /* SBM2_REPLAY=<run.inputs>: play a pad log recorded in timed mode back
+     * in timed mode from power-on (each pad read takes the next value, the
+     * NMI markers are skipped: the same machine replays the same run), then
+     * print the stage ($1A) and frame count and exit. Verifies a whole run. */
+    const char *rep = getenv("SBM2_REPLAY");
+    if (rep && *rep) {
+        uint32_t n;
+        uint16_t *log = load_words(rep, &n);
+        if (!log) { fprintf(stderr, "botrun: can't read %s\n", rep); return 2; }
+        /* SBM2_REPLAY_START=<Mesen state>: the run began there (botrun got
+         * to it in frame-step, then went timed): replay its sidecar the same
+         * way first, then the rest of the log timed. */
+        const char *rs = getenv("SBM2_REPLAY_START");
+        uint32_t skip = 0;
+        if (rs && *rs) {
+            char side[1024];
+            snprintf(side, sizeof side, "%.*s.inputs", (int)strlen(rs) - 4, rs);
+            uint32_t sn;
+            uint16_t *sl = load_words(side, &sn);
+            if (!sl || sn > n || memcmp(sl, log, sn * 2)) { fprintf(stderr, "botrun: %s is not a prefix of the log\n", side); return 2; }
+            if (replay_words(sl, sn, side)) return 2;
+            skip = sn;
+        }
+        m.framestep = 0;
+        m.pads = log + skip;
+        m.npads = n - skip;
+        m.pad_pos = 0;
+        uint8_t last = 0xFF;
+        while (m.pad_pos < m.npads) {
+            snes_step(&m);
+            if (m.wram[0x1A] != last && m.wram[0xBC]) {
+                last = m.wram[0x1A];
+                printf("frame %u stage %02X (pad log %u/%u)\n", m.frame, last, m.pad_pos, m.npads);
+            }
+        }
+        printf("end: frame %u stage %02X, %u log entries skipped\n", m.frame, m.wram[0x1A], m.pad_desync);
+        /* SBM2_REPLAY_CMP=<port state>: compare WRAM with that state's */
+        const char *cmp = getenv("SBM2_REPLAY_CMP");
+        if (cmp && *cmp) {
+            size_t sn;
+            char *d = read_file(cmp, &sn);
+            if (d && sn >= 9 + sizeof m && !memcmp(d, MAGIC, 8)) {
+                const Snes *o = (const Snes *)(d + 9);
+                int diff = 0, first = -1;
+                for (int i = 0; i < 0x20000; i++) if (o->wram[i] != m.wram[i]) { if (first < 0) first = i; diff++; }
+                printf("vs %s: %d WRAM bytes differ (first %05X), state frame %u\n", cmp, diff, first, o->frame);
+            }
+        }
+        return 0;
+    }
     const char *load = getenv("SBM2_LOAD");
     if (load && *load) {
         size_t n;

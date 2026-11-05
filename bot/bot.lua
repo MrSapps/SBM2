@@ -1415,7 +1415,9 @@ local function think()
   end
   -- Lives assist (logged): a game over restarts the whole world, so keep
   -- lives ($1C6C) topped up; deaths are still retried by rollback first.
-  if emu.read(0x1C6C, WRAM, false) < 2 then
+  -- (an assist like the others: not with SBM2_NOASSIST, where a game over
+  -- makes drive.py restart the stage)
+  if not NOASSIST and emu.read(0x1C6C, WRAM, false) < 2 then
     inputlog.write16(0x1C6C, (r16(0x1C6C) & 0xFF00) | 3)
     local msg = string.format("frame %d stage %02X: lives assisted", frame, emu.read(0x1A, WRAM, false))
     log("ASSIST " .. msg)

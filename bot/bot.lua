@@ -1676,11 +1676,13 @@ local function think()
     if frame - remoteSince > 300 and not ride.f1Home then remoteWorth = true end
     -- Not on a spring pad (the one free frame after a landing: the press
     -- did nothing and 3-6 went round its pads for good) or locked.
-    if remoteWorth and not remoteCells[here] and not nearEnemy[here] and frame >= nextDetonate
+    -- (5-8's slam: a ball near P1 is no reason to wait, the body rises)
+    if remoteWorth and not remoteCells[here] and (not nearEnemy[here] or ride.f1Home) and frame >= nextDetonate
         and g[r][c] ~= SPRING and (r16(P1 + P_LOCK) & 1) == 0 then
       input.b = true
       nextDetonate = frame + 20
-      log(string.format("%6d detonate", frame))
+      log(string.format("%6d detonate%s", frame, emu.read(0x1A, WRAM, false) == 0x57 and
+        string.format(" (body %02X%04X at %d,%d hp %d)", emu.read(0x1002, WRAM, false), r16(0x1000), r16(0x1011), r16(0x1014), r16(0x1020)) or ""))
     end
   else
     remoteSince = nil
@@ -1898,7 +1900,8 @@ local function think()
       local bx = r16(0x1011)
       if bx >= 0x100 then bx = bx - 0x100 end
       local slamHere = st == 0xCCCAC4 and math.abs(bx - 128) <= 32
-      local away = function(cc, rr) return rr == 12 and math.abs(cc - 8) >= 3 end
+      -- out of the home bomb's blast along row 12 (fire 3 with 5-7's items)
+      local away = function(cc, rr) return rr == 12 and math.abs(cc - 8) > RANGE end
       -- Off a bomb only with no ball near (a slam missed is not a death);
       -- caught off it with a ball near, a new bomb right here shields too.
       local ballNear, ballSome = false, false
@@ -2006,13 +2009,15 @@ local function think()
         local mc, mr = myCell % KEY_W, myCell // KEY_W
         local rc = {}
         for _, cell in ipairs(blastCells(g, mc, mr, RANGE)) do rc[cell[2] * KEY_W + cell[1]] = true end
+        -- (on P1's own side of the bomb: it can't walk through it; already
+        -- clear of the blast, set it off from here)
         local tc = 8
+        local sgn = c < mc and -1 or 1
         for dd = 0, 6 do
-          if not rc[12 * KEY_W + 8 + dd] and g[12][8 + dd] and walkable(g, 8 + dd, 12) then tc = 8 + dd; break end
-          if not rc[12 * KEY_W + 8 - dd] and g[12][8 - dd] and walkable(g, 8 - dd, 12) then tc = 8 - dd; break end
+          if not rc[12 * KEY_W + 8 + sgn * dd] and g[12][8 + sgn * dd] and walkable(g, 8 + sgn * dd, 12) then tc = 8 + sgn * dd; break end
         end
         f1plan, plan, step = true, "shield", nil
-        dir = walkTo(tc)
+        if rc[here] then dir = walkTo(tc) else dir = nil end
         if not dir and not rc[here] and frame >= nextDetonate then
           input.b = true; nextDetonate = frame + 20
           log(string.format("%6d detonate (5-8 shield at (%d,%d))", frame, mc, mr))
@@ -2550,7 +2555,10 @@ local function think()
       -- of them can be).
       step = nil
       -- 5-8 shield plan stopped by a ball near the next cell: dig in here.
-      if plan == "shield" and emu.read(P1 + P_BOMBS_LEFT, WRAM, false) > 0 then input.a = frame % 2 == 0 end
+      -- (one remote bomb at a time: two sealed P1 in between them)
+      if plan == "shield" and emu.read(P1 + P_BOMBS_LEFT, WRAM, false) > 0 and not next(remoteCells) then
+        input.a = frame % 2 == 0
+      end
     else
       input[steer(step.dir, x, y, step.c, step.r)] = true
       -- Once on the target tile, keep moving toward its centre.

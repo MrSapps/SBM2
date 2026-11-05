@@ -1431,12 +1431,14 @@ local function think()
   -- 5-8 shows an open gate tile at (8,3) before the boss comes, with a
   -- $C0 in it that kills on contact: no way out there, keep off it.
   if emu.read(0x1A, WRAM, false) == 0x57 and gateOpen then gateOpen = false; g[gr][gc] = 0xC9 end
-  -- World 5 without the glove: 5-8 form 2 is hurt only by thrown bombs and
-  -- its arena has no blocks, so one must be carried in (5-7 hides one, item
-  -- kind 7, at (13,10)). While one is hidden, the gate counts as shut (a
+  -- 5-7 without the glove: 5-8 form 2 is hurt only by thrown bombs and its
+  -- arena has no blocks, so one must be carried in (5-7 hides one, item
+  -- kind 7, at (13,10)). While it is hidden, the gate counts as shut (a
   -- route through it would leave the stage).
   local gloveHidden = false
-  if emu.read(0x1A, WRAM, false) >= 0x50 and emu.read(P1 + 0xFE, WRAM, false) == 0 then
+  -- (5-7 only: other world 5 stages with a glove hidden out of reach were
+  -- never left, 5-5 and 5-6)
+  if emu.read(0x1A, WRAM, false) == 0x56 and emu.read(P1 + 0xFE, WRAM, false) == 0 then
     for i = 0, 63 do
       local cell = r16(ITEMLIST + 4 * i)
       if cell >= 0x8000 then break end

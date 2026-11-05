@@ -143,6 +143,24 @@ local function heartCells()
   end
   local noGlove = emu.read(P1 + 0xFE, WRAM, false) == 0
   local bytes = emu.readBytes and emu.readBytes(MAP, MAP_H * ROW, WRAM)  -- port/botrun only
+  if bytes then
+    -- (port: find the $44 item tiles in C, at even offsets = tile codes)
+    local pos = 1
+    while true do
+      pos = bytes:find("\68", pos, true)
+      if not pos then break end
+      local o = pos - 1
+      if o % 2 == 0 then
+        local r, c = o // ROW, (o % ROW) // 2
+        if c < MAP_W then
+          local gfx = emu.read(GFX + o, WRAM, false)
+          if gfx == 0x40 or (gfx == 0x26 and noGlove) then t[r * KEY_W + c] = "item" end
+        end
+      end
+      pos = pos + 1
+    end
+    return t
+  end
   for r = 0, MAP_H - 1 do
     for c = 0, MAP_W - 1 do
       local o = r * ROW + c * 2
@@ -158,8 +176,12 @@ local function heartCells()
   return t
 end
 
+-- The grid g[r][c], plus (for this frame's scans, one pass instead of
+-- several) g.flames (cell keys), g.mapBombs and g.softs ({c, r} lists).
 local function readMap()
   local g = {}
+  local flames, mapBombs, softs = {}, {}, {}
+  g.flames, g.mapBombs, g.softs = flames, mapBombs, softs
   local bytes = emu.readBytes and emu.readBytes(MAP, MAP_H * ROW, WRAM)  -- port/botrun only
   for r = 0, MAP_H - 1 do
     local row = {}
@@ -168,6 +190,9 @@ local function readMap()
       local o = r * ROW + c * 2
       local t = bytes and bytes:byte(o + 1) or emu.read(MAP + o, WRAM, false)
       row[c] = t
+      if t >= 0x01 and t <= 0x03 then flames[#flames + 1] = r * KEY_W + c
+      elseif t >= 0x40 and t <= 0x43 then mapBombs[#mapBombs + 1] = { c, r }
+      elseif SOFT[t] then softs[#softs + 1] = { c, r } end
       if not seenUnknown[t] then  -- each code is classified once
         seenUnknown[t] = true
         if not (EMPTY[t] or SOFT[t] or HARD[t] or isBomb(t) or isFlame(t)) then
@@ -264,12 +289,19 @@ local function readBombs(g)
   end
   -- Bombs drawn on the map but missing from the table (world 2's grey cubes)
   -- never go off by themselves: obstacles a chain blast may still set off.
-  for r = 0, MAP_H - 1 do
-    for c = 0, MAP_W - 1 do
-      if isBomb(g[r][c]) and not byCell[r * KEY_W + c] then
-        local b = { c, r, 100000, RANGE }
-        list[#list + 1] = b
-        byCell[r * KEY_W + c] = b
+  local function mapBomb(c, r)
+    if not byCell[r * KEY_W + c] then
+      local b = { c, r, 100000, RANGE }
+      list[#list + 1] = b
+      byCell[r * KEY_W + c] = b
+    end
+  end
+  if g.mapBombs then
+    for _, cr in ipairs(g.mapBombs) do mapBomb(cr[1], cr[2]) end
+  else
+    for r = 0, MAP_H - 1 do
+      for c = 0, MAP_W - 1 do
+        if isBomb(g[r][c]) then mapBomb(c, r) end
       end
     end
   end
@@ -382,9 +414,13 @@ local function blastWindows(g, extra)
       end
     end
   end
-  for r = 0, MAP_H - 1 do
-    for c = 0, MAP_W - 1 do
-      if isFlame(g[r][c]) then add(r * KEY_W + c, -FLAME_FRAMES, FLAME_FRAMES // 2) end
+  if g.flames then
+    for _, k in ipairs(g.flames) do add(k, -FLAME_FRAMES, FLAME_FRAMES // 2) end
+  else
+    for r = 0, MAP_H - 1 do
+      for c = 0, MAP_W - 1 do
+        if isFlame(g[r][c]) then add(r * KEY_W + c, -FLAME_FRAMES, FLAME_FRAMES // 2) end
+      end
     end
   end
   -- World 2 fuse lines: once a bomb has gone off in the furnace ($5D5C bit
@@ -1633,13 +1669,10 @@ local function think()
   -- Regrown blocks that wall us off from what is left to do are the stage
   -- planner's business (it bombs the ones in the way).
   local soft, todo = 0, 0
-  for rr = 0, MAP_H - 1 do
-    local row = g[rr]
-    for cc = 0, MAP_W - 1 do
-      if SOFT[row[cc]] then
-        softSeen[rr * KEY_W + cc] = true; soft = soft + 1
-      elseif softSeen[rr * KEY_W + cc] then softGone[rr * KEY_W + cc] = true end
-    end
+  for _, cr in ipairs(g.softs) do softSeen[cr[2] * KEY_W + cr[1]] = true end
+  soft = #g.softs
+  for k in pairs(softSeen) do
+    if not SOFT[g[k // KEY_W][k % KEY_W]] then softGone[k] = true end
   end
   for _ in pairs(panelTodo) do todo = todo + 1 end
   -- Not the enemy count: spawners (the 2-1 furnace) keep adding enemies.

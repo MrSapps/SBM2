@@ -1,7 +1,10 @@
-# 5-8 form 1 from the intro: the bot should take HP 28 down to 24 or less within 7000 frames (28 hits are needed; each takes ~66 frames).
-# cut from build/benchC2/57 at frame 150
-start 56
-budget 7000
+# 5-8 form 1 from the stage start (port state from a 4-8..5-7 run): HP 28 down to 24 or less within 6000 frames (28 hits are needed; each takes ~66 frames).
+# cut from build/benchP4/57 at frame 30
+start 57f
+budget 6000
 pass bosses 1000@\S+\([^)]*hp2[0-4] 
 pads
-150 0001,0100
+6 0001,0000
+1 0001,0000,0002
+8 0001
+15 0001,0000

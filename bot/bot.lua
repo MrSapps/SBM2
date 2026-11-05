@@ -1880,11 +1880,11 @@ local function think()
       local ballNear, ballSome = false, false
       ride.ballRisk = false
       for _, b in ipairs(bosses) do
-        local d = b.state == 0xCCDAA8 and math.abs(b.x - x) + math.abs(b.y - y) or 1e9
+        local d = (b.state == 0xCCDAA8 or b.state == 0xCCA43C) and math.abs(b.x - x) + math.abs(b.y - y) or 1e9
         if d < 96 then ballNear = true end
         if d < 128 then ballSome = true end
         -- leaving the bomb for a slam: ~90 frames off it, and balls home
-        if d < 160 or (b.state == 0xCCDAA8 and b.y > 160) then ride.ballRisk = true end
+        if d < 160 or ((b.state == 0xCCDAA8 or b.state == 0xCCA43C) and b.y > 160) then ride.ballRisk = true end
       end
       -- calm: no ball within 128 px for 30 frames (no flicker off the bomb)
       if ballSome then ride.ballAt = frame end
@@ -1893,15 +1893,23 @@ local function think()
       ride.f1Home = myCell == HK
       if not (myCell == HK and slamHere) then ride.runSide = nil end
       if not (myCell == HK and slamHere) then ride.running = nil end
+      -- Walk along row 12 to column tc (straight: route searches through
+      -- the ball windows failed every other frame); off row 12, a route.
+      local function walkTo(tc)
+        if r == 12 then
+          if c == tc then return nil end
+          return c < tc and "right" or "left"
+        end
+        local row12 = function(cc, rr) return rr == 12 end
+        return bfs(g, c, r, row12, nearEnemy, cw) or bfs(g, c, r, row12, nil, cw)
+      end
       if myCell == HK and slamHere and (ride.running or not ride.ballRisk) then
         ride.running = true
         f1plan, plan = true, "slamrun"
-        -- Straight along row 12 (a route search through the ball windows
-        -- failed every other frame: P1 crept), to the side with no ball.
         if not away(c, r) then
           local l, rt = 1e9, 1e9
           for _, b in ipairs(bosses) do
-            if b.state == 0xCCDAA8 then
+            if (b.state == 0xCCDAA8 or b.state == 0xCCA43C) then
               local d = math.abs(b.x - x) + math.abs(b.y - y)
               if b.x < x then l = math.min(l, d) else rt = math.min(rt, d) end
             end
@@ -1916,16 +1924,45 @@ local function think()
         end
       elseif myCell and here == myCell and (not calm or myCell == HK) then
         f1plan, plan, dir, step = true, "shield", nil, nil
-      elseif not myCell and bombsLeft and (here == HK or ballNear) then
-        f1plan, plan, dir, step = true, "shield", nil, nil
-        input.a = frame % 2 == 0
+      elseif myCell and (myCell ~= HK or here ~= HK) and (calm or here ~= myCell) then
+        -- A shield dug in elsewhere (once calm), or the home bomb with P1
+        -- off it (P1 can't step back onto it; a slam came down elsewhere):
+        -- walk to home, or to the row 12 cell nearest it out of that bomb's
+        -- blast, and set it off.
+        local mc, mr = myCell % KEY_W, myCell // KEY_W
+        local rc = {}
+        for _, cell in ipairs(blastCells(g, mc, mr, RANGE)) do rc[cell[2] * KEY_W + cell[1]] = true end
+        local tc = 8
+        for dd = 0, 6 do
+          if not rc[12 * KEY_W + 8 + dd] and g[12][8 + dd] and walkable(g, 8 + dd, 12) then tc = 8 + dd; break end
+          if not rc[12 * KEY_W + 8 - dd] and g[12][8 - dd] and walkable(g, 8 - dd, 12) then tc = 8 - dd; break end
+        end
+        f1plan, plan, step = true, "shield", nil
+        dir = walkTo(tc)
+        if not dir and not rc[here] and frame >= nextDetonate then
+          input.b = true; nextDetonate = frame + 20
+          log(string.format("%6d detonate (5-8 shield at (%d,%d))", frame, mc, mr))
+        end
       elseif not myCell and bombsLeft then
-        local home = function(cc, rr) return cc == 8 and rr == 12 end
-        dir = bfs(g, c, r, home, nearEnemy, cw)  -- (not through the boss's boxes: a slam killed P1 there)
-        f1plan, plan = true, "shield"
-        -- No way home now: dig in here rather than wander (the dodges took
-        -- P1 up into the body's rows).
-        if not dir and not danger[here] then step = nil; input.a = frame % 2 == 0 end
+        f1plan, plan, step = true, "shield", nil
+        if here == HK then
+          dir = nil
+          input.a = frame % 2 == 0
+        else
+          dir = walkTo(8)
+          if r == 12 and dir then
+            local nc = c + (dir == "right" and 1 or -1)
+            -- a ball by the next cell: dig in here instead
+            if nearEnemy[12 * KEY_W + nc] or danger[12 * KEY_W + nc] then
+              dir = nil
+              if ballNear and not danger[here] then input.a = frame % 2 == 0 end
+            end
+          end
+          -- off row 12 with no way back: dig in, or else the usual dodge
+          if not dir and r ~= 12 then
+            if ballNear and not danger[here] then input.a = frame % 2 == 0 else f1plan = nil end
+          end
+        end
       end
     end
   end
@@ -2438,6 +2475,8 @@ local function think()
       -- goes through cells near an enemy on purpose (around a boss, all
       -- of them can be).
       step = nil
+      -- 5-8 shield plan stopped by a ball near the next cell: dig in here.
+      if plan == "shield" and emu.read(P1 + P_BOMBS_LEFT, WRAM, false) > 0 then input.a = frame % 2 == 0 end
     else
       input[steer(step.dir, x, y, step.c, step.r)] = true
       -- Once on the target tile, keep moving toward its centre.

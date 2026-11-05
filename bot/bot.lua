@@ -1573,7 +1573,8 @@ local function think()
         remoteWorth = true
       end
     end
-    if emu.read(P1 + P_BOMBS_LEFT, WRAM, false) == 0 then remoteWorth = true end
+    -- (not 5-8's shield at (8,12): it waits for a slam, see f1plan)
+    if emu.read(P1 + P_BOMBS_LEFT, WRAM, false) == 0 and not ride.f1Home then remoteWorth = true end
     -- A bomb the stage planner placed (its step's cell) is the plan: set it
     -- off as soon as we are clear (2-6: held 300 frames because the block
     -- it was for had grown back once, softGone, so the next step never came
@@ -1592,7 +1593,7 @@ local function think()
     -- We hold one remote bomb at a time (think): an old one whose target
     -- got away goes off anyway, to free the bomb.
     remoteSince = remoteSince or frame
-    if frame - remoteSince > 300 then remoteWorth = true end
+    if frame - remoteSince > 300 and not ride.f1Home then remoteWorth = true end
     if remoteWorth and not remoteCells[here] and not nearEnemy[here] and frame >= nextDetonate then
       input.b = true
       nextDetonate = frame + 20
@@ -1797,7 +1798,75 @@ local function think()
   end
 
   allowRide = not danger[here]
-  if danger[here] then
+  -- 5-8 form 1 (docs/enemies.md 7.3): stand on our own remote bomb at
+  -- (8,12). Balls turn clockwise 16 px short of a bomb (their box is +-8),
+  -- so it shields P1; row 12 is below a slam's box; the body crosses x 128
+  -- every sweep and slams onto P1. Then run 3 cells along row 12: the remote
+  -- goes off once the blast reaches the slammed sense block (row 10).
+  local f1plan
+  ride.f1Home = nil
+  if emu.read(0x1A, WRAM, false) == 0x57 and not finalForm2() and remoteOn then
+    local st = r16(0x1000) | (emu.read(0x1002, WRAM, false) << 16)
+    if st == 0xCCC8D6 or st == 0xCCCAC4 or st == 0xCCCB56 then
+      local HK = 12 * KEY_W + 8
+      local myCell
+      for _, b in ipairs(lastBombs) do if b[5] then myCell = b[2] * KEY_W + b[1] end end
+      local bx = r16(0x1011)
+      if bx >= 0x100 then bx = bx - 0x100 end
+      local slamHere = st == 0xCCCAC4 and math.abs(bx - 128) <= 32
+      local away = function(cc, rr) return rr == 12 and math.abs(cc - 8) >= 3 end
+      -- Off a bomb only with no ball near (a slam missed is not a death);
+      -- caught off it with a ball near, a new bomb right here shields too.
+      local ballNear, ballSome = false, false
+      for _, b in ipairs(bosses) do
+        local d = b.state == 0xCCDAA8 and math.abs(b.x - x) + math.abs(b.y - y) or 1e9
+        if d < 96 then ballNear = true end
+        if d < 128 then ballSome = true end
+      end
+      -- calm: no ball within 128 px for 30 frames (no flicker off the bomb)
+      if ballSome then ride.ballAt = frame end
+      local calm = frame - (ride.ballAt or -1000) > 30
+      local bombsLeft = emu.read(P1 + P_BOMBS_LEFT, WRAM, false) > 0
+      ride.f1Home = myCell == HK
+      if not (myCell == HK and slamHere) then ride.runSide = nil end
+      if myCell == HK and slamHere and (here ~= HK or not ballNear) then
+        f1plan, plan = true, "slamrun"
+        -- Straight along row 12 (a route search through the ball windows
+        -- failed every other frame: P1 crept), to the side with no ball.
+        if not away(c, r) then
+          local l, rt = 1e9, 1e9
+          for _, b in ipairs(bosses) do
+            if b.state == 0xCCDAA8 then
+              local d = math.abs(b.x - x) + math.abs(b.y - y)
+              if b.x < x then l = math.min(l, d) else rt = math.min(rt, d) end
+            end
+          end
+          -- keep the side unless a ball is close ahead on it
+          local side = ride.runSide
+          if not side or (side == "right" and rt < 64 and l > rt) or (side == "left" and l < 64 and rt > l) then
+            side = (l > rt) and "left" or "right"
+          end
+          ride.runSide = side
+          dir, step = side, nil
+        end
+      elseif myCell and here == myCell and (not calm or myCell == HK) then
+        f1plan, plan, dir, step = true, "shield", nil, nil
+      elseif not myCell and bombsLeft and (here == HK or ballNear) then
+        f1plan, plan, dir, step = true, "shield", nil, nil
+        input.a = frame % 2 == 0
+      elseif not myCell and bombsLeft then
+        local home = function(cc, rr) return cc == 8 and rr == 12 end
+        dir = bfs(g, c, r, home, nearEnemy, cw) or bfs(g, c, r, home, nil, windows)
+        f1plan, plan = true, "shield"
+        -- No way home now: dig in here rather than wander (the dodges took
+        -- P1 up into the body's rows).
+        if not dir and not danger[here] then step = nil; input.a = frame % 2 == 0 end
+      end
+    end
+  end
+  if f1plan then
+    -- (5-8 form 1, above)
+  elseif danger[here] then
     plan = "flee"
     dir = bfs(g, c, r, safeGoal(windows), nearEnemy, cw)
       or bfs(g, c, r, safeGoal(windows), enemyNow, windows)
@@ -2447,7 +2516,8 @@ local function onFrame()
     end
   end
   local saveF, savePath = (os.getenv("SBM2_SAVE_AT") or ""):match("^(%d+):(.+)$")
-  if saveF and tonumber(saveF) == frame then
+  if saveF and frame >= tonumber(saveF) and not ride.savedAt then  -- once (a rollback may skip the frame)
+    ride.savedAt = frame
     onNextInstruction(function() inputlog.saveState(savePath, emu.createSavestate()) end)
   end
   if frame % SNAP_EVERY == 0 and (r16(P1 + P_LOCK) & 1) == 0

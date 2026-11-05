@@ -1,10 +1,10 @@
-# 5-8 form 1 from the stage start (port state from a 4-8..5-7 run): HP 28 down to 24 or less within 6000 frames (28 hits are needed; each takes ~66 frames).
-# cut from build/benchP4/57 at frame 30
-start 57f
-budget 6000
-pass bosses 1000@\S+\([^)]*hp2[0-4] 
+# 5-8 form 1 from the stage start (entered with the glove from 5-7): HP 28 down to 22 or less within 9000 frames (28 hits are needed; the stage timer is 10:00).
+# cut from build/t56/56 at frame 30
+start 57g
+budget 9000
+pass bosses 1000@\S+\([^)]*hp2[0-2] 
 pads
-6 0001,0000
+7 0001,0000
 1 0001,0000,0002
 8 0001
-15 0001,0000
+14 0001,0000

@@ -1903,12 +1903,20 @@ local function think()
       -- caught off it with a ball near, a new bomb right here shields too.
       local ballNear, ballSome = false, false
       ride.ballRisk = false
+      -- Boss.read lists the objects whose contact code ran last frame; some
+      -- frames (a slam's first) it has none: use the last list seen (8 f).
+      local balls = {}
       for _, b in ipairs(bosses) do
+        if b.state == 0xCCDAA8 or b.state == 0xCCA43C then balls[#balls + 1] = b end
+      end
+      if #balls > 0 then ride.balls, ride.ballsAt = balls, frame
+      elseif ride.balls and frame - ride.ballsAt <= 8 and frame >= ride.ballsAt then balls = ride.balls end
+      for _, b in ipairs(balls) do
         local d = (b.state == 0xCCDAA8 or b.state == 0xCCA43C) and math.abs(b.x - x) + math.abs(b.y - y) or 1e9
         if d < 96 then ballNear = true end
         if d < 128 then ballSome = true end
         -- leaving the bomb for a slam: ~90 frames off it, and balls home
-        if d < 200 or ((b.state == 0xCCDAA8 or b.state == 0xCCA43C) and b.y > 150) then ride.ballRisk = true end
+        if d < 160 or b.y > 170 then ride.ballRisk = true end
       end
       -- calm: no ball within 128 px for 30 frames (no flicker off the bomb)
       if ballSome then ride.ballAt = frame end
@@ -1928,6 +1936,11 @@ local function think()
         return bfs(g, c, r, row12, nearEnemy, cw) or bfs(g, c, r, row12, nil, cw)
       end
       if myCell == HK and slamHere and (ride.running or not ride.ballRisk) then
+        if not ride.running and os.getenv("SBM2_DBG") then
+          local t = {}
+          for _, b in ipairs(bosses) do t[#t + 1] = string.format("%04X:%06X(%d,%d)", b.base, b.state, b.x, b.y) end
+          log(string.format("%6d dbg slamrun start risk=%s bosses %s", frame, tostring(ride.ballRisk), table.concat(t, " ")))
+        end
         ride.running = true
         f1plan, plan = true, "slamrun"
         if not away(c, r) then

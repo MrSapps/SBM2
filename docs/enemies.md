@@ -228,6 +228,7 @@ records.
 | `$87` | 4-x | C1:CD70 | 1 | 0.5 | generic. On every 3rd move that starts after a wait, writes a **soft block `$C2`** into the floor cell it is leaving **[log]** |
 | `$88` | | C1:87BB | | | like `$89`, blast every `$140` frames |
 | `$89` | 4-x | C1:86EB | 1 | 0.5 | always a chaser. Every **448 frames** (`+$BE` counts to `$1C0`) it stops, crouches (anim `$12`) and sets off a **blast centred on itself** (bomb slot, fuse 1): range 3 when `$1A < $40`, else 9 (full fire). It cannot be hurt during the attack, and aborts if it is standing on a tile `$40-$7F` |
+| `$8B` | 3-x | C1:836E | 1 | 0.5 | **[port probe]** (3-6) rests while `+$4E` counts down from `$500` (crouches, anim `$16`, from `$20`), then walks (`+$C0` bit 15) to the cell at `+$4C` and blows up there (C1:8074, as `$89`), and rests again. Sits at the only landing of 3-6's left side between attacks |
 | `$8A` | 5-x | C1:B85A | 2 | 1.25 / 0.5 | depends on the light switch `$7E5AAC`. **Even: 1.25 px/f, x-ray chaser. Odd: 0.5 px/f wanderer.** `$FFFF` (no switch): 1.25 wanderer. The mode is re-read at cell centres (`+$BE` caches it) **[log]** |
 | `$97` | 5-x | C1:B81B | 2 | 1.25 / 0.5 | mirror of `$8A`: odd = 1.25 x-ray chaser, even or none = 0.5 wanderer **[log]** |
 | `$8E` | | C1:CBE7 | 1 | 0.5 | **passes through soft blocks** and every solid tile except `$C5`/`$C6`; blocked by `$43`, flame `$01` and other enemies. While stopped it heads for P1 straight away if P1 is in sight (walls block the sight), else generic wait and random direction |
@@ -418,6 +419,22 @@ locked. `D0B8` sets HP = 6. After 224 frames the fight resumes in `D139`
 * A hit goes to `FinalBossForm2Hurt` (`D2E7`) for 63 frames, then HP
   drops by 1. HP 0 leads to `FinalBossForm2Dead` (`D338`).
 * Form 2 has no other attacks. Contact is its only danger.
+
+### 7.4b What the bot does (port scenarios `5-8_form1`, `5-8_form2`)
+
+* **Glove.** Form 2's arena has no blocks and only thrown bombs hurt it,
+  so the glove must be carried in: 5-7 hides one (item kind 7, art
+  `$1626`) under its block at (13,10). The bot keeps 5-7's gate shut
+  until it has it.
+* **Form 1 shield.** Balls turn clockwise when the point 16 px ahead is a
+  bomb, and their contact box is +-8 px, so P1 standing on its own
+  remote bomb is safe from them. At (8,12) the body passes over P1 every
+  sweep and slams; P1 then runs 3 cells along row 12 (below the slam's
+  box) and the remote blast reaches the sense block at row 10. A few
+  hits per 9000 frames so far; ball deaths off the bomb are the limit.
+* `Boss.read` (bot/boss.lua) lists objects whose contact code ran last
+  frame; the first frame of a slam it lists none.
+* The stage timer is 10:00 here (6:00 in 2-6).
 
 ### 7.5 End of the fight
 

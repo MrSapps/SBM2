@@ -2800,6 +2800,27 @@ end
 
 local function onFrame()
   Boss.frame()
+  -- The ending (stage $60): the game is beaten. Let it play a while, save
+  -- the run and stop for good (no rollbacks: its locks are not deaths).
+  if loaded and emu.read(0x1A, WRAM, false) == 0x60 then
+    if not ride.endAt then
+      ride.endAt = frame
+      log(string.format("%6d THE END (stage $60): game beaten", frame))
+      flushLog()
+    end
+    input = {}
+    frame, ticks = frame + 1, ticks + 1
+    if frame - ride.endAt >= 600 then
+      log(string.format("%6d END 60 ending", frame))
+      flushLog()
+      dumpCdl(string.format("%s/seg_%06d.cdl", OUT, FRAME0))
+      writeFile(OUT .. "/ckpt.txt", tostring(math.max(frame, FRAMES)))  -- drive.py: done
+      writeFile(OUT .. "/ending.txt", tostring(ride.endAt))
+      inputlog.save(OUT .. "/run.inputs")
+      emu.stop(0)
+    end
+    return
+  end
   if not loaded then
     local fh = assert(io.open(LOAD, "rb")); local data = fh:read("a"); fh:close()
     onNextInstruction(function()

@@ -1458,6 +1458,26 @@ local function think()
   -- Enemies: predicted paths give contact windows (eWin) and kill chances.
   -- enemies/walkers (cells) still drive the exit and hunt plans.
   local elist = Enemies.read(g)
+  -- $DC platforms: since when each has been still (docked at a lane end).
+  -- dockedNear(cc, rr, maxParked): one within 2 cells of (cc,rr), still for
+  -- 2..maxParked frames (it waits 64 at each end: time left to board).
+  -- (Any $DC within 2 counted as an escape cost 4-4 thousands of deaths.)
+  function ride.dockedNear(cc, rr, maxParked)
+    for _, e in ipairs(elist) do
+      local dk = ride.dock[e.base]
+      if e.type == 0xDC and dk and math.abs(e.c - cc) + math.abs(e.r - rr) <= 2
+          and frame - dk[3] >= 2 and frame - dk[3] <= maxParked then return true end
+    end
+    return false
+  end
+  ride.dock = ride.dock or {}
+  for _, e in ipairs(elist) do
+    if e.type == 0xDC then
+      local px, py = r16(e.base + P_X), r16(e.base + P_Y)
+      local d = ride.dock[e.base]
+      if not d or d[1] ~= px or d[2] ~= py or frame < d[3] then ride.dock[e.base] = { px, py, frame } end
+    end
+  end
   jumpObj = {}
   for _, e in ipairs(elist) do
     if e.type == 0xE0 or e.type == 0xA0 then
@@ -1883,7 +1903,8 @@ local function think()
     end
   end
 
-  allowRide = not danger[here]
+  -- (a platform docked by us still takes us out: we bombed counting on it)
+  allowRide = not danger[here] or ride.dockedNear(c, r, 50)
   -- 5-8 form 1 (docs/enemies.md 7.3): stand on our own remote bomb at
   -- (8,12). Balls turn clockwise 16 px short of a bomb (their box is +-8),
   -- so it shields P1; row 12 is below a slam's box; the body crosses x 128
@@ -2230,10 +2251,7 @@ local function think()
       -- Rides don't count (the platform comes when it comes), unless it is
       -- here: a $DC within 2 cells of the bomb (4-4, 4-2: a lane end was
       -- the only way out of a column the blast fills).
-      allowRide = false
-      for _, e in ipairs(elist) do
-        if e.type == 0xDC and math.abs(e.c - cc) + math.abs(e.r - rr) <= 2 then allowRide = true end
-      end
+      allowRide = ride.dockedNear(cc, rr, 20)
       local ok = bfs(g, cc, rr, goal, nil, combine(w, eWin), t) ~= nil
       allowRide = true
       return ok

@@ -1891,7 +1891,7 @@ local function think()
         if d < 96 then ballNear = true end
         if d < 128 then ballSome = true end
         -- leaving the bomb for a slam: ~90 frames off it, and balls home
-        if d < 160 or ((b.state == 0xCCDAA8 or b.state == 0xCCA43C) and b.y > 160) then ride.ballRisk = true end
+        if d < 200 or ((b.state == 0xCCDAA8 or b.state == 0xCCA43C) and b.y > 150) then ride.ballRisk = true end
       end
       -- calm: no ball within 128 px for 30 frames (no flicker off the bomb)
       if ballSome then ride.ballAt = frame end
@@ -1928,6 +1928,11 @@ local function think()
           end
           ride.runSide = side
           dir, step = side, nil
+        elseif ballNear and frame >= nextDetonate then
+          -- clear of the blast with a ball coming: set it off now (a hit if
+          -- the body is down) and dig in with the bomb it gives back
+          input.b = true; nextDetonate = frame + 20
+          log(string.format("%6d detonate (5-8: ball near after the run)", frame))
         end
       elseif myCell and here == myCell and (not calm or myCell == HK) then
         f1plan, plan, dir, step = true, "shield", nil, nil

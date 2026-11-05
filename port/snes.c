@@ -72,6 +72,7 @@ static void line_start(Snes *s)
     if (s->vcount == VBLANK_LINE) {
         ppu_vblank(s);
         s->frame++;
+        if (s->on_vblank) s->on_vblank(s);
         s->rdnmi |= 0x80;
         if (s->nmitimen & 0x80) raise_nmi(s, s->clock - s->hclock + NMI_H);
         if (s->nmitimen & 0x01) {
@@ -777,6 +778,7 @@ static void framestep_nmi(Snes *s)
         if (s->pad_pos < s->npads && s->pads[s->pad_pos] == PADLOG_FRAME) s->pad_pos++;
         else if (s->pad_pos < s->npads) s->pad_desync++;
     } else if (k != WAIT_CMP || s->fs_raised) return;
+    else if (s->on_frame && s->on_frame(s)) return;
     s->fs_raised = 1;
     if (s->nmitimen & 0x01) {
         if (!s->pads) s->joy[0] = s->frame < s->input_len ? s->input[s->frame] : 0;

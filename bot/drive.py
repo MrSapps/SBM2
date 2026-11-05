@@ -12,6 +12,10 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MESEN = os.path.join(ROOT, 'tools', 'mesen2')
+# SBM2_PORT=1: run the bot on the port (build/port/botrun, frame-step, no
+# lag frames) instead of Mesen; several times faster, same files out.
+BOTRUN = os.path.join(ROOT, 'build', 'port', 'botrun')
+PORT = os.environ.get('SBM2_PORT', '') not in ('', '0')
 
 
 def merge_cdls(out):
@@ -43,11 +47,15 @@ def main():
         check_sidecar(state)
         env = dict(os.environ, SBM2_OUT=out, SBM2_FRAMES=str(frames),
                    SBM2_FRAME0=str(frame0), SBM2_LOAD=state, SBM2_SHOTS=shots)
-        rc = subprocess.run(
-            ['./Mesen', '--testrunner', '--timeout=86400', os.path.join(ROOT, 'baserom.sfc'),
-             os.path.join(ROOT, 'bot', 'bot.lua')],
-            cwd=MESEN, env=env, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL).returncode
+        # SBM2_BOT: the bot script (bench.py runs a snapshot of bot/).
+        script = os.environ.get('SBM2_BOT') or os.path.join(ROOT, 'bot', 'bot.lua')
+        if PORT:
+            cmd, cwd = [BOTRUN, os.path.join(ROOT, 'baserom.sfc'), script], ROOT
+        else:
+            cmd, cwd = ['./Mesen', '--testrunner', '--timeout=86400', os.path.join(ROOT, 'baserom.sfc'),
+                        script], MESEN
+        with open(os.path.join(out, 'stderr.txt'), 'a') as err:
+            rc = subprocess.run(cmd, cwd=cwd, env=env, stdout=subprocess.DEVNULL, stderr=err).returncode
         reached = int(open(ckpt_txt).read()) if os.path.exists(ckpt_txt) else 0
         print(f'segment from {frame0}: exit {rc}, checkpoint at {reached}', flush=True)
         if reached >= frames:

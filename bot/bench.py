@@ -23,6 +23,7 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(ROOT, 'build', 'lib')
+LIBP = os.path.join(ROOT, 'build', 'libp')
 DRIVE = os.path.join(ROOT, 'bot', 'drive.py')
 
 
@@ -45,7 +46,12 @@ def run_one(out, stage, frames, seed=0):
     d = os.path.join(out, stage if seed == 0 else f'{stage}s{seed}')
     shutil.rmtree(d, ignore_errors=True)
     env = dict(os.environ, SBM2_NOASSIST='1', SBM2_SEED=str(seed))
-    subprocess.run([sys.executable, DRIVE, d, os.path.join(LIB, f'stage_{stage}.mss'), str(frames)],
+    start = os.path.join(LIB, f'stage_{stage}.mss')
+    # The port has its own start states where a Mesen pad log does not
+    # replay in frame-step (build/libp/stage_XX.mss, preferred if present).
+    if os.environ.get('SBM2_PORT') and os.path.exists(os.path.join(LIBP, f'stage_{stage}.mss')):
+        start = os.path.join(LIBP, f'stage_{stage}.mss')
+    subprocess.run([sys.executable, DRIVE, d, start, str(frames)],
                    env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return os.path.basename(d)
 
@@ -73,7 +79,7 @@ def report(out):
     # Runs of one stage with other seeds (bench.py -s) live in <stage>s<seed>.
     runs = {}
     for name in sorted(os.listdir(out)):
-        if os.path.isdir(os.path.join(out, name)):
+        if os.path.isdir(os.path.join(out, name)) and not name.startswith('_'):
             runs.setdefault(name[:2], []).append(result(out, name))
     print(f'{"stage":6} {"cleared":>8} {"frames":>7} {"deaths":>7}  end of the first run (stage score/soft/panels enemies)')
     total = cleared = deaths = 0
@@ -98,15 +104,24 @@ def main():
     ap.add_argument('-f', '--frames', type=int, default=15000)
     ap.add_argument('-j', '--jobs', type=int, default=3)
     ap.add_argument('-s', '--seeds', type=int, default=1)
+    ap.add_argument('-p', '--port', action='store_true',
+                    help='run the bot on the port (build/port/botrun), not Mesen')
     a = ap.parse_args()
     if a.cmd == 'collect':
         return collect()
     out = os.path.abspath(a.out)
+    if a.port:
+        os.environ['SBM2_PORT'] = '1'
     if a.cmd == 'run':
         # $60 is the ending, not a stage.
         stages = a.stages or sorted(s[6:8] for s in os.listdir(LIB) if s.endswith('.mss') and s[6:8] != '60')
         jobs = [(s, seed) for seed in range(a.seeds) for s in stages]
         os.makedirs(out, exist_ok=True)
+        # Run a copy of bot/: edits made while the bench runs don't leak in.
+        snap = os.path.join(out, '_bot')
+        shutil.rmtree(snap, ignore_errors=True)
+        shutil.copytree(os.path.join(ROOT, 'bot'), snap, ignore=shutil.ignore_patterns('test', '__pycache__'))
+        os.environ['SBM2_BOT'] = os.path.join(snap, 'bot.lua')
         with concurrent.futures.ThreadPoolExecutor(a.jobs) as ex:
             for s in ex.map(lambda j: run_one(out, j[0], a.frames, j[1]), jobs):
                 print(s, *result(out, s), flush=True)

@@ -141,16 +141,17 @@ local function heartCells()
       t[(cell >> 7) * KEY_W + (cell & 0x7F) // 2] = (kind & 0x4000) ~= 0 and "shown" or "hidden"
     end
   end
+  local noGlove = emu.read(P1 + 0xFE, WRAM, false) == 0
+  local bytes = emu.readBytes and emu.readBytes(MAP, MAP_H * ROW, WRAM)  -- port/botrun only
   for r = 0, MAP_H - 1 do
     for c = 0, MAP_W - 1 do
       local o = r * ROW + c * 2
-      local gfx = emu.read(GFX + o, WRAM, false)
       -- The glove ($26, +$FE) too while we have none: 5-8 form 2 is hurt
       -- only by thrown bombs, its arena has no blocks, and stats go back to
       -- the stage's entry stats on a death, so one must be carried in.
-      if emu.read(MAP + o, WRAM, false) == 0x44 and (gfx == 0x40
-          or (gfx == 0x26 and emu.read(P1 + 0xFE, WRAM, false) == 0)) then
-        t[r * KEY_W + c] = "item"
+      if (bytes and bytes:byte(o + 1) or emu.read(MAP + o, WRAM, false)) == 0x44 then
+        local gfx = emu.read(GFX + o, WRAM, false)
+        if gfx == 0x40 or (gfx == 0x26 and noGlove) then t[r * KEY_W + c] = "item" end
       end
     end
   end
@@ -159,14 +160,19 @@ end
 
 local function readMap()
   local g = {}
+  local bytes = emu.readBytes and emu.readBytes(MAP, MAP_H * ROW, WRAM)  -- port/botrun only
   for r = 0, MAP_H - 1 do
-    g[r] = {}
+    local row = {}
+    g[r] = row
     for c = 0, MAP_W - 1 do
-      local t = emu.read(MAP + r * ROW + c * 2, WRAM, false)
-      g[r][c] = t
-      if not (EMPTY[t] or SOFT[t] or HARD[t] or isBomb(t) or isFlame(t)) and not seenUnknown[t] then
+      local o = r * ROW + c * 2
+      local t = bytes and bytes:byte(o + 1) or emu.read(MAP + o, WRAM, false)
+      row[c] = t
+      if not seenUnknown[t] then  -- each code is classified once
         seenUnknown[t] = true
-        log(string.format("unknown tile %02X at (%d,%d)", t, c, r))
+        if not (EMPTY[t] or SOFT[t] or HARD[t] or isBomb(t) or isFlame(t)) then
+          log(string.format("unknown tile %02X at (%d,%d)", t, c, r))
+        end
       end
     end
   end
@@ -175,8 +181,8 @@ end
 
 local SPRING = 0x4C  -- spring pad (world 3): launches P1 in the held direction
 -- Where a jump from a pad in a direction landed: springLand[padKey .. dir]
--- = {c, r}. Until seen, assume 5 cells on, again from any pad landed on
--- (docs/mechanics.md section 5).
+-- = {c, r}. Until seen, assume 3 cells on for Up/Down and 5 for
+-- Left/Right, again from any pad landed on (docs/mechanics.md section 5).
 local springLand = {}
 local springDir, springFrom  -- direction to hold on the pad; jump in flight
 local springTry  -- {padKey, dir}: an untried jump we are walking to (think)
@@ -423,10 +429,14 @@ end
 -- (for plans that start later). Returns first step direction and length.
 -- World 4 platform lanes (docs/mechanics.md section 7): a $36 cell joins
 -- the $36 across a straight run of solid cells; the $DC platform shuttling
--- along it carries P1 (+2 bit 15 while riding). rideFail["k>k2"]: we waited
+-- along it carries P1 (+2 bit 15 while riding). ride.fail["k>k2"]: we waited
 -- there and no ride came.
 local BOARD = 0x36
-local rideFail, rideWait, rideFrom = {}, nil, nil
+-- ride.edges[cell key] = {c, r, frames, press}: a ride seen from that cell
+-- (any object that carries P1: world 4 platforms, 3-5's submarines) ended
+-- at (c, r) after `frames`, boarded while holding `press` (nil = standing).
+-- Routes use them as jumps (jumpObj); kept for the stage.
+local ride = { fail = {}, edges = {} }
 -- Rides come when the platform does: never count on one to escape a blast.
 local allowRide = true
 local pushCell, pushNext, lastObjFrame = nil, 0, 0  -- stage planner state (think)
@@ -452,6 +462,20 @@ local function laneEnds(g, c, r)
   return ends
 end
 
+-- Where an untried spring jump lands (docs/mechanics.md section 5): with the
+-- direction let go after the launch 3 cells on, held in the air ("!" jumps,
+-- springLand key dir .. "!") 4; a landing in a wall slides on to the next
+-- cell P1 can stand on (or a pad), one in water drowns. (A field of `ride`:
+-- the main chunk is at Lua's 200-local limit.)
+function ride.springGuess(g, c, r, dir, hold)
+  for j = hold and 4 or 3, 9 do
+    local cc, rr = c + j * dir[1], r + j * dir[2]
+    local t = g[rr] and g[rr][cc]
+    if not t or t == 0xD0 then return nil end
+    if walkable(g, cc, rr) or t == SPRING then return { cc, rr } end
+  end
+  return nil
+end
 local lastBfs  -- {g, goal, avoid}: the last route found, replanned on a pad
 -- Jump-pad objects $E0/$A0 (world 3, docs/enemies.md): P1 on the pad's
 -- cell is caught and thrown 8 cells right ($E0) or left ($A0).
@@ -474,14 +498,17 @@ local function bfs(g, c0, r0, goal, avoid, windows, t0)
   -- A pad is a node P1 can only leave by a jump, in any direction; where
   -- it lands is learnt (springLand), else assumed 5 cells on.
   local function jump(pc, pr, dir, first, n)
-    local land = springLand[(pr * KEY_W + pc) .. dir[3]]
-    if land == nil then land = { pc + 5 * dir[1], pr + 5 * dir[2] } end
-    if not land then return end
-    local lk = land[2] * KEY_W + land[1]
-    local t = t0 + (n + 6) * FPT  -- ~20 frames on the pad + ~70 in the air
-    if (walkable(g, land[1], land[2]) or (g[land[2]] and g[land[2]][land[1]] == SPRING))
-        and not (windows and hit(windows, lk, t - FPT, t + FPT)) then
-      push(land[1], land[2], first or dir[3], n + 6)
+    for _, v in ipairs({ "", "!" }) do
+      local land = springLand[(pr * KEY_W + pc) .. dir[3] .. v]
+      if land == nil then land = ride.springGuess(g, pc, pr, dir, v == "!") end
+      if land then
+        local lk = land[2] * KEY_W + land[1]
+        local t = t0 + (n + 6) * FPT  -- ~20 frames on the pad + ~70 in the air
+        if (walkable(g, land[1], land[2]) or (g[land[2]] and g[land[2]][land[1]] == SPRING))
+            and not (windows and hit(windows, lk, t - FPT, t + FPT)) then
+          push(land[1], land[2], first or (dir[3] .. v), n + 6)
+        end
+      end
     end
   end
   local n = 0
@@ -496,13 +523,15 @@ local function bfs(g, c0, r0, goal, avoid, windows, t0)
         else
           if goal(c, r, n) then lastBfs = { g, goal, avoid }; return first, n end
           local jo = jumpObj[r * KEY_W + c]
-          if jo and first and (walkable(g, jo[1], jo[2]) or (g[jo[2]] and g[jo[2]][jo[1]] == SPRING)) then
-            push(jo[1], jo[2], first, n + 8)
+          if jo and (first or (jo.ride and allowRide)) and (walkable(g, jo[1], jo[2]) or (g[jo[2]] and g[jo[2]][jo[1]] == SPRING)) then
+            if jo.ride then
+              if allowRide then push(jo[1], jo[2], first or "ride", n + 8 + jo.ride[3] // FPT) end
+            else push(jo[1], jo[2], first, n + 8) end
           end
           if g[r][c] == BOARD and allowRide then
             local k0 = r * KEY_W + c
             for _, e in ipairs(laneEnds(g, c, r)) do
-              if not rideFail[k0 .. ">" .. (e[2] * KEY_W + e[1])] then
+              if not ride.fail[k0 .. ">" .. (e[2] * KEY_W + e[1])] then
                 push(e[1], e[2], first or "ride", n + 3 * e[3] + 8)
               end
             end
@@ -553,16 +582,18 @@ local function regionOf(g, c0, r0)
     local t = g[r][c]
     if t == SPRING then
       for _, dir in ipairs(DIRS) do
-        local land = springLand[(r * KEY_W + c) .. dir[3]]
-        if land == nil then land = { c + 5 * dir[1], r + 5 * dir[2] } end
-        if land and (walkable(g, land[1], land[2]) or (g[land[2]] and g[land[2]][land[1]] == SPRING)) then
-          add(land[1], land[2])
+        for _, v in ipairs({ "", "!" }) do
+          local land = springLand[(r * KEY_W + c) .. dir[3] .. v]
+          if land == nil then land = ride.springGuess(g, c, r, dir, v == "!") end
+          if land and (walkable(g, land[1], land[2]) or (g[land[2]] and g[land[2]][land[1]] == SPRING)) then
+            add(land[1], land[2])
+          end
         end
       end
     else
       if t == BOARD then
         for _, e in ipairs(laneEnds(g, c, r)) do
-          if not rideFail[(r * KEY_W + c) .. ">" .. (e[2] * KEY_W + e[1])] then add(e[1], e[2]) end
+          if not ride.fail[(r * KEY_W + c) .. ">" .. (e[2] * KEY_W + e[1])] then add(e[1], e[2]) end
         end
       end
       local jo = jumpObj[r * KEY_W + c]
@@ -1060,26 +1091,32 @@ local function think()
   end
   -- Riding a world 4 platform (+2 bit 15): hands off until it drops us.
   if (r16(P1 + 2) & 0x8000) ~= 0 and (lockv & 1) == 0 then
-    if not rideFrom then
-      local rc, rr = playerTile(); rideFrom = { rc, rr }
+    if not ride.from then
+      local rc, rr = playerTile()
+      local press
+      for _, d in ipairs(DIRS) do if input[d[3]] then press = d[3] end end
+      ride.from = { rc, rr, frame, press }
       log(string.format("%6d ride from (%d,%d)", frame, rc, rr))
     end
     -- Step off onto the far end's $36 when the platform stops beside it.
     local rc, rr = playerTile()
     for _, d in ipairs(DIRS) do
       local cc, r2 = rc + d[1], rr + d[2]
-      if (cc ~= rideFrom[1] or r2 ~= rideFrom[2]) and r2 >= 0 and cc >= 0
+      if (cc ~= ride.from[1] or r2 ~= ride.from[2]) and r2 >= 0 and cc >= 0
           and emu.read(MAP + r2 * ROW + cc * 2, WRAM, false) == BOARD then
         input[d[3]] = true
       end
     end
     step = nil
     return
-  elseif rideFrom then
+  elseif ride.from then
     local rc, rr = playerTile()
-    log(string.format("%6d ride from (%d,%d) ended at (%d,%d)", frame, rideFrom[1], rideFrom[2], rc, rr))
-    lastRide = { rideFrom[1], rideFrom[2], frame }
-    rideFrom = nil
+    log(string.format("%6d ride from (%d,%d) ended at (%d,%d)", frame, ride.from[1], ride.from[2], rc, rr))
+    if math.abs(rc - ride.from[1]) + math.abs(rr - ride.from[2]) > 1 then
+      ride.edges[ride.from[2] * KEY_W + ride.from[1]] = { rc, rr, frame - ride.from[3], ride.from[4] }
+    end
+    lastRide = { ride.from[1], ride.from[2], frame }
+    ride.from = nil
   end
   -- On a pad by pixel position: +$A8 still names the previous cell for a
   -- few frames after a landing.
@@ -1089,22 +1126,74 @@ local function think()
   if os.getenv("SBM2_TRACE") and springFrom then log(string.format("%6d trace lock %04X px(%d,%d) tile (%d,%d) onPad %s", frame, lockv, r16(P1 + P_X), r16(P1 + P_Y), pc0, pr0, tostring(onPad))) end
   -- $0809: landed from a jump (on or next to a pad), not a death.
   -- Caught by an $E0/$A0 jump pad: its lock is not a death either.
-  local onJump = jumpObj[pr0 * KEY_W + pc0] ~= nil
+  local onJump = jumpObj[pr0 * KEY_W + pc0] ~= nil and not jumpObj[pr0 * KEY_W + pc0].ride
   if onJump and (lockv & 1) ~= 0 then jumpUntil = frame + 120 end
   if (lockv & 1) ~= 0 and frame <= jumpUntil then lastAir = frame end
   if (lockv & 1) ~= 0 and (onPad or onJump or (lockv & 0xF809) == 0x0809 or (frame >= lastAir and frame - lastAir <= 6)) then
     -- On a spring pad ($0801 there is the pad's lock, not a death) or in
     -- the air ($1801): hold the planned direction through the launch.
     -- Landed on a pad: pick the jump from here toward the last plan's goal.
-    if onPad and springTry and springTry[1] == pr0 * KEY_W + pc0 then springDir = springTry[2]
+    if onPad and not springFrom and springTry and springTry[1] == pr0 * KEY_W + pc0 then springDir = springTry[2]
     elseif onPad and not springFrom and lastBfs then
       springDir = bfs(lastBfs[1], pc0, pr0, lastBfs[2], lastBfs[3]) or springDir
     end
+    if onPad and not springFrom then
+      -- Pick the jump by what it leads to: the landing with the shortest
+      -- route (jumps included) to work - a panel to do, a soft block that
+      -- has not grown back, a crystal. (lastBfs is whatever route search
+      -- succeeded last, e.g. a bomb's escape check: 3-6 jumped back out of
+      -- the side it had just reached.)
+      local g0, todo = readMap(), panels()
+      local function work(cc, rr)
+        if todo[rr * KEY_W + cc] then return true end
+        for _, d in ipairs(DIRS) do
+          local t = g0[rr + d[2]] and g0[rr + d[2]][cc + d[1]]
+          if t == 0x68 or (SOFT[t] and not softGone[(rr + d[2]) * KEY_W + cc + d[1]]) then return true end
+        end
+        return false
+      end
+      local best, bestN
+      for _, d in ipairs(DIRS) do
+        for _, v in ipairs({ "", "!" }) do
+          local land = springLand[(pr0 * KEY_W + pc0) .. d[3] .. v]
+          if land == nil then land = ride.springGuess(g0, pc0, pr0, d, v == "!") end
+          if land and (land[1] ~= pc0 or land[2] ~= pr0) then
+            local _, n = bfs(g0, land[1], land[2], work)
+            if n and (not bestN or n < bestN) then best, bestN = d[3] .. v, n end
+          end
+        end
+      end
+      if best then springDir = best end
+    end
     if onPad and not springDir then springDir = DIRS[math.random(4)][3] end  -- not planned: any way off
+    -- An enemy at the landing (3-6's left side: the same contact death on
+    -- every retry): bounce in place (nothing held; up to 10 times) and decide again.
+    if onPad and not springFrom and springDir and springDir ~= "stay" then
+      local d = ({ up = { 0, -1 }, down = { 0, 1 }, left = { -1, 0 }, right = { 1, 0 } })[springDir:match("^%a+")]
+      local land = springLand[(pr0 * KEY_W + pc0) .. springDir]
+      if land == nil and d then land = ride.springGuess(readMap(), pc0, pr0, d, springDir:sub(-1) == "!") end
+      ride.stays = ride.stays or 0
+      if land and ride.stays < 10 then
+        for _, e in ipairs(enemyTiles()) do
+          if math.abs(e[1] - land[1]) + math.abs(e[2] - land[2]) <= 2 then
+            log(string.format("%6d pad (%d,%d): enemy near the landing (%d,%d); bouncing", frame, pc0, pr0, land[1], land[2]))
+            springDir, ride.stays = "stay", ride.stays + 1
+            break
+          end
+        end
+      end
+      if springDir ~= "stay" then ride.stays = 0 end
+    end
     if onPad and not springFrom and springDir then
+      if os.getenv("SBM2_DBG") then log(string.format("%6d dbg pad (%d,%d) jump %s (last plan %s)", frame, pc0, pr0, springDir, tostring(ride.lastPlan))) end
       springFrom = (pr0 * KEY_W + pc0) .. springDir
     end
-    if springDir then input[springDir] = true end
+    -- Hold it only on the pad: held in the air the flight drifts on (3-1:
+    -- (9,6) Down held lands (9,12); let go after the launch, (9,9)).
+    -- A "!" jump keeps it held in the air too (it flies a cell further).
+    if springDir and springDir ~= "stay" and ((lockv ~= 0x1801 and lockv ~= 0x0809) or springDir:sub(-1) == "!") then
+      input[springDir:match("^%a+")] = true
+    end
     step = false
     return
   end
@@ -1115,8 +1204,18 @@ local function think()
     end
     springLand[springFrom] = { c1, r1 }
   elseif springFrom then
-    log(string.format("%6d spring %s ended in a death; not again", frame, springFrom))
-    springLand[springFrom] = false
+    -- Only a death the jump caused (water): an enemy at the landing cell
+    -- (3-6's left side) or a blast is bad luck, not the jump's fault.
+    local pcell, enemyThere = r16(P1 + 0xA8), false
+    for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
+      if (r16(base) & 0xF000) == 0x9000 and r16(base + 0xA8) == pcell then enemyThere = true end
+    end
+    if enemyThere or isFlame(emu.read(MAP + pcell, WRAM, false)) then
+      log(string.format("%6d spring %s: died on landing (enemy or blast); still a way", frame, springFrom))
+    else
+      log(string.format("%6d spring %s ended in a death; not again", frame, springFrom))
+      springLand[springFrom] = false
+    end
   end
   springFrom = nil
   if (lockv & 1) ~= 0 then
@@ -1201,7 +1300,7 @@ local function think()
   local stNow = emu.read(0x1A, WRAM, false)
   if stNow ~= savedStage then
     savedStage = stNow
-    softSeen, softGone, springLand, springTry, rideFail = {}, {}, {}, nil, {}
+    softSeen, softGone, springLand, springTry, ride.fail, ride.edges, ride.tried = {}, {}, {}, nil, {}, {}, {}
     badCell, planSteps, planCo, noBombUntil = {}, nil, nil, {}
     stageTicks = ticks
     log(string.format("%6d STAGE %02X hearts %02X flash %04X/%02X", frame, stNow, emu.read(P1 + 0xEF, WRAM, false),
@@ -1258,6 +1357,9 @@ local function think()
     if e.type == 0xE0 or e.type == 0xA0 then
       jumpObj[e.r * KEY_W + e.c] = { e.c + (e.type == 0xE0 and 8 or -8), e.r }
     end
+  end
+  for k, e in pairs(ride.edges) do
+    if not jumpObj[k] then jumpObj[k] = { e[1], e[2], ride = e } end
   end
   local samples = Enemies.rollouts(g, elist, c, r, ROLLOUTS, HORIZON)
   local hasEater = false
@@ -1462,16 +1564,17 @@ local function think()
   -- broke ~50 frames after its blast and was back later; the bot bombed it
   -- five times while the last panel waited): one already blown up is not
   -- worth bombing again. Where blocks don't grow back this changes nothing.
-  for rr = 0, MAP_H - 1 do
-    for cc = 0, MAP_W - 1 do
-      local k = rr * KEY_W + cc
-      if SOFT[g[rr][cc]] then softSeen[k] = true elseif softSeen[k] then softGone[k] = true end
-    end
-  end
   -- Regrown blocks that wall us off from what is left to do are the stage
   -- planner's business (it bombs the ones in the way).
   local soft, todo = 0, 0
-  for rr = 0, MAP_H - 1 do for cc = 0, MAP_W - 1 do if SOFT[g[rr][cc]] then soft = soft + 1 end end end
+  for rr = 0, MAP_H - 1 do
+    local row = g[rr]
+    for cc = 0, MAP_W - 1 do
+      if SOFT[row[cc]] then
+        softSeen[rr * KEY_W + cc] = true; soft = soft + 1
+      elseif softSeen[rr * KEY_W + cc] then softGone[rr * KEY_W + cc] = true end
+    end
+  end
   for _ in pairs(panelTodo) do todo = todo + 1 end
   -- Not the enemy count: spawners (the 2-1 furnace) keep adding enemies.
   local sig = string.format("%d/%d/%d", score(), soft, todo)
@@ -1986,7 +2089,12 @@ local function think()
             if g[pr] and g[pr][pc] == SPRING then
               local pk = pr * KEY_W + pc
               for _, d2 in ipairs(DIRS) do
-                if springLand[pk .. d2[3]] == nil then springTry = { pk, d2[3], pc, pr }; return true end
+                for _, v in ipairs({ "", "!" }) do
+                  -- (not one the model expects to drown: a death costs a rollback)
+                  if springLand[pk .. d2[3] .. v] == nil and ride.springGuess(g, pc, pr, d2, v == "!") then
+                    springTry = { pk, d2[3] .. v, pc, pr }; return true
+                  end
+                end
               end
             end
           end
@@ -2000,8 +2108,39 @@ local function think()
           end
         end
       end
-      if frame < stallUntil and plan ~= "bomb" and plan ~= "spring" and plan ~= "trap" then dir = nil end
-      if not dir and frame < exploreUntil then
+      if not dir then
+        -- Still nothing: push into a gadget object parked on a walkable
+        -- cell next to the region (3-5's subs dock at stairs and take P1
+        -- across the water; a ride seen becomes a route, ride.edges). Each
+        -- cell and direction once per stage, for up to 90 frames.
+        ride.tried = ride.tried or {}
+        local try = ride.try
+        if try and (frame - try[3] > 90 or ride.from) then ride.tried[try[1] .. try[2]] = true; ride.try, try = nil, nil end
+        if try and try[1] == here then
+          plan, dir, step = "board", nil, nil
+          input[try[2]] = true
+        else
+          local want
+          dir = bfs(g, c, r, function(cc, rr)
+            for _, e in ipairs(elist) do
+              if e.gadget and e.type ~= 0xE0 and e.type ~= 0xA0 and walkable(g, e.c, e.r) then
+                for _, d in ipairs(DIRS) do
+                  if cc + d[1] == e.c and rr + d[2] == e.r and not ride.tried[(rr * KEY_W + cc) .. d[3]] then
+                    want = { rr * KEY_W + cc, d[3] }; return true
+                  end
+                end
+              end
+            end
+            return false
+          end, nearEnemy, cw)
+          if want then
+            plan = "board"
+            if want[1] == here then ride.try = { want[1], want[2], frame }; input[want[2]] = true; dir, step = nil, nil end
+          end
+        end
+      end
+      if frame < stallUntil and plan ~= "bomb" and plan ~= "spring" and plan ~= "trap" and plan ~= "board" then dir = nil end
+      if not dir and frame < exploreUntil and plan ~= "board" then
         -- After a death or a long stall: walk toward the least visited
         -- neighbour (random tie-break) and sometimes drop a bomb.
         plan = "explore"
@@ -2016,18 +2155,19 @@ local function think()
         if #opts > 0 then dir = opts[math.random(#opts)] end
         if haveBomb and not remoteOn and math.random() < 0.1 then input.a = true end
       end
-      if not dir then plan = "wait" end
+      if not dir and plan ~= "board" then plan = "wait" end
     end
   end
 
   -- A route over a platform lane starts here: wait on the $36 for the ride.
   if dir == "ride" then
     plan, dir, step = "ride", nil, nil
-    if not rideWait or rideWait[1] ~= here then rideWait = { here, frame } end
-    if frame - rideWait[2] > 600 then
-      for _, e in ipairs(laneEnds(g, c, r)) do rideFail[here .. ">" .. (e[2] * KEY_W + e[1])] = true end
+    if not ride.wait or ride.wait[1] ~= here then ride.wait = { here, frame } end
+    if frame - ride.wait[2] > 600 then
+      for _, e in ipairs(laneEnds(g, c, r)) do ride.fail[here .. ">" .. (e[2] * KEY_W + e[1])] = true end
+      ride.edges[here] = nil
       log(string.format("%6d no ride came at (%d,%d); not again", frame, c, r))
-      rideWait = nil
+      ride.wait = nil
     end
     local tx, ty = tileCentre(c, r)
     if x < tx - 1 then input.right = true elseif x > tx + 1 then input.left = true end
@@ -2041,11 +2181,16 @@ local function think()
         end
       end
     end
+    -- A learned ride boarded by pushing into the object (3-5's subs).
+    local jo = jumpObj[here]
+    if jo and jo.ride and jo.ride[4] then input = { [jo.ride[4]] = true } end
   else
-    rideWait = nil
+    ride.wait = nil
   end
   -- Commit to the next tile until its centre is reached, so the plan can't
   -- flip back and forth on a tile boundary.
+  if dir then dir = dir:match("^%a+") end  -- a jump's "!" (hold in the air) is for springDir
+  ride.lastPlan = plan
   if dir and not (step and plan ~= "flee" and plan ~= "dodge") then
     local d = ({ up = { 0, -1 }, down = { 0, 1 }, left = { -1, 0 }, right = { 1, 0 } })[dir]
     step = { c = c, r = r, tc = c + d[1], tr = r + d[2], dir = dir }
@@ -2150,6 +2295,7 @@ local function think()
 end
 
 local function dumpCdl(path)
+  if emu.getCdlString then return writeFile(path, emu.getCdlString()) end  -- port/botrun
   local cdl = emu.getCdlData(emu.memType.snesPrgRom)
   local t = {}
   for i = 0, #cdl do t[#t + 1] = string.char(cdl[i] or 0) end

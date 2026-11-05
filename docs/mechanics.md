@@ -213,9 +213,9 @@ to the walled centre, which holds the gold panel and the `$68`.
 * Landing on a pad launches again in the held direction.
 * Distances (`SpringLaunch` C0:4937 picks the routine from the held
   direction): Up (C0:4A95) and Down (C0:4A0D) set the target y to the
-  start -/+ `$30`, so they land **exactly 3 cells** away. Left (C0:4B16)
-  and Right (C0:4B91) fly at `$1.3000` px/f along an arc: about 5 cells
-  (the 3-1 probe above). Nothing held: C0:499A, a bounce in place. In 3-1
+  start -/+ `$30`, so they land **exactly 3 cells** away if the direction
+  is let go in the air (below). Left (C0:4B16) and Right (C0:4B91) fly at
+  `$1.3000` px/f along an arc, also 3 cells when let go. Nothing held: C0:499A, a bounce in place. In 3-1
   pad (9,6) Down lands on (9,9), inside the walled centre with the panel.
 * **[probe]** 3-6 (`stage_35.mss`): after a flight `+$52` reads `$0809`
   for about 20 frames while P1 settles (on or next to the target pad),
@@ -225,10 +225,23 @@ to the walled centre, which holds the gold panel and the `$68`.
   and (10,6), which climbs from the start area (rows 24-27) to the upper
   area with the soft blocks and the gate. A jump from (5,24) Up drowned.
 
-**Bot recipe.** Walk onto the `$4C` and hold the direction you want to
-fly until P1 is airborne (about 20 frames after arriving). The landing
-cell is 5 cells away (observed for Right). Treat a pad as an edge to the
-cell 5 cells away in each direction. Whether P1 can leave a pad it
+* **[probe]** 3-1, port (`bot/scenario.py` state, P1 just landed on pad
+  (9,6)): after a landing P1 is free (`+$52` = 0) for one frame, then the
+  pad locks it (`$0801`) for 19 frames and launches. Holding the
+  direction **through the launch and letting go once airborne**
+  (`$1801`), every direction flies exactly 3 cells (~49 px): Down lands
+  on (9,9) (the panel, inside the centre), Up on (9,3), Right on (12,6).
+  **Keeping it held in the air carries P1 further**: Down held lands at
+  (9,10), a wall, and P1 is pushed on to (9,12); Right held reaches
+  (13,6) and walks on. A landing in a wall slides P1 on in the flight
+  direction to the next free cell or pad: Left from (9,6) landed in
+  (6,6) `$C5` and slid to the pad at (4,6) (the "5 cells" seen before).
+
+**Bot recipe.** Walk onto the `$4C`, hold the direction you want to fly
+while the pad holds P1 (`$0801`), and let go once airborne (`$1801`).
+P1 lands 3 cells away, or slides on past walls to the next cell it can
+stand on. Treat a pad as an edge to that cell in each direction (the bot
+learns the real landing per pad and direction). Whether P1 can leave a pad it
 landed on without being launched again (by releasing the pad) was not
 tested. Enemies near the landing cell are dangerous: in the run with
 nothing held, P1 died to an enemy right after landing.

@@ -89,6 +89,14 @@ typedef struct Snes {
     /* Called before each instruction (not before taking an interrupt); if it
      * returns nonzero it has executed in place of the interpreter. */
     int (*hook)(struct Snes *s);
+    /* Frame-step without a pad log (port/botrun.c): called at each logic
+     * frame's NMI point, before the pad is latched from input[frame]; if it
+     * returns nonzero, no NMI is raised there this time (it loaded a state). */
+    int (*on_frame)(struct Snes *s);
+    /* Timed mode (port/botrun.c): called at the start of each vblank, after
+     * the frame count goes up and before NMI and the auto-joypad read of
+     * input[frame] (Mesen's endFrame, then inputPolled). */
+    void (*on_vblank)(struct Snes *s);
     /* Optional profile: interpreted instructions per 24-bit PC. */
     uint32_t *prof;
 } Snes;

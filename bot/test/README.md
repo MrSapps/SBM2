@@ -27,3 +27,23 @@ Mesen: `build/port/hybrid baserom.sfc RUN.inputs -N -D end:out.wram` (or
 the bot finished, rollbacks cut out. To probe a moment the run rolled back
 from, rerun the stage with `SBM2_SAVE_AT=<frame>:<path.mss>` and play inputs
 from that state with `bot/run.sh` (`SBM2_LOAD`).
+
+## Scenarios (the whole bot, on the port)
+
+`bot/scenario.py run` plays each `scenarios/*.txt` on `build/port/botrun`
+(the bot on the C port, no Mesen; `make build/port/botrun`): a stage start
+from `build/lib` (or `build/libp`), the pads of an earlier run up to the
+moment under test (text, run-length encoded per logic frame), then the bot
+for `budget` frames; it passes when the bot log matches `pass`. Each takes
+seconds to a minute; `-j` runs them in parallel.
+
+`bot/scenario.py make NAME RUN_DIR FRAME --pass RE` cuts one from any bench
+run (Mesen or port: `RUN_DIR/run.inputs`). Probing from such a moment:
+`SBM2_SAVE_AT=<frame>:<path.mss> bot/scenario.py run NAME -b <frame+1>`
+writes a port savestate there; `SBM2_LOAD=<path.mss> build/port/botrun
+baserom.sfc <probe.lua>` runs any Lua script from it.
+
+botrun runs the game in the port's timed mode (Mesen's lag frames) by
+default, `SBM2_TIMED=0` for frame-step; `bot/bench.py -p` and
+`SBM2_PORT=1 bot/drive.py` use it for whole runs (start states replayed
+from their pad logs once and cached as `<state>.port`).

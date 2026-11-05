@@ -1822,10 +1822,13 @@ local function think()
       -- Off a bomb only with no ball near (a slam missed is not a death);
       -- caught off it with a ball near, a new bomb right here shields too.
       local ballNear, ballSome = false, false
+      ride.ballRisk = false
       for _, b in ipairs(bosses) do
         local d = b.state == 0xCCDAA8 and math.abs(b.x - x) + math.abs(b.y - y) or 1e9
         if d < 96 then ballNear = true end
         if d < 128 then ballSome = true end
+        -- leaving the bomb for a slam: ~90 frames off it, and balls home
+        if d < 160 or (b.state == 0xCCDAA8 and b.y > 160) then ride.ballRisk = true end
       end
       -- calm: no ball within 128 px for 30 frames (no flicker off the bomb)
       if ballSome then ride.ballAt = frame end
@@ -1833,7 +1836,9 @@ local function think()
       local bombsLeft = emu.read(P1 + P_BOMBS_LEFT, WRAM, false) > 0
       ride.f1Home = myCell == HK
       if not (myCell == HK and slamHere) then ride.runSide = nil end
-      if myCell == HK and slamHere and (here ~= HK or not ballNear) then
+      if not (myCell == HK and slamHere) then ride.running = nil end
+      if myCell == HK and slamHere and (ride.running or not ride.ballRisk) then
+        ride.running = true
         f1plan, plan = true, "slamrun"
         -- Straight along row 12 (a route search through the ball windows
         -- failed every other frame: P1 crept), to the side with no ball.
@@ -1860,7 +1865,7 @@ local function think()
         input.a = frame % 2 == 0
       elseif not myCell and bombsLeft then
         local home = function(cc, rr) return cc == 8 and rr == 12 end
-        dir = bfs(g, c, r, home, nearEnemy, cw) or bfs(g, c, r, home, nil, windows)
+        dir = bfs(g, c, r, home, nearEnemy, cw)  -- (not through the boss's boxes: a slam killed P1 there)
         f1plan, plan = true, "shield"
         -- No way home now: dig in here rather than wander (the dodges took
         -- P1 up into the body's rows).

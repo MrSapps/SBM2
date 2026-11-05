@@ -2159,7 +2159,13 @@ local function think()
       local goal = remoteOn and function(c2, r2, n)
         return safe(c2, r2, n) and not remoteCells[r2 * KEY_W + c2]
       end or safe
+      -- Rides don't count (the platform comes when it comes), unless it is
+      -- here: a $DC within 2 cells of the bomb (4-4, 4-2: a lane end was
+      -- the only way out of a column the blast fills).
       allowRide = false
+      for _, e in ipairs(elist) do
+        if e.type == 0xDC and math.abs(e.c - cc) + math.abs(e.r - rr) <= 2 then allowRide = true end
+      end
       local ok = bfs(g, cc, rr, goal, nil, combine(w, eWin), t) ~= nil
       allowRide = true
       return ok
@@ -2284,6 +2290,10 @@ local function think()
     end
     local why = haveBomb and targetsInReach(c, r, 0)
     if why == "enemy" and frame < ambushHold then why = nil end
+    if os.getenv("SBM2_DBG") and frame % 60 == 0 then
+      log(string.format("%6d dbg here (%d,%d) haveBomb=%s why=%s esc=%s left=%d remote=%s", frame, c, r, tostring(haveBomb),
+        tostring(why), tostring(why and canEscape(c, r, 0)), emu.read(P1 + P_BOMBS_LEFT, WRAM, false), tostring(next(remoteCells) ~= nil)))
+    end
     if why and canEscape(c, r, 0) then
       plan, bombWhy = "bomb", why
       if pushCell == here then ride.planBomb = here end  -- the planner's bomb (remote: set it off soon)

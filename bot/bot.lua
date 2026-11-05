@@ -273,6 +273,28 @@ local function readBombs(g)
       end
     end
   end
+  -- Enemies that blow themselves up (docs/enemies.md), as bombs about to go
+  -- off (in the list only: they are not obstacles). Range 3 before world 4,
+  -- else 9 (C1:8074). $89: every 448 frames (+$BE to $1C0) where it stands.
+  -- $8B (C1:836E, 3-6): rests while +$4E counts down from $500, then walks
+  -- (+$C0 bit 15) to the cell at +$4C and blows up there.
+  local ox, oy = origin()
+  local far = emu.read(0x1A, WRAM, false) >= 0x40 and 9 or 3
+  for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
+    if (r16(base) & 0xF000) == 0x9000 and (r16(base + 4) & 0x8000) == 0 then
+      local typ = r16(base + 0x7E) & 0xFF
+      local ec, er = (r16(base + P_X) + ox) // 16, (r16(base + P_Y) + oy) // 16
+      if typ == 0x89 and r16(base + 0xBE) >= 0x1C0 - 120 then
+        list[#list + 1] = { ec, er, math.max(1, 0x1C0 - r16(base + 0xBE)), far }
+      elseif typ == 0x8B and (r16(base + 0xC0) & 0x8000) ~= 0 and r16(base + 0x4E) <= 1 then
+        local tk = r16(base + 0x4C)
+        local tc, tr = (tk & 0x7F) // 2, tk >> 7
+        list[#list + 1] = { tc, tr, math.max(1, 32 * (math.abs(tc - ec) + math.abs(tr - er)) + 16), far }
+      elseif typ == 0x8B and r16(base + 0x4E) < 0x60 then
+        list[#list + 1] = { ec, er, 0x60, far }  -- about to set out: keep clear of it
+      end
+    end
+  end
   return list, byCell
 end
 
@@ -2191,7 +2213,9 @@ local function think()
           end
         end
         if #opts > 0 then dir = opts[math.random(#opts)] end
-        if haveBomb and not remoteOn and math.random() < 0.1 then input.a = true end
+        -- (only with a way on and out: dropped in a dead end it was a death,
+        -- 3-6's left side)
+        if dir and haveBomb and not remoteOn and math.random() < 0.1 and canEscape(c, r, 0) then input.a = true end
       end
       if not dir and plan ~= "board" and plan ~= "slam" then plan = "wait" end
     end
@@ -2324,6 +2348,7 @@ local function think()
     end
     frozenAt = { x, y, frame }
   end
+  if os.getenv("SBM2_DBG") and input.a and plan ~= "bomb" then log(string.format("%6d dbg A pressed in plan %s", frame, tostring(plan))) end
   local s = string.format("%s %s @(%d,%d) px(%d,%d)", plan == "bomb" and "bomb:" .. tostring(bombWhy) or plan, dir or "-", c, r, x, y)
   if s ~= lastPlan then
     log(string.format("%6d %s", frame, s)); lastPlan = s

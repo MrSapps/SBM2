@@ -1,0 +1,12 @@
+# 5-8 form 2 (entered with the glove from 5-7): a test poke sets form 1 HP to 1 at frame 400 ($1020), so its next hit ends it;
+# the bot then has to hit the flying body with thrown bombs (6 hits) and reach the ending.
+# cut from build/t56/56 at frame 30
+start 57g
+budget 9000
+pass STAGE 6
+env SBM2_POKE=400:1020=0001
+pads
+7 0001,0000
+1 0001,0000,0002
+8 0001
+14 0001,0000

@@ -1431,6 +1431,23 @@ local function think()
   -- 5-8 shows an open gate tile at (8,3) before the boss comes, with a
   -- $C0 in it that kills on contact: no way out there, keep off it.
   if emu.read(0x1A, WRAM, false) == 0x57 and gateOpen then gateOpen = false; g[gr][gc] = 0xC9 end
+  -- World 5 without the glove: 5-8 form 2 is hurt only by thrown bombs and
+  -- its arena has no blocks, so one must be carried in (5-7 hides one, item
+  -- kind 7, at (13,10)). While one is hidden, the gate counts as shut (a
+  -- route through it would leave the stage).
+  local gloveHidden = false
+  if emu.read(0x1A, WRAM, false) >= 0x50 and emu.read(P1 + 0xFE, WRAM, false) == 0 then
+    for i = 0, 63 do
+      local cell = r16(ITEMLIST + 4 * i)
+      if cell >= 0x8000 then break end
+      local kind = r16(ITEMLIST + 4 * i + 2)
+      -- hidden, or revealed and still lying there (tile $44)
+      if (kind & 0x3FFF) == 7 and ((kind & 0x4000) == 0 or emu.read(MAP + cell, WRAM, false) == 0x44) then
+        gloveHidden = true
+      end
+    end
+  end
+  if gloveHidden and gateOpen then gateOpen = false; g[gr][gc] = 0xC9 end
   if gateOpen then g[gr][gc] = GATE_OPEN end
   RANGE = emu.read(P1 + P_FIRE, WRAM, false) + 1
   remoteOn = (emu.read(P1 + 0xF3, WRAM, false) & 1) ~= 0
@@ -1934,6 +1951,38 @@ local function think()
           input.b = true; nextDetonate = frame + 20
           log(string.format("%6d detonate (5-8: ball near after the run)", frame))
         end
+      elseif emu.read(P1 + 0xFE, WRAM, false) == 0 and SOFT[g[10][13]] and myCell and calm
+          and not (myCell == HK and slamHere) and frame >= (ride.gloveFree or 0) then
+        -- no glove yet and our one bomb is out: set it off from outside its
+        -- blast to have it for the glove's block
+        local mc, mr = myCell % KEY_W, myCell // KEY_W
+        local rc = {}
+        for _, cell in ipairs(blastCells(g, mc, mr, RANGE)) do rc[cell[2] * KEY_W + cell[1]] = true end
+        f1plan, plan, step = true, "glove", nil
+        if rc[here] then
+          dir = bfs(g, c, r, function(cc, rr) return not rc[rr * KEY_W + cc] end, nearEnemy, cw)
+        elseif frame >= nextDetonate then
+          input.b = true; nextDetonate = frame + 20
+          log(string.format("%6d detonate (5-8: bomb wanted for the glove block)", frame))
+        end
+      elseif emu.read(P1 + 0xFE, WRAM, false) == 0 and not myCell and (function()
+          -- Form 2 is hurt only by thrown bombs: get the glove first (item
+          -- kind 7, art $1626, under the soft block at (13,10)).
+          for k, kind in pairs(heartNow) do
+            if kind == "item" then
+              local d1 = bfs(g, c, r, function(cc, rr) return rr * KEY_W + cc == k end, nearEnemy, cw)
+              if d1 then dir = d1; return true end
+            end
+          end
+          if SOFT[g[10][13]] and bombsLeft then
+            if here == 10 * KEY_W + 12 or here == 10 * KEY_W + 14 then dir = nil; input.a = frame % 2 == 0; return true end
+            local spot = function(cc, rr) return rr == 10 and (cc == 12 or cc == 14) end
+            local d1 = bfs(g, c, r, spot, nearEnemy, cw) or bfs(g, c, r, spot, nil, cw)
+            if d1 then dir = d1; return true end
+          end
+          return false
+        end)() then
+        f1plan, plan, step = true, "glove", nil
       elseif myCell and here == myCell and (not calm or myCell == HK) then
         f1plan, plan, dir, step = true, "shield", nil, nil
       elseif myCell and (myCell ~= HK or here ~= HK) and (calm or here ~= myCell) then
@@ -2265,7 +2314,7 @@ local function think()
       -- A heart or glove lying in reach comes before the exit.
       plan = "item"
       dir = bfs(g, c, r, function(cc, rr) return g[rr][cc] == ITEM and heartNow[rr * KEY_W + cc] == "item" end, nearEnemy, cw)
-      if not dir and gateOpen and r16(0x5D70) < 0x8000 then
+      if not dir and gateOpen and r16(0x5D70) < 0x8000 and not gloveHidden then
         plan = "exit"
         dir = bfs(g, c, r, function(cc, rr) return g[rr][cc] == GATE_OPEN end, nearEnemy, cw)
       end
@@ -2318,7 +2367,7 @@ local function think()
           return targetsInReach(cc, rr, n * FPT) == "enemy" and frame >= ambushHold and canEscape(cc, rr, n * FPT)
         end, nearEnemy, cw)
       end
-      if not dir and gateOpen and #walkers == 0 then
+      if not dir and gateOpen and #walkers == 0 and not gloveHidden then
         plan = "exit"
         dir = bfs(g, c, r, function(cc, rr) return g[rr][cc] == GATE_OPEN end, nil, cw)
           or bfs(g, c, r, function(cc, rr) return g[rr][cc] == GATE_OPEN end, nil, windows)
@@ -2551,7 +2600,10 @@ local function think()
   -- Pressing a direction but not moving for 600 frames (held by an object,
   -- a warp gone wrong): go back to before it.
   local pressing = input.up or input.down or input.left or input.right
-  if not pressing or math.abs(x - frozenAt[1]) + math.abs(y - frozenAt[2]) > 3 or frame < frozenAt[3] then
+  -- (5-8: the cutscene after form 1 holds P1 invulnerable, hearts $FF, for
+  -- ~1550 frames; rolling back from it undid the kill)
+  local held = emu.read(0x1A, WRAM, false) == 0x57 and emu.read(P1 + 0xEF, WRAM, false) == 0xFF
+  if not pressing or held or math.abs(x - frozenAt[1]) + math.abs(y - frozenAt[2]) > 3 or frame < frozenAt[3] then
     frozenAt = { x, y, frame }
   end
   if frame - frozenAt[3] > 600 and timeLeft() > 1 then
@@ -2660,6 +2712,17 @@ local function onFrame()
         remoteSince, trappedSince = nil, nil
         return
       end
+    end
+  end
+  -- SBM2_POKE="<frame>:<hex addr>=<hex value>[,...]": 16-bit WRAM writes
+  -- once at that frame. Tests only (e.g. 5-8 straight to form 2); not an
+  -- assist a run may use.
+  local pokeF, pokes = (os.getenv("SBM2_POKE") or ""):match("^(%d+):(.+)$")
+  if pokeF and frame >= tonumber(pokeF) and not ride.poked then
+    ride.poked = true
+    for a, v in pokes:gmatch("(%x+)=(%x+)") do
+      emu.write16(tonumber(a, 16), tonumber(v, 16), WRAM)
+      log(string.format("%6d test poke %s=%s", frame, a, v))
     end
   end
   local saveF, savePath = (os.getenv("SBM2_SAVE_AT") or ""):match("^(%d+):(.+)$")

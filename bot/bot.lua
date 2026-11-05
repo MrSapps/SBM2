@@ -1552,6 +1552,13 @@ local function think()
       end
     end
     if emu.read(P1 + P_BOMBS_LEFT, WRAM, false) == 0 then remoteWorth = true end
+    -- A bomb the stage planner placed (its step's cell) is the plan: set it
+    -- off as soon as we are clear (2-6: held 300 frames because the block
+    -- it was for had grown back once, softGone, so the next step never came
+    -- before it grew back again).
+    for _, b in ipairs(lastBombs) do
+      if b[5] and ride.planBomb == b[2] * KEY_W + b[1] then remoteWorth = true end
+    end
     -- A boss sense point in the blast (and not on the bomb: it would eat it).
     for k in pairs(bossEat) do
       if remoteCells[k] then
@@ -1978,6 +1985,7 @@ local function think()
     if why == "enemy" and frame < ambushHold then why = nil end
     if why and canEscape(c, r, 0) then
       plan, bombWhy = "bomb", why
+      if pushCell == here then ride.planBomb = here end  -- the planner's bomb (remote: set it off soon)
       if os.getenv("SBM2_DBG") and why == "obj" and lastPlan and not lastPlan:find("^bomb") then
         local t = {}
         for _, cell in ipairs(blastCells(g, c, r, rangeAt(g, c, r))) do

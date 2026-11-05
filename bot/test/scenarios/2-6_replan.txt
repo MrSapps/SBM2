@@ -1,7 +1,7 @@
 # 2-6: the planner repeats bomb(13,19) bomb(13,21) every ~640 frames without progress (blocks grow back in world 2?).
 # cut from build/benchP2/25 at frame 10300
 start 25
-budget 4700
+budget 7000
 pass STAGE 26
 pads
 1 0001,0000

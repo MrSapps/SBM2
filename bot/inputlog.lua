@@ -36,6 +36,9 @@ local M = {}
 local mem = emu.memType.snesMemory
 local wram = emu.memType.snesWorkRam
 local log, valid = {}, true
+-- Pokes (3-word entries) make a backward count ambiguous; without any (no
+-- assists) truncate counts the dropped frames instead of rescanning.
+local hasPokes = false
 local installed = false
 local loops
 local frames, extras = 0, 0
@@ -145,6 +148,8 @@ function M.start(statePath)
     if t then log = t else valid = false end
   end
   countFrames()
+  hasPokes = false
+  for _, v in ipairs(log) do if v & 0xF == 3 then hasPokes = true; break end end
   if not installed then
     emu.addMemoryCallback(onPadRead, emu.callbackType.read, 0x004219, 0x004219)
     emu.addMemoryCallback(onPadRead, emu.callbackType.read, 0x804219, 0x804219)
@@ -154,6 +159,7 @@ function M.start(statePath)
 end
 
 function M.write16(off, v)
+  hasPokes = true
   emu.write16(off, v, wram)
   log[#log + 1] = 3 | ((off >> 16) << 4)
   log[#log + 1] = off & 0xFFFF
@@ -163,8 +169,15 @@ end
 function M.mark() return #log end
 
 function M.truncate(n)
-  for i = #log, n + 1, -1 do log[i] = nil end
-  countFrames()
+  if hasPokes then
+    for i = #log, n + 1, -1 do log[i] = nil end
+    countFrames()
+  else
+    for i = #log, n + 1, -1 do
+      if log[i] == 1 then frames = frames - 1 end
+      log[i] = nil
+    end
+  end
   extras = 0
 end
 

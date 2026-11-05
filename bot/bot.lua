@@ -61,7 +61,7 @@ local ENEMY_FIRST, ENEMY_LAST = 0x8400, 0x8F00  -- enemy structs, same layout
 local function enemyTiles()
   local t = {}
   for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
-    if (r16(base) & 0xF000) == 0x9000 and (r16(base + 4) & 0x8000) == 0 then
+    if ((r16(base) & 0xF000) == 0x9000 or (r16(base) & 0xF000) == 0xA000) and (r16(base + 4) & 0x8000) == 0 then
       local x, y = r16(base + P_X), r16(base + P_Y)
       local c, r = toTile(x, y)
       if c >= 0 and c < MAP_W and r >= 0 and r < MAP_H then t[#t + 1] = { c, r } end
@@ -313,7 +313,7 @@ local function readBombs(g)
   local ox, oy = origin()
   local far = emu.read(0x1A, WRAM, false) >= 0x40 and 9 or 3
   for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
-    if (r16(base) & 0xF000) == 0x9000 and (r16(base + 4) & 0x8000) == 0 then
+    if ((r16(base) & 0xF000) == 0x9000 or (r16(base) & 0xF000) == 0xA000) and (r16(base + 4) & 0x8000) == 0 then
       local typ = r16(base + 0x7E) & 0xFF
       local ec, er = (r16(base + P_X) + ox) // 16, (r16(base + P_Y) + oy) // 16
       if typ == 0x89 and r16(base + 0xBE) >= 0x1C0 - 120 then
@@ -1287,7 +1287,7 @@ local function think()
     -- (3-6's left side) or a blast is bad luck, not the jump's fault.
     local pcell, enemyThere = r16(P1 + 0xA8), false
     for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
-      if (r16(base) & 0xF000) == 0x9000 and r16(base + 0xA8) == pcell then enemyThere = true end
+      if ((r16(base) & 0xF000) == 0x9000 or (r16(base) & 0xF000) == 0xA000) and r16(base + 0xA8) == pcell then enemyThere = true end
     end
     if enemyThere or isFlame(emu.read(MAP + pcell, WRAM, false)) then
       log(string.format("%6d spring %s: died on landing (enemy or blast); still a way", frame, springFrom))
@@ -1307,7 +1307,7 @@ local function think()
       end
       local es = {}
       for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
-        if (r16(base) & 0xF000) == 0x9000 then
+        if ((r16(base) & 0xF000) == 0x9000 or (r16(base) & 0xF000) == 0xA000) then
           es[#es + 1] = string.format("%04X:%02X(%d,%d)", base, r16(base + 0x7E) & 0xFF, r16(base + P_X), r16(base + P_Y))
         end
       end
@@ -1317,7 +1317,7 @@ local function think()
       local pcell = r16(P1 + 0xA8)
       local cause = isFlame(emu.read(MAP + pcell, WRAM, false)) and "blast" or "other"
       for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
-        if (r16(base) & 0xF000) == 0x9000 and r16(base + 0xA8) == pcell then
+        if ((r16(base) & 0xF000) == 0x9000 or (r16(base) & 0xF000) == 0xA000) and r16(base + 0xA8) == pcell then
           cause = string.format("contact:%02X", r16(base + 0x7E) & 0xFF)
         end
       end
@@ -1523,7 +1523,7 @@ local function think()
     for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
       local typ = r16(base + 0x7E) & 0xFF
       local py = r16(base + P_Y)
-      if (r16(base) & 0xF000) == 0x9000 and (r16(base + 4) & 0x8000) ~= 0 and typ >= 0x80 and typ < 0xC0
+      if ((r16(base) & 0xF000) == 0x9000 or (r16(base) & 0xF000) == 0xA000) and (r16(base + 4) & 0x8000) ~= 0 and typ >= 0x80 and typ < 0xC0
           and py >= 16 and py < 0x8000 then
         local dc, dr = toTile(r16(base + P_X), r16(base + P_Y))
         if g[dr] and g[dr][dc] then dormant[#dormant + 1] = { dc, dr } end
@@ -1719,7 +1719,7 @@ local function think()
   if not NOASSIST and #enemies > 0 and (ticks - lastProgress > ASSIST or timeLeft() < 60) then
     for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
       local hp = emu.read(base + 0x43, WRAM, false)
-      if (r16(base) & 0xF000) == 0x9000 and (r16(base + 4) & 0x8000) == 0 and hp > 1 then
+      if ((r16(base) & 0xF000) == 0x9000 or (r16(base) & 0xF000) == 0xA000) and (r16(base + 4) & 0x8000) == 0 and hp > 1 then
         local ec, er = toTile(r16(base + P_X), r16(base + P_Y))
         if ec ~= gc or er ~= gr then
           inputlog.write16(base + 0x43, (r16(base + 0x43) & 0xFF00) | 1)
@@ -1806,7 +1806,7 @@ local function think()
     for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
       local t = r16(base + 0x7E)
       -- Real enemies only: not the platforms, track blocks, furnace ($C0+).
-      if (r16(base) & 0xF000) == 0x9000 and (r16(base + 4) & 0x8000) == 0 and t ~= 0x90 and t ~= 0x98
+      if ((r16(base) & 0xF000) == 0x9000 or (r16(base) & 0xF000) == 0xA000) and (r16(base + 4) & 0x8000) == 0 and t ~= 0x90 and t ~= 0x98
           and (t & 0xFF) < 0xC0 then
         local ec, er = toTile(r16(base + P_X), r16(base + P_Y))
         if ec ~= gc or er ~= gr then

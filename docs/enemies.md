@@ -55,7 +55,7 @@ Enemies use the same `$100`-byte layout as the player.
 
 | offset | meaning |
 |---|---|
-| `+0` | bit 0: x velocity is negative; bit 1: y velocity is negative; `$9000` = live |
+| `+0` | bit 0: x velocity is negative; bit 1: y velocity is negative; `$9000` = live; `$A000` = live and off screen **[port probe]** (1-6: a `$83` below the screen read `$Axxx` and kept moving, `$9xxx` again once in view) |
 | `+4` | bit 15 dormant/inactive; bit 6 hidden (no cell occupancy, no contact); bit 5 flashing (no contact, no flame damage) |
 | `+$0C` | animation timer; `$0FFF` = animation finished (`EnemyTimerDone` C1:4ED5) |
 | `+$10.+$12` | x (integer.fraction16). Map coordinate = x + `$7E5F01` |

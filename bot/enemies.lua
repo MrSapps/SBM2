@@ -40,7 +40,7 @@ return function(env)
     local list = {}
     for base = FIRST, LAST, 0x100 do
       local f4 = r16(base + 4)
-      if (r16(base) & 0xF000) == 0x9000 and (f4 & 0x8000) == 0 then
+      if ((r16(base) & 0xF000) == 0x9000 or (r16(base) & 0xF000) == 0xA000) and (f4 & 0x8000) == 0 then
         local typ = r16(base + 0x7E) & 0xFF
         local c, r = cellOf(r16(base + 0xA8))
         if r < MAP_H and c < MAP_W then

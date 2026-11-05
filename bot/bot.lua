@@ -1167,13 +1167,14 @@ local function think()
     end
     if onPad and not springDir then springDir = DIRS[math.random(4)][3] end  -- not planned: any way off
     -- An enemy at the landing (3-6's left side: the same contact death on
-    -- every retry): bounce in place (nothing held; up to 10 times) and decide again.
+    -- every retry): bounce in place (nothing held; up to 25 times: the 3-6 one sits
+    -- there for a ~1070-frame timer, +$4E) and decide again.
     if onPad and not springFrom and springDir and springDir ~= "stay" then
       local d = ({ up = { 0, -1 }, down = { 0, 1 }, left = { -1, 0 }, right = { 1, 0 } })[springDir:match("^%a+")]
       local land = springLand[(pr0 * KEY_W + pc0) .. springDir]
       if land == nil and d then land = ride.springGuess(readMap(), pc0, pr0, d, springDir:sub(-1) == "!") end
       ride.stays = ride.stays or 0
-      if land and ride.stays < 10 then
+      if land and ride.stays < 25 then
         for _, e in ipairs(enemyTiles()) do
           if math.abs(e[1] - land[1]) + math.abs(e[2] - land[2]) <= 2 then
             log(string.format("%6d pad (%d,%d): enemy near the landing (%d,%d); bouncing", frame, pc0, pr0, land[1], land[2]))
@@ -1342,6 +1343,9 @@ local function think()
   local gate = r16(0x5D72)
   local gc, gr = (gate & 0x7F) // 2, gate >> 7
   local gateOpen = g[gr] ~= nil and gate ~= 0 and g[gr][gc] == 0x49  -- open gate tile (C1:41A8 via $09)
+  -- 5-8 shows an open gate tile at (8,3) before the boss comes, with a
+  -- $C0 in it that kills on contact: no way out there, keep off it.
+  if emu.read(0x1A, WRAM, false) == 0x57 and gateOpen then gateOpen = false; g[gr][gc] = 0xC9 end
   if gateOpen then g[gr][gc] = GATE_OPEN end
   RANGE = emu.read(P1 + P_FIRE, WRAM, false) + 1
   remoteOn = (emu.read(P1 + 0xF3, WRAM, false) & 1) ~= 0
@@ -1396,6 +1400,15 @@ local function think()
         for dr = -3, 3 do
           for dc = -3 + math.abs(dr), 3 - math.abs(dr) do bossSense[(br + dr) * KEY_W + bc + dc] = true end
         end
+      end
+    end
+    -- 5-8 form 1: bombs only into a slam (the "slam" plan lures one; see
+    -- there). Patrolling, the body is out of reach from where P1 can stand.
+    if emu.read(0x1A, WRAM, false) == 0x57 and not finalForm2() then
+      local st = r16(0x1000) | (emu.read(0x1002, WRAM, false) << 16)
+      bossSense = {}
+      if st == 0xCCCAC4 then
+        for t = 0, 90, 15 do for k in pairs((Boss.senseCells(bosses, t))) do bossSense[k] = true end end
       end
     end
     if frame % 60 == 0 then
@@ -2068,7 +2081,24 @@ local function think()
         dir = bfs(g, c, r, function(cc, rr) return g[rr][cc] == GATE_OPEN end, nil, cw)
           or bfs(g, c, r, function(cc, rr) return g[rr][cc] == GATE_OPEN end, nil, windows)
       end
-      if not dir and #walkers > 0 and haveBomb then
+      if not dir and haveBomb and emu.read(0x1A, WRAM, false) == 0x57 and not finalForm2()
+          and (r16(0x1000) | (emu.read(0x1002, WRAM, false) << 16)) == 0xCCC8D6 then
+        -- 5-8 form 1 patrolling: lure a slam (docs/enemies.md 7.3). P1 under
+        -- the body sets it off; it lands at y 152 with its contact box
+        -- ending at y 187, short of row 12 (P1 at y 199), and its sense
+        -- block then reaches row 10. So wait in row 12 where the body will
+        -- pass, in a column whose row 11 is open (even, not 6 or 10): the
+        -- bomb dropped there when the slam starts (targetsInReach) blasts
+        -- up into the block, and the remote sets it off.
+        -- The body has to pass over P1 (x within -16..+15); it sweeps x
+        -- 59..196, so (8,12) (x 128) is passed both ways every sweep.
+        local want = 8
+        plan = "slam"
+        if c ~= want or r ~= 12 then
+          dir = bfs(g, c, r, function(cc, rr) return cc == want and rr == 12 end, nearEnemy, cw)
+        end
+      end
+      if not dir and plan ~= "slam" and #walkers > 0 and haveBomb then
         -- Nothing to bomb from here: close in on the nearest enemy.
         plan = "hunt"
         dir = bfs(g, c, r, function(cc, rr)
@@ -2078,7 +2108,7 @@ local function think()
           return false
         end, nearEnemy, cw)
       end
-      if not dir then
+      if not dir and plan ~= "slam" then
         -- Nothing left on this side: try a spring jump not made yet. Where
         -- it lands (or that it drowns: rollback) is learnt, so the planner
         -- can then route over the spring network (3-1, 3-6).
@@ -2108,7 +2138,7 @@ local function think()
           end
         end
       end
-      if not dir then
+      if not dir and plan ~= "slam" then
         -- Still nothing: push into a gadget object parked on a walkable
         -- cell next to the region (3-5's subs dock at stairs and take P1
         -- across the water; a ride seen becomes a route, ride.edges). Each
@@ -2140,7 +2170,7 @@ local function think()
         end
       end
       if frame < stallUntil and plan ~= "bomb" and plan ~= "spring" and plan ~= "trap" and plan ~= "board" then dir = nil end
-      if not dir and frame < exploreUntil and plan ~= "board" then
+      if not dir and frame < exploreUntil and plan ~= "board" and plan ~= "slam" then
         -- After a death or a long stall: walk toward the least visited
         -- neighbour (random tie-break) and sometimes drop a bomb.
         plan = "explore"
@@ -2155,7 +2185,7 @@ local function think()
         if #opts > 0 then dir = opts[math.random(#opts)] end
         if haveBomb and not remoteOn and math.random() < 0.1 then input.a = true end
       end
-      if not dir and plan ~= "board" then plan = "wait" end
+      if not dir and plan ~= "board" and plan ~= "slam" then plan = "wait" end
     end
   end
 

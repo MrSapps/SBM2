@@ -556,7 +556,11 @@ int main(int argc, char **argv)
         char *d = read_file(load, &n);
         if (!d) { fprintf(stderr, "botrun: can't read %s\n", load); return 2; }
         if (n >= 8 && !memcmp(d, MAGIC, 8)) {
-            if (!restore_state(d, n)) return 2;
+            if (!restore_state(d, n)) {
+                fprintf(stderr, "botrun: %s is a port state of another build (size %zu, want %zu)\n",
+                        load, n, 9 + sizeof m + m.sram_size);
+                return 2;
+            }
             skip_end_frame = 0;
         } else if (load_cached(load)) {
             /* replayed before */

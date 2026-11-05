@@ -2700,7 +2700,9 @@ local function think()
           -- An ambush: if no hit follows, reload and throw again (retries
           -- cost CPU, not game time).
           if not ambush then ambushStart = true end
-        else
+        elseif plan ~= "dodge" and plan ~= "flee" then
+          -- (turning is a step toward the body: not while dodging it, which
+          -- this override turned into walking into it)
           input = { a = true, [want] = true }
           if throw.face == want then throw.faceFrames = throw.faceFrames + 1 else throw.face, throw.faceFrames = want, 1 end
         end

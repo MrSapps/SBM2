@@ -1917,6 +1917,20 @@ local function think()
     -- Is bombing at (cc,rr) useful? "obj" (soft block, switch, panel),
     -- "enemy" (an enemy on or next to the blast), or nil. A blast that would
     -- re-toggle a finished panel is never useful.
+    -- World 5 light switch ($64, cell $7E5AAE; docs/mechanics.md 4): bit 0
+    -- of $7E5AAC odd = $8A slow (0.5 wanderer), $97 fast; even the other
+    -- way round. Keep it on the side that slows most of the live ones: a
+    -- wrong one is a target, a right one is never blasted.
+    local swVal, swK, swWant = r16(0x5AAC), nil, nil
+    if swVal ~= 0xFFFF then
+      local cell = r16(0x5AAE)
+      swK = (cell >> 7) * KEY_W + (cell & 0x7F) // 2
+      local n8A, n97 = 0, 0
+      for _, e in ipairs(elist) do
+        if e.type == 0x8A then n8A = n8A + 1 elseif e.type == 0x97 then n97 = n97 + 1 end
+      end
+      if n8A + n97 > 0 then swWant = (n8A >= n97) and 1 or 0 end
+    end
     local function targetsInReach(cc, rr, t)
       if g[rr][cc] == 0x66 then return nil end  -- no bombs on stairs
       if (noBombUntil[rr * KEY_W + cc] or 0) > frame then return nil end
@@ -1947,6 +1961,12 @@ local function think()
           if g[nr] and (g[nr][nc] == 0xD3 or (g[nr][nc] == 0x00 and n2 == 0xD3)) then why = "obj" end
         end
         if tt == ITEM and heartNow[k] then return nil end  -- never blast a heart item
+        if swWant and k == swK then
+          -- (the planner's own step goes ahead: flipped, it is a target again)
+          if (swVal & 1) == swWant then
+            if pushCell ~= rr * KEY_W + cc then return nil end
+          else why = "obj" end
+        end
         cells[k] = true
         if reach[k] then near = true end
       end

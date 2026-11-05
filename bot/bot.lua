@@ -562,8 +562,10 @@ local function bfs(g, c0, r0, goal, avoid, windows, t0)
             local cc, rr = c + dir[1], r + dir[2]
             local k = rr * KEY_W + cc
             local arrive = t0 + (n + 1) * FPT
-            if not (avoid and avoid[k]) and (walkable(g, cc, rr) or (g[rr] and g[rr][cc] == SPRING))
-                and not (windows and hit(windows, k, arrive - FPT, arrive + FPT)) then
+            -- A pad holds P1 ~20 frames before the launch: clear for that long.
+            local isPad = g[rr] and g[rr][cc] == SPRING
+            if not (avoid and avoid[k]) and (walkable(g, cc, rr) or isPad)
+                and not (windows and hit(windows, k, arrive - FPT, arrive + (isPad and 30 or FPT))) then
               push(cc, rr, first or dir[3], n + 1)
             elseif trapsOK and g[rr] and g[rr][cc] == 0x63 then
               push(cc, rr, first or dir[3], n + 30)
@@ -1174,13 +1176,21 @@ local function think()
         end
         return false
       end
+      -- With a remote bomb out, not into its blast (we can't set it off
+      -- from a pad, and 3-6 went round between the pad and the blast), and
+      -- a landing on floor first (where it can be set off).
+      local rc = {}
+      for _, b in ipairs(lastBombs or {}) do
+        if b[5] then for _, cell in ipairs(blastCells(g0, b[1], b[2], b[4])) do rc[cell[2] * KEY_W + cell[1]] = true end end
+      end
       local best, bestN
       for _, d in ipairs(DIRS) do
         for _, v in ipairs({ "", "!" }) do
           local land = springLand[(pr0 * KEY_W + pc0) .. d[3] .. v]
           if land == nil then land = ride.springGuess(g0, pc0, pr0, d, v == "!") end
-          if land and (land[1] ~= pc0 or land[2] ~= pr0) then
+          if land and (land[1] ~= pc0 or land[2] ~= pr0) and not rc[land[2] * KEY_W + land[1]] then
             local _, n = bfs(g0, land[1], land[2], work)
+            if next(rc) and walkable(g0, land[1], land[2]) then n = (n or 1000) - 10000 end
             if n and (not bestN or n < bestN) then best, bestN = d[3] .. v, n end
           end
         end
@@ -1196,7 +1206,17 @@ local function think()
       local land = springLand[(pr0 * KEY_W + pc0) .. springDir]
       if land == nil and d then land = ride.springGuess(readMap(), pc0, pr0, d, springDir:sub(-1) == "!") end
       ride.stays = ride.stays or 0
-      if land and ride.stays < 25 then
+      -- ...unless a bomb is about to blast the pad itself (fleeing our own
+      -- bomb by the pad, the bounce kept P1 in it: 3-6).
+      local g1, padHot = readMap(), false
+      for _, b in ipairs(lastBombs or {}) do
+        if not b[5] and b[3] < 120 then
+          for _, cell in ipairs(blastCells(g1, b[1], b[2], b[4])) do
+            if cell[1] == pc0 and cell[2] == pr0 then padHot = true end
+          end
+        end
+      end
+      if land and ride.stays < 25 and not padHot then
         for _, e in ipairs(enemyTiles()) do
           if math.abs(e[1] - land[1]) + math.abs(e[2] - land[2]) <= 2 then
             log(string.format("%6d pad (%d,%d): enemy near the landing (%d,%d); bouncing", frame, pc0, pr0, land[1], land[2]))
@@ -1594,7 +1614,10 @@ local function think()
     -- got away goes off anyway, to free the bomb.
     remoteSince = remoteSince or frame
     if frame - remoteSince > 300 and not ride.f1Home then remoteWorth = true end
-    if remoteWorth and not remoteCells[here] and not nearEnemy[here] and frame >= nextDetonate then
+    -- Not on a spring pad (the one free frame after a landing: the press
+    -- did nothing and 3-6 went round its pads for good) or locked.
+    if remoteWorth and not remoteCells[here] and not nearEnemy[here] and frame >= nextDetonate
+        and g[r][c] ~= SPRING and (r16(P1 + P_LOCK) & 1) == 0 then
       input.b = true
       nextDetonate = frame + 20
       log(string.format("%6d detonate", frame))

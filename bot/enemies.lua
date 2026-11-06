@@ -53,11 +53,19 @@ return function(env)
           -- (+4 bit 5, flashing after a hit or a wake-up, is harmless only
           -- for now: still harmful for planning. 4-6: P1 fled onto a
           -- flashing $93's cell, it stopped flashing, 12 deaths.)
-          local hidden = (f4 & 0x40) ~= 0 or (rd8(base + 0x41) & 0x80) ~= 0
+          -- (flashing, +4 bit 5, is harmless only for now: for the chasers
+          -- that come straight back at P1 it stays harmful for planning;
+          -- 4-6 fled onto a flashing $93. For all types it broke 3-3, whose
+          -- hit $90/$98 flash where P1 has to pass: 0/2 seeds, 18 deaths.)
+          local flashHarm = typ == 0x93 or typ == 0x8A or typ == 0x97 or typ == 0x85
+          local hidden = (f4 & (flashHarm and 0x40 or 0x60)) ~= 0 or (rd8(base + 0x41) & 0x80) ~= 0
             or (r16(base + 0x68) & 2) ~= 0
             or ((typ == 0x98 or typ == 0x90) and (r16(base + 0xBE) & 0x8000) ~= 0)
           -- $DD track blocks never kill by contact but crush P1 ahead of them.
           e.harmful = not e.gadget and not hidden and (not SAFE_TYPES[typ & 0x7F] or typ == 0xDD)
+          -- ($91 attacking, hp $FF, still flames the cell next to it: harmful
+          -- unless dying; 5-3 dodged next to one mid-attack)
+          if typ == 0x91 and (r16(base + 0x68) & 2) == 0 and (f4 & 0x40) == 0 then e.harmful = true end
           local hp = rd8(base + 0x43)
           e.hp = hp & 0x7F
           e.killable = not e.gadget and typ ~= 0xDD and (hp & 0x7F) ~= 0x7F and (f4 & 0x40) == 0
@@ -270,6 +278,16 @@ return function(env)
               local l = w[iv[1]]
               if not l then l = {}; w[iv[1]] = l end
               l[#l + 1] = { iv[2] - margin, iv[3] + margin }
+              -- $91 flames P1's cell when P1 is next to it (C1:BA6B): its
+              -- neighbours are deadly too (5-3: 3 "blast" deaths by one).
+              if e.type == 0x91 then
+                for _, d in ipairs(DIRS) do
+                  local k = iv[1] + d[2] * KEY_W + d[1]
+                  local l2 = w[k]
+                  if not l2 then l2 = {}; w[k] = l2 end
+                  l2[#l2 + 1] = { iv[2] - margin, iv[3] + margin }
+                end
+              end
             end
           end
         end

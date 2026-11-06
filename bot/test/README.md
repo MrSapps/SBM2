@@ -13,6 +13,12 @@ CPU runs, so memory callbacks never fire and savestates are empty.
 Maps are either invented (to pin one mechanic) or text extracts of a real
 stage state. No binary or ROM-derived blobs are committed.
 
+`bot/test/test_models.lua` (also run by `make bot-test`) pins the world
+models one rule at a time, each traced from a no-rewind death: pierce and
+barrel blasts, enemy bombs, magnet pulls, 2-8 drop markers, boss window
+merging, the 1-8 hands, `$B2` shots, `$91` neighbours, `$86` dashes and
+which flashing enemies stay harmful. Invented maps inline, WRAM poked.
+
 ## Tools
 
 * `think.lua <file.wram> [frames] [KEY=VALUE...]`: run the whole bot on

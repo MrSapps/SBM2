@@ -82,3 +82,4 @@ build/port/botrun: $(BOTRUN_SRC) port/snes.h port/cpu.h port/ppu.h $(LUA_CORE:%=
 # Planner / steering unit tests on text maps (bot/test/maps), no emulator.
 bot-test: build/tools/lua
 	build/tools/lua bot/test/test_planner.lua
+	build/tools/lua bot/test/test_models.lua

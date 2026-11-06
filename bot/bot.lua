@@ -2448,9 +2448,27 @@ local function think()
       end, nil, cw)
       ride.dodgeGoal = dir and gk or nil
     end
-    dir = dir or bfs(g, c, r, function(cc, rr)
-        return not nearEnemy[rr * KEY_W + cc] and not danger[rr * KEY_W + cc]
-      end, nil, windows)
+    -- No fully safe goal: the least bad step, of here and the open,
+    -- blast-free neighbours the one whose first enemy contact comes latest
+    -- (the old fallback routed on blast windows only and walked P1 next to
+    -- a $91 in 5-3).
+    if not dir then
+      local function firstContact(k)
+        local f = math.huge
+        for _, iv in ipairs(eWin[k] or {}) do if iv[2] >= 0 and iv[1] < f then f = iv[1] end end
+        return f
+      end
+      local best, bestT = nil, firstContact(here)
+      for _, d in ipairs(DIRS) do
+        local nc, nr = c + d[1], r + d[2]
+        local k = nr * KEY_W + nc
+        if walkable(g, nc, nr) and not danger[k] then
+          local ft = firstContact(k)
+          if ft > bestT + 4 then best, bestT = d[3], ft end
+        end
+      end
+      dir = best
+    end
   elseif finalForm2() and emu.read(P1 + 0xFE, WRAM, false) > 0 and (function()
       -- Form 2 with the glove: walk to a throw spot (Boss.aimGoal).
       local body

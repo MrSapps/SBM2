@@ -298,6 +298,28 @@ wakes them was not traced.
   the water column and on the islands, which are reached only by spring
   pads.
 
+## 6b. 2-8 boss (stage `$27`): bomb drops
+
+**[port probe]** (`build/lib/stage_27.mss`, P1 idle with endless hearts;
+the boss code around CC:AB00-B400 is not disassembled yet). The body
+(`$1000`, states CC:ABC4 / CC:AC45 / CC:AE84, HP 10, contact box
+x -40..+40, y -40..+48) launches bombs:
+
+* CC:B078 -> CC:B0A9: a bomb rises from the body at 4 px/f off the top of
+  the screen, then waits there as CC:B0D5 (y = -3). CC:B2B1 is the launch
+  effect on the ground.
+* Later a waiting one becomes CC:B189 at the top of some column and falls
+  at **2 px/f**; at the same time a **marker CC:B2F1** appears at the
+  landing point (seen at (128,120), (128,168), (176,168), (80,168): cell
+  centres).
+* On landing it is a bomb in the marker's cell with flags `$C0` (already
+  exploding), **range 10**, not pierce.
+* The bot (`readBombs`) lists each marker as a bomb due in
+  (marker y - faller y) / 2 - 3 frames (60 when no faller is seen).
+  Without rewinds 2-8 went from not cleared (6 deaths) to cleared at
+  frame 12968 (2 deaths): one in a dead-end corridor where a drop's
+  row cross left no way out past P1's own bomb.
+
 ## 7. Final boss (5-8, stage `$57`)
 
 The fight does not use the enemy structs. **[probe]** marks facts checked

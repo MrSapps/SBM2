@@ -288,6 +288,36 @@ local function readBombs(g)
       byCell[r * KEY_W + c] = b
     end
   end
+  -- 2-8 boss drops (docs/enemies.md 6): a bomb falls at 2 px/f (state
+  -- CC:B189) onto the marker under it (CC:B2F1, same x) and explodes on
+  -- landing with range 10. Each marker is a bomb due when the faller gets
+  -- there (none seen yet: 60 frames).
+  if emu.read(0x1A, WRAM, false) == 0x27 then
+    local falls = {}
+    for base = 0x1040, 0x17C0, 0x40 do
+      local st = r16(base) | (emu.read(base + 2, WRAM, false) << 16)
+      if st == 0xCCB189 then falls[#falls + 1] = { r16(base + 0x11), r16(base + 0x14) } end
+    end
+    for base = 0x1040, 0x17C0, 0x40 do
+      local st = r16(base) | (emu.read(base + 2, WRAM, false) << 16)
+      if st == 0xCCB2F1 then
+        local mx, my = r16(base + 0x11), r16(base + 0x14)
+        local t = 60
+        for _, f in ipairs(falls) do
+          if math.abs(f[1] - mx) <= 2 then
+            local fy = f[2] >= 0x8000 and f[2] - 0x10000 or f[2]
+            t = math.max(0, (my - fy) // 2 - 3)
+          end
+        end
+        local c, r = toTile(mx, my)
+        if not byCell[r * KEY_W + c] then
+          local b = { c, r, t, 10, false, false }
+          list[#list + 1] = b
+          byCell[r * KEY_W + c] = b
+        end
+      end
+    end
+  end
   -- Bombs drawn on the map but missing from the table (world 2's grey cubes)
   -- never go off by themselves: obstacles a chain blast may still set off.
   local function mapBomb(c, r)

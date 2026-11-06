@@ -1674,6 +1674,7 @@ local function think()
     end
   end
   local bosses = Boss.read()
+  bossesNow = bosses
   local bossNow, bossSense, bossEat = {}, {}, {}
   if #bosses > 0 then
     bossNow = Boss.contactCells(bosses, Boss.MARGIN, 0)
@@ -1772,8 +1773,20 @@ local function think()
   -- 1-8: the body's lane (rows 2-7, its box from y 32 to 120) counts as
   -- enemy-held: routes keep out of it and P1 caught in it dodges out (it
   -- went up there by dodges and seeks, and the hands got it).
+  -- (Only within 80 px of the body: a bomb set in the lane ahead of it is
+  -- how it gets hit, and far from it the lane is safe for a while.)
   if emu.read(0x1A, WRAM, false) == 0x17 then
-    for rr = 2, 7 do for cc = 0, MAP_W - 1 do nearEnemy[rr * KEY_W + cc] = true end end
+    local bxs = {}
+    for _, b in ipairs(Boss.read and bossesNow or {}) do bxs[#bxs + 1] = b.x end
+    local ox = origin()
+    for rr = 2, 7 do
+      for cc = 0, MAP_W - 1 do
+        local cx = cc * 16 + 8 - ox
+        local near = #bxs == 0
+        for _, bx in ipairs(bxs) do if math.abs(cx - bx) < 80 then near = true end end
+        if near then nearEnemy[rr * KEY_W + cc] = true end
+      end
+    end
   end
   local panelTodo, panelDone = panels()
   local heartNow = heartCells()

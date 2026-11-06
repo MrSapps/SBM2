@@ -247,6 +247,18 @@ return function(env)
           if b.state == BALL then m = margin + (spread or 0) end
           mark(w, b, px, py, t, m, STEP, slack)
         end
+        -- 1-8 (stage $17): the arm tip (CC:A203, box +-16) shoots straight
+        -- down from the body at 4 px/f to 88 px below it, holds ~50 frames
+        -- and comes back (state CC:9BDD; it reaches the bottom in ~22
+        -- frames, faster than P1 walks out): the column under the body,
+        -- x +-16 down to +104, is contact danger all along its path.
+        if b.base == 0x1000 and (env.r16(0x1A) & 0xFF) == 0x17 then
+          local arm = { box = { -16, 17, 0, 105 } }
+          for t = 0, horizon, STEP do
+            local px, py = B.predict(b, t)
+            if px then mark(w, arm, px, py, t, margin, STEP, slack) end
+          end
+        end
         -- 5-8 form 2: within 24 px of its waypoint it picks a random new one
         -- of 16 (CC:D272). From when it can be there, every one of those
         -- paths is a contact window (a dodge walked into such a turn).

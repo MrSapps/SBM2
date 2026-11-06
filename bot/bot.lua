@@ -1354,19 +1354,31 @@ local function think()
       for _, b in ipairs(lastBombs or {}) do
         if b[5] then for _, cell in ipairs(blastCells(g0, b[1], b[2], b[4])) do rc[cell[2] * KEY_W + cell[1]] = true end end
       end
+      -- Nor into any blast due before P1 is down and away (timed bombs
+      -- too: 3-1 jumped "down!" onto its own two bombs, 150 frames).
+      local hotLand = {}
+      for k, l in pairs(blastWindows(g0)) do
+        for _, iv in ipairs(l) do if iv[1] <= 150 and iv[2] >= 0 then hotLand[k] = true end end
+      end
       local best, bestN
       for _, d in ipairs(DIRS) do
         for _, v in ipairs({ "", "!" }) do
           local land = springLand[(pr0 * KEY_W + pc0) .. d[3] .. v]
           if land == nil then land = ride.springGuess(g0, pc0, pr0, d, v == "!") end
-          if land and (land[1] ~= pc0 or land[2] ~= pr0) and not rc[land[2] * KEY_W + land[1]] then
+          if land and (land[1] ~= pc0 or land[2] ~= pr0) and not rc[land[2] * KEY_W + land[1]]
+              and not hotLand[land[2] * KEY_W + land[1]] then
             local _, n = bfs(g0, land[1], land[2], work)
             if next(rc) and walkable(g0, land[1], land[2]) then n = (n or 1000) - 10000 end
             if n and (not bestN or n < bestN) then best, bestN = d[3] .. v, n end
           end
         end
       end
-      if best then springDir = best end
+      if best then springDir = best
+      else
+        -- every jump lands in a blast: bounce in place unless the pad is hit
+        local cur = springDir and springLand[(pr0 * KEY_W + pc0) .. springDir]
+        if cur and hotLand[cur[2] * KEY_W + cur[1]] then springDir = "stay" end
+      end
     end
     if onPad and not springDir then springDir = DIRS[math.random(4)][3] end  -- not planned: any way off
     -- An enemy at the landing (3-6's left side: the same contact death on
@@ -1388,7 +1400,18 @@ local function think()
         end
       end
       if land and ride.stays < 25 and not padHot then
-        for _, e in ipairs(enemyTiles()) do
+        -- (enemies that can kill: not the $C0 gate or other gadgets, which
+        -- kept 3-6 bouncing by the open exit for 11000 frames)
+        local foes = {}
+        for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
+          local typ = r16(base + 0x7E) & 0xFF
+          if ((r16(base) & 0xF000) == 0x9000 or (r16(base) & 0xF000) == 0xA000) and (r16(base + 4) & 0x8000) == 0
+              and typ >= 0x80 and typ < 0xC0 then
+            local ec, er = toTile(r16(base + P_X), r16(base + P_Y))
+            foes[#foes + 1] = { ec, er }
+          end
+        end
+        for _, e in ipairs(foes) do
           if math.abs(e[1] - land[1]) + math.abs(e[2] - land[2]) <= 2 then
             log(string.format("%6d pad (%d,%d): enemy near the landing (%d,%d); bouncing", frame, pc0, pr0, land[1], land[2]))
             springDir, ride.stays = "stay", ride.stays + 1

@@ -1098,7 +1098,7 @@ Boss.MARGIN, Boss.SLACK = 6, 12  -- pixels around a boss box; frames either side
 Boss.hp = nil  -- total boss HP last frame (nil: no boss)
 -- 5-8 form 2 (docs/enemies.md 7.4) is hurt only by a thrown bomb: with the
 -- glove (+$FE), lift a bomb of our own and throw it when the body is ahead.
-local throw = { face = nil, faceFrames = 0, liftAt = nil, dodgeAt = -100 }  -- (also the dodge hold)
+local throw = { face = nil, faceFrames = 0, liftAt = nil, dodgeAt = -100, at = -100 }  -- (also the dodge hold)
 -- A thrown bomb's offset from P1, frame by frame from the release
 -- (measured in 5-8; it lands after ~12 frames). Left mirrors right, up
 -- mirrors down around the start 16 px above P1.
@@ -1120,21 +1120,45 @@ function Boss.sure(body, px, py)
   local tg = Boss.target[body.base]
   return not tg or math.abs(px - tg[1]) > 24 or math.abs(py - tg[2]) > 24
 end
+-- A thrown bomb that hits form 2 blows up where it is (in the air) about
+-- when it hits, while P1 is still locked by the throw (~12 frames): only a
+-- hit whose bomb cell is outside P1's blast cross is safe. Up/down throws
+-- stay in P1's column; left/right ones arc a row or two up.
+function Boss.throwSafe(px, py, o)
+  local c, r = toTile(px, py)
+  local bc, br = toTile(px + o[1], py + o[2])
+  if br == r and math.abs(bc - c) <= RANGE then return false end
+  if bc == c and math.abs(br - r) <= RANGE then return false end
+  return true
+end
 function Boss.aimGoal(body, avoid)
+  local cache = {}
+  local function at(t)
+    local p = cache[t]
+    if not p then
+      local px, py = Boss.predict(body, t)
+      p = { px, py, Boss.sure(body, px, py) }
+      cache[t] = p
+    end
+    return p[1], p[2], p[3]
+  end
   return function(cc, rr, n)
     if avoid[rr * KEY_W + cc] then return false end
     local t0 = n * FPT + 6
     if t0 > 160 then return false end
     local cx, cy = cc * 16, rr * 16 + 7
     -- not where the body is on arrival (the throw is made standing there)
-    local bx0, by0 = Boss.predict(body, t0)
+    local bx0, by0 = at(t0)
     if math.abs(cx - bx0) < 36 and math.abs(cy - by0) < 36 then return false end
     for _, path in pairs(THROW_PATH) do
       for k = 4, #path do
         local o = path[k]
-        local px, py = Boss.predict(body, t0 + k)
-        if not Boss.sure(body, px, py) then break end
-        if math.abs(cx + o[1] - px) <= 16 and math.abs(cy + o[2] - py) <= 16 then return true end
+        local px, py, sure = at(t0 + k)
+        if not sure then break end
+        if math.abs(cx + o[1] - px) <= 16 and math.abs(cy + o[2] - py) <= 16 then
+          if Boss.throwSafe(cx, cy, o) then return true end
+          break  -- (the first hit frame is where it blows up)
+        end
       end
     end
     return false
@@ -1159,6 +1183,9 @@ end
 local nextDetonate = 0
 -- SBM2_SEED varies the random choices (bench.py -s), to tell luck from skill.
 local SEED = tonumber(os.getenv("SBM2_SEED") or "0")
+-- SBM2_NOREWIND=1: play as a human would: no rollbacks after deaths or
+-- stalls, no ambush retries (no savestate is ever loaded).
+NOREWIND = os.getenv("SBM2_NOREWIND") == "1"
 math.randomseed(SEED)
 local function think()
   input = {}
@@ -1486,7 +1513,34 @@ local function think()
   RANGE = emu.read(P1 + P_FIRE, WRAM, false) + 1
   remoteOn = (emu.read(P1 + 0xF3, WRAM, false) & 1) ~= 0
   local c, r, x, y = playerTile()
+  -- Frames per tile from P1's walking speed (speed items: 5-8 walks
+  -- ~1.4 px/f, 11 frames a tile, not the base 20): route timings and goal
+  -- checks are only right at the real pace. 5-8 only for now: the stage
+  -- planners elsewhere are tuned around 20 (4-2_panels failed with it).
+  do
+    local lx, ly = throw.lastX, throw.lastY
+    throw.lastX, throw.lastY = x, y
+    local d = lx and (math.abs(x - lx) + math.abs(y - ly)) or 0
+    if d > 0 and d <= 4 then
+      throw.speed = (throw.speed or 0.8) * 0.9 + d * 0.1
+      if emu.read(0x1A, WRAM, false) == 0x57 then FPT = math.max(9, math.min(22, math.floor(16 / throw.speed + 0.5))) end
+    end
+  end
   local windows = blastWindows(g)
+  -- A thrown bomb blows up where it hits (5-8 form 2: in the body's box,
+  -- 1-3 cells out) or a while after landing (3 cells, or 4 after a
+  -- bounce): for 45 frames its blasts from any of those cells are danger,
+  -- so P1 steps off the line at once (it died walking along it).
+  if throw.land and frame - throw.at < 45 then
+    local tc, tr, d = throw.land[1], throw.land[2], throw.land[3]
+    for k = 1, 4 do
+      for _, cell in ipairs(blastCells(g, tc + d[1] * k, tr + d[2] * k, RANGE)) do
+        local key = cell[2] * KEY_W + cell[1]
+        windows[key] = windows[key] or {}
+        table.insert(windows[key], { 0, 45 - (frame - throw.at) + FLAME_FRAMES })
+      end
+    end
+  end
   local danger = {}
   for k in pairs(windows) do danger[k] = true end
   -- Enemies: predicted paths give contact windows (eWin) and kill chances.
@@ -1533,6 +1587,10 @@ local function think()
     local wp = 0xCCD272 + (r16(0x1028) & 15) * 4
     local function rom16(ad) return emu.read(ad, emu.memType.snesMemory, false) | (emu.read(ad + 1, emu.memType.snesMemory, false) << 8) end
     Boss.target[0x1000] = { rom16(wp), rom16(wp + 2) }
+    if not Boss.waypoints then
+      Boss.waypoints = {}
+      for i = 0, 15 do Boss.waypoints[i + 1] = { rom16(0xCCD272 + i * 4), rom16(0xCCD272 + i * 4 + 2) } end
+    end
   end
   local bosses = Boss.read()
   local bossNow, bossSense, bossEat = {}, {}, {}
@@ -1572,7 +1630,7 @@ local function think()
       for _, b in ipairs(bosses) do
         t[#t + 1] = string.format("%04X@%02X%04X(%d,%d v%.2f,%.2f hp%d%s%s)", b.base, emu.read(b.base + 2, WRAM, false),
           r16(b.base), b.x, b.y, b.vx, b.vy, r16(b.base + 0x20),
-          b.box and " box" or "", b.sense and " sense" or "")
+          b.box and string.format(" box%d..%d,%d..%d", b.box[1], b.box[2], b.box[3], b.box[4]) or "", b.sense and " sense" or "")
       end
       log(string.format("%6d bosses %s", frame, table.concat(t, " ")))
     end
@@ -1688,6 +1746,14 @@ local function think()
     if sol and next(sol) then panelPlan = sol end
   end
   local here = r * KEY_W + c
+  -- P1's own cell field (+$A8, row*$80 + col*2) can be the next cell over
+  -- before the map tile is (5-8: px 89 was tile 5 but +$A8 col 6, and the
+  -- flame on col 6 killed it): danger on either is danger.
+  do
+    local a8 = r16(P1 + 0xA8)
+    local ak = (a8 // 0x80) * KEY_W + (a8 % 0x80) // 2
+    if ak ~= here and danger[ak] then danger[here] = true end
+  end
   -- Remote bombs: cells their blasts would cover, and whether setting them
   -- off now would hit anything worth it.
   local remoteCells, remoteWorth = {}, false
@@ -1734,7 +1800,10 @@ local function think()
     -- Not on a spring pad (the one free frame after a landing: the press
     -- did nothing and 3-6 went round its pads for good) or locked.
     -- (5-8's slam: a ball near P1 is no reason to wait, the body rises)
+    -- (not while a thrown bomb flies or has just landed: it is not listed
+    -- yet, and B sets it off too; 5-8 form 2 died 3 cells from one)
     if remoteWorth and not remoteCells[here] and (not nearEnemy[here] or ride.f1Home) and frame >= nextDetonate
+        and frame - throw.at > 40 and (r16(P1 + 0x52) & 6) == 0
         and g[r][c] ~= SPRING and (r16(P1 + P_LOCK) & 1) == 0 then
       input.b = true
       nextDetonate = frame + 20
@@ -2765,15 +2834,23 @@ local function think()
             px, py = Boss.predict(body, k + delay)
             if not Boss.sure(body, px, py) then break end
           end
-          if math.abs(x + o[1] - px) <= 22 and math.abs(y + o[2] - py) <= 22 then want = d; break end
+          if math.abs(x + o[1] - px) <= 22 and math.abs(y + o[2] - py) <= 22 then
+            if Boss.throwSafe(x, y, o) then want = d end
+            break
+          end
         end
         if want then break end
       end
       if want then
         -- (a retried ambush waits a random while: another moment, another try)
-        if throw.face == want and throw.faceFrames >= 2 and frame >= ambushHold then
+        -- (not right after a detonate press: the thrown bomb then went off
+        -- on landing, 3 cells from P1)
+        if throw.face == want and throw.faceFrames >= 2 and frame >= ambushHold and frame >= nextDetonate and not input.b then
           input.a = nil
           log(string.format("%6d throw %s at boss (%.0f,%.0f) from px(%d,%d)", frame, want, bx, by, x, y))
+          throw.at = frame
+          local DV2 = { up = { 0, -1 }, down = { 0, 1 }, left = { -1, 0 }, right = { 1, 0 } }
+          throw.land = { c, r, DV2[want] }
           throw.faceFrames = 0
           -- An ambush: if no hit follows, reload and throw again (retries
           -- cost CPU, not game time).
@@ -2793,10 +2870,28 @@ local function think()
         -- Our bomb is here: release, then press again to lift it (edge).
         input = { a = frame % 2 == 0 }
       elseif not onBomb and dist >= 40 and dist <= 140 and not danger[here] and not nearEnemy[here]
-          and not next(remoteCells)
+          and not next(remoteCells) and frame - throw.at > 40
           and emu.read(P1 + P_BOMBS_LEFT, WRAM, false) > 0 then
         input.a = frame % 2 == 0
         throw.liftAt = frame
+      end
+    end
+  end
+  -- Last guard: never step into fire. A pressed direction whose next
+  -- position (2 px on) is in a cell burning or blasting within 6 frames,
+  -- when P1's own cell is not, is dropped (5-8: steering for "aim left"
+  -- walked P1 right into a column of flames).
+  do
+    local function hot(k)
+      for _, iv in ipairs(windows[k] or {}) do if iv[1] <= 6 and iv[2] >= 0 then return true end end
+      return false
+    end
+    if not hot(here) then
+      for d, v in pairs({ up = { 0, -2 }, down = { 0, 2 }, left = { -2, 0 }, right = { 2, 0 } }) do
+        if input[d] then
+          local nc, nr = toTile(x + v[1], y + v[2])
+          if hot(nr * KEY_W + nc) then input[d] = nil end
+        end
       end
     end
   end
@@ -2909,6 +3004,10 @@ local function onFrame()
     loaded = true
     return
   end
+  if rollback and NOREWIND then
+    -- (no rewinds: a death is played on from the respawn, a stall too)
+    rollback, rollbackBefore = false, nil
+  end
   if rollback then
     rollback = false
     ambush = nil
@@ -2956,7 +3055,7 @@ local function onFrame()
     ride.savedAt = frame
     onNextInstruction(function() inputlog.saveState(savePath, emu.createSavestate()) end)
   end
-  if frame % SNAP_EVERY == 0 and (r16(P1 + P_LOCK) & 1) == 0
+  if not NOREWIND and frame % SNAP_EVERY == 0 and (r16(P1 + P_LOCK) & 1) == 0
       and (#snaps == 0 or snaps[#snaps][1] < frame) then
     local f = frame
     onNextInstruction(function()
@@ -2969,7 +3068,7 @@ local function onFrame()
       ambushHits = ambushHits + 1
       log(string.format("%6d ambush hit (try %d; %d/%d)", frame, ambush[4], ambushHits, ambushes))
       ambush = nil
-    elseif ambush[4] < AMBUSH_TRIES and ambush[2] then
+    elseif ambush[4] < AMBUSH_TRIES and ambush[2] and not NOREWIND then
       ambush[4] = ambush[4] + 1
       local snap = ambush
       for k = #snaps, 1, -1 do if snaps[k][1] > snap[1] then snaps[k] = nil end end
@@ -2994,7 +3093,7 @@ local function onFrame()
       ambushes = ambushes + 1
       local a = { frame, nil, liveEnemies(), 0, score(), nil, Boss.hp }
       ambush = a
-      onNextInstruction(function() a[2], a[6] = emu.createSavestate(), inputlog.mark() end)
+      if not NOREWIND then onNextInstruction(function() a[2], a[6] = emu.createSavestate(), inputlog.mark() end) end
     end
   end
   if not ok then log("error: " .. tostring(err)) end

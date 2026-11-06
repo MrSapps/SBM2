@@ -441,6 +441,21 @@ locked. `D0B8` sets HP = 6. After 224 frames the fight resumes in `D139`
   sets it off before lifting the next one (B does nothing while holding).
   Port scenario: 6/6 seeds beat form 2 in 5600-7900 frames; the whole
   5-8 fight in 27-35k frames (the 10:00 timer is 36000).
+* **Without rewinds** (`SBM2_NOREWIND=1`, port scenario `5-8_full`, 3
+  seeds): 0 deaths, the ending at frame 27244. What it took:
+  * A thrown bomb that hits blows up at once where it is, while P1 is
+    still locked by the throw (~12 frames): only throws whose bomb cell at
+    the hit is outside P1's blast cross (up/down throws stay in P1's
+    column; left/right ones arc a row or two up). After a throw, its line
+    is danger for 45 frames.
+  * B with a remote out also sets off a thrown bomb that has just landed
+    and is not listed yet: no detonate (and no new lift) for 40 frames
+    after a throw, none while holding, and no throw right after a press.
+  * The body's 16 possible next paths are contact windows from when it can
+    reach its waypoint (`Boss.windows`, 48 frames of them, every 8).
+  * Frames per tile follow P1's real pace (~11, not 20, in 5-8).
+  * A final guard drops any direction that steps into a cell burning or
+    blasting within 6 frames.
 * `Boss.read` (bot/boss.lua) lists objects whose contact code ran last
   frame; the first frame of a slam it lists none.
 * The stage timer is 10:00 here (6:00 in 2-6).

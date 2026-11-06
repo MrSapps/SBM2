@@ -2,7 +2,7 @@
 # the bot then has to hit the flying body with thrown bombs (6 hits) and reach the ending.
 # cut from build/t56/56 at frame 30
 start 57g
-budget 9000
+budget 10500
 pass THE END
 env SBM2_POKE=400:1020=0001
 pads

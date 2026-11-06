@@ -151,7 +151,7 @@ return function(env)
   -- 5-8 form 1 slam (CC:CAC4): $36 counts down from $A0; while it is
   -- >= $89 the body drops 3 px a frame, below $49 it rises 1 px a frame,
   -- in between it stays (72 px down and back, x fixed).
-  local SLAM, PATROL, BALL = 0xCCCAC4, 0xCCC8D6, 0xCCDAA8
+  local SLAM, PATROL, BALL, FORM2 = 0xCCCAC4, 0xCCC8D6, 0xCCDAA8, 0xCCD139
   -- 5-8 balls (CC:DAA8): 1 px a frame in direction $36&3 (table CC:DC19:
   -- up, right, down, left) after a $2E hold; when $38 runs out they turn
   -- toward P1 (or at random), so after that any way; gone when $34 does.
@@ -214,6 +214,23 @@ return function(env)
 
   -- Contact windows per cell over `horizon` frames (as Enemies.windows):
   -- cell key -> { {t0, t1}, ... }, `slack` frames either side.
+  -- The cells a boss box at (px,py) (+ margin m) covers at time t.
+  local function mark(w, b, px, py, t, m, STEP, slack)
+    local x0, x1 = px + b.box[1] - m, px + b.box[2] - 1 + m
+    local y0, y1 = py + b.box[3] - m, py + b.box[4] - 1 + m
+    local c0, r0 = cellOfPx(x0 - 7, y0 - 7)
+    local c1, r1 = cellOfPx(x1 + 8, y1 + 8)
+    for r = math.max(r0, 0), math.min(r1, MAP_H - 1) do
+      for c = math.max(c0, 0), math.min(c1, MAP_W - 1) do
+        local k = r * KEY_W + c
+        local l = w[k]
+        if not l then l = {}; w[k] = l end
+        local last = l[#l]
+        if last and last[2] >= t - STEP - slack then last[2] = math.max(last[2], t + STEP + slack)
+        else l[#l + 1] = { math.max(0, t - slack), t + STEP + slack } end
+      end
+    end
+  end
   function B.windows(list, horizon, margin, slack)
     local w = {}
     local STEP = 4
@@ -228,18 +245,29 @@ return function(env)
           local spd = math.sqrt(b.vx * b.vx + b.vy * b.vy)
           local m = margin + t // 16 + math.floor(t * math.max(0, spd - 0.8) * 0.5)
           if b.state == BALL then m = margin + (spread or 0) end
-          local x0, x1 = px + b.box[1] - m, px + b.box[2] - 1 + m
-          local y0, y1 = py + b.box[3] - m, py + b.box[4] - 1 + m
-          local c0, r0 = cellOfPx(x0 - 7, y0 - 7)
-          local c1, r1 = cellOfPx(x1 + 8, y1 + 8)
-          for r = math.max(r0, 0), math.min(r1, MAP_H - 1) do
-            for c = math.max(c0, 0), math.min(c1, MAP_W - 1) do
-              local k = r * KEY_W + c
-              local l = w[k]
-              if not l then l = {}; w[k] = l end
-              local last = l[#l]
-              if last and last[2] >= t - STEP - slack then last[2] = t + STEP + slack
-              else l[#l + 1] = { math.max(0, t - slack), t + STEP + slack } end
+          mark(w, b, px, py, t, m, STEP, slack)
+        end
+        -- 5-8 form 2: within 24 px of its waypoint it picks a random new one
+        -- of 16 (CC:D272). From when it can be there, every one of those
+        -- paths is a contact window (a dodge walked into such a turn).
+        local tg = B.target[b.base]
+        if B.waypoints and tg and b.state == FORM2 then
+          local spd = math.max(0.5, math.sqrt(b.vx * b.vx + b.vy * b.vy))
+          local dx, dy = tg[1] - b.x, tg[2] - b.y
+          local d = math.sqrt(dx * dx + dy * dy)
+          local ta = math.max(0, (d - 24) / spd)
+          local ax, ay = tg[1], tg[2]
+          if d > 24 then ax, ay = tg[1] - dx / d * 24, tg[2] - dy / d * 24 else ax, ay = b.x, b.y end
+          -- (every 8 frames: 16 paths at the 4-frame step made runs 4x slower)
+          local t1 = math.floor(ta / STEP + 1) * STEP
+          for t = t1, math.min(horizon, t1 + 48), 2 * STEP do
+            local go = spd * (t - ta)
+            for _, wp in ipairs(B.waypoints) do
+              local ex, ey = wp[1] - ax, wp[2] - ay
+              local e = math.sqrt(ex * ex + ey * ey)
+              local px, py = ax, ay
+              if e > 1 then local f = math.min(1, go / e); px, py = ax + ex * f, ay + ey * f end
+              mark(w, b, px, py, t, margin + t // 16, 2 * STEP, slack)
             end
           end
         end

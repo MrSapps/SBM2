@@ -280,9 +280,14 @@ local function readBombs(g)
       elseif (now - seen[2]) & 0xFFFF > FROZEN and t > 0 then
         t = 100000
       end
-      if remoteOn and t > 0 then t = REMOTE_T end
+      -- Enemy bombs (flags bit 3: 4-7's $A8 lays range-1 bombs) go off
+      -- early when P1 comes near (one at fuse 45 of 72 killed P1 next to
+      -- it): treat them as due any moment.
+      local enemyBomb = (flags & 0x08) ~= 0
+      if enemyBomb and t > 8 then t = 8 end
+      if remoteOn and t > 0 and not enemyBomb then t = REMOTE_T end
       -- Blast length = +7 + 1 (C0:3386).
-      local b = { c, r, t, emu.read(base + 7, WRAM, false) + 1, remoteOn and t == REMOTE_T,
+      local b = { c, r, t, emu.read(base + 7, WRAM, false) + 1, remoteOn and t == REMOTE_T and not enemyBomb,
         (emu.read(base, WRAM, false) & 4) ~= 0 }
       list[#list + 1] = b
       byCell[r * KEY_W + c] = b

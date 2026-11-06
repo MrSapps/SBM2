@@ -259,6 +259,27 @@ return function(env)
       end
     end
   end
+  -- Cells whose centre (where P1 stands, +-tol px) is inside a box: for
+  -- the exact 1-8 hand zones, where the overlap test of mark() closed the
+  -- gap under the body and most of the floor ~10 px early.
+  local function markCentres(w, box, px, py, t, tol, STEP, slack)
+    local ox, oy = env.origin()
+    local x0, x1 = px + box[1] - tol, px + box[2] - 1 + tol
+    local y0, y1 = py + box[3] - tol, py + box[4] - 1 + tol
+    local c0, c1 = math.ceil((x0 + ox - 8) / 16), math.floor((x1 + ox - 8) / 16)
+    local r0, r1 = math.ceil((y0 + oy - 7) / 16), math.floor((y1 + oy - 7) / 16)
+    for r = math.max(r0, 0), math.min(r1, MAP_H - 1) do
+      for c = math.max(c0, 0), math.min(c1, MAP_W - 1) do
+        local k = r * KEY_W + c
+        local l = w[k]
+        if not l then l = {}; w[k] = l end
+        local a, z = math.max(0, t - slack), t + STEP + slack
+        local last = l[#l]
+        if last and last[2] >= a - STEP and last[1] <= z then last[1], last[2] = math.min(last[1], a), math.max(last[2], z)
+        else l[#l + 1] = { a, z } end
+      end
+    end
+  end
   function B.windows(list, horizon, margin, slack)
     local w = {}
     local handsDone = false
@@ -304,7 +325,7 @@ return function(env)
                 local px, py = B.predict(b, t)
                 -- (no margin: the box is exact, and margin + cell padding
                 -- closed the next column too, so P1 dodged along its own)
-                if px then mark(w, slice, px, py, t, -6, STEP, slack) end
+                if px then markCentres(w, slice.box, px, py, t, 4, STEP, slack) end
               end
             end
           end

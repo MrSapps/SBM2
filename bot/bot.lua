@@ -2471,6 +2471,25 @@ local function think()
       end, nil, cw)
       ride.dodgeGoal = dir and gk or nil
     end
+    if not dir and os.getenv("SBM2_DBG") and frame % 20 == 0 then
+      local t = {}
+      for dr = -4, 4 do for dc = -4, 4 do
+        if math.abs(dr) + math.abs(dc) <= 4 then
+          local cc, rr = c + dc, r + dr
+          local k = rr * KEY_W + cc
+          if walkable(g, cc, rr) then
+            local fe, fb = "-", "-"
+            for _, iv in ipairs(eWin[k] or {}) do if iv[2] >= 0 and (fe == "-" or iv[1] < fe) then fe = iv[1] end end
+            for _, iv in ipairs(windows[k] or {}) do if iv[2] >= 0 and (fb == "-" or iv[1] < fb) then fb = iv[1] end end
+            t[#t + 1] = string.format("(%d,%d)e%sb%s", cc, rr, tostring(fe), tostring(fb))
+          end
+        end
+      end end
+      log(string.format("%6d dbg dodge none at (%d,%d): %s", frame, c, r, table.concat(t, " ")))
+      local bs = {}
+      for _, b in ipairs(bosses) do bs[#bs + 1] = string.format("%04X:%06X(%d,%d v%.2f,%.2f)%s", b.base, b.state, b.x, b.y, b.vx, b.vy, b.box and string.format("box%d..%d,%d..%d", b.box[1], b.box[2], b.box[3], b.box[4]) or "") end
+      log(string.format("%6d dbg bosses %s", frame, table.concat(bs, " ")))
+    end
     -- No fully safe goal: the least bad step, of here and the open,
     -- blast-free neighbours the one whose first enemy contact comes latest
     -- (the old fallback routed on blast windows only and walked P1 next to

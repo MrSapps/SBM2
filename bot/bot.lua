@@ -2097,7 +2097,12 @@ local function think()
   -- (bc,br) and the map's bombs blocking (for canEscape).
   ride.chaserEta = nil
   local chasers = {}
-  for _, e in ipairs(elist) do if e.harmful and e.chaser and not e.shot then chasers[#chasers + 1] = e end end
+  -- ($93 and $85 turn into chasers the moment their x-ray sight catches P1,
+  -- every frame: for escapes they are chasers already. 4-6: 12 deaths to
+  -- a $93 after bombing for it and backing into a pocket.)
+  for _, e in ipairs(elist) do
+    if e.harmful and not e.shot and (e.chaser or e.type == 0x93 or e.type == 0x85) then chasers[#chasers + 1] = e end
+  end
   if #chasers > 0 then
     ride.chaserEta = function(bc, br, bt)
       -- A bomb blocks a chaser only if it gets there before the bomb goes
@@ -2107,25 +2112,35 @@ local function think()
       for i, b in ipairs(lastBombs or {}) do bombT[b[2] * KEY_W + b[1]] = (lastTimes and lastTimes[i]) or b[3] end
       if bc then bombT[br * KEY_W + bc] = bt or NEW_FUSE end
       local eta = {}
+      -- Times, not steps (a label-correcting search): a chaser held up by a
+      -- bomb goes on once it has blown, after the hurt freeze if the blast
+      -- only hurts it (2+ HP: 4-6's $93, 5-1's $8A came back at P1 in the
+      -- pocket it had backed into); with 1 HP it dies there.
       for _, e in ipairs(chasers) do
         local start = e.r * KEY_W + e.c
-        local dist, q, qi = { [start] = 0 }, { { e.c, e.r } }, 1
+        local tm, q, qi = { [start] = 0 }, { { e.c, e.r } }, 1
+        local limit = 12 * e.cpf + 300
         while q[qi] do
           local cc, rr = q[qi][1], q[qi][2]; qi = qi + 1
           local k0 = rr * KEY_W + cc
-          local tt = dist[k0] * e.cpf
+          local tt = tm[k0]
           if not eta[k0] or tt < eta[k0] then eta[k0] = tt end
-          if dist[k0] < 12 then
+          if tt < limit then
             for _, dd in ipairs(DIRS) do
               local nc, nr = cc + dd[1], rr + dd[2]
               local k = nr * KEY_W + nc
               local tile = g[nr] and g[nr][nc]
-              local tb = bombT[k]
-              local blockedByBomb = tile and (tb or (isBomb(tile) and math.huge))
-                and (dist[k0] + 1) * e.cpf < (tb or math.huge) - 20
-              if tile and not dist[k] and (walkable(g, nc, nr) or tb or isBomb(tile)) and not blockedByBomb then
-                dist[k] = dist[k0] + 1
-                q[#q + 1] = { nc, nr }
+              if tile and (walkable(g, nc, nr) or bombT[k] or isBomb(tile)) then
+                local tn = tt + e.cpf
+                local tb = bombT[k] or (isBomb(tile) and 100000) or nil
+                local ok = true
+                if tb and tn < tb - 20 then
+                  if (e.hp or 1) <= 1 or tb >= 100000 then ok = false else tn = tb + 100 end
+                end
+                if ok and (not tm[k] or tn < tm[k]) then
+                  tm[k] = tn
+                  q[#q + 1] = { nc, nr }
+                end
               end
             end
           end

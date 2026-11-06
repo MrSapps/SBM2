@@ -50,12 +50,16 @@ return function(env)
         if r < MAP_H and c < MAP_W then
           local e = { base = base, type = typ, c = c, r = r }
           e.gadget = (typ >= 0xC0 or (typ & 0x80) == 0) and typ ~= 0xDD
-          local hidden = (f4 & 0x60) ~= 0 or (rd8(base + 0x41) & 0x80) ~= 0
+          -- (+4 bit 5, flashing after a hit or a wake-up, is harmless only
+          -- for now: still harmful for planning. 4-6: P1 fled onto a
+          -- flashing $93's cell, it stopped flashing, 12 deaths.)
+          local hidden = (f4 & 0x40) ~= 0 or (rd8(base + 0x41) & 0x80) ~= 0
             or (r16(base + 0x68) & 2) ~= 0
             or ((typ == 0x98 or typ == 0x90) and (r16(base + 0xBE) & 0x8000) ~= 0)
           -- $DD track blocks never kill by contact but crush P1 ahead of them.
           e.harmful = not e.gadget and not hidden and (not SAFE_TYPES[typ & 0x7F] or typ == 0xDD)
           local hp = rd8(base + 0x43)
+          e.hp = hp & 0x7F
           e.killable = not e.gadget and typ ~= 0xDD and (hp & 0x7F) ~= 0x7F and (f4 & 0x40) == 0
           e.immune = (hp & 0x7F) == 0x7F
           e.chaser = CHASERS[typ] and ((rd8(base + 0xD0) & 0x80) ~= 0 or typ == 0x89)

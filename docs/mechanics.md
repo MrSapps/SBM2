@@ -396,6 +396,18 @@ retreating.
   normal bomb again.
 * A held bomb is thrown by itself when P1 dies (`+$52` bit 1 at the death
   code C0:A675 -> C0:A743, same object, random direction).
+* **A thrown bomb hurts the enemy it lands on.** On landing (normal game,
+  not battle) `sub_C11F95` walks `$7E2620` for an object on the landing
+  cell (`+$A8`): types with bit 6 set (`$C0`+) are skipped (except `$E9`),
+  and so is `+$C0` bit 12 (already hurt). The bomb bounces on (C0:93A2).
+  `type & $3F` < `$1A` (all normal enemies `$82`-`$98`) or `$24`-`$28`:
+  `sub_C11E54` -> `EnemyStun` (C1:1E6F) for `$90`/`$98`, else `EnemyHit`
+  (C1:1EE2): `+$43` = `$7F` is immune, else HP - 1; at the last HP it sets
+  `+$68` bit 1, `+4` bit 5 (flashing: no contact) and `+$B9` = `$FF`.
+  **[port probe]** `bot/throwprobe.lua`, 1-1: two `$94` hit at f376 and
+  f565 went through `EnemyDie` (C1:5028, `+4` = `$AC00`) at f570 and f752,
+  ~190 frames later, harmless (flashing) meanwhile. No fuse wait: a throw
+  is a ranged kill 3 cells ahead.
 * Only these objects (`+$52` bit 4) hurt bosses that use
   `BossBombObjHit` (CC:96D9): 5-8 form 2 (box ±24, CC:97E8). Bombs placed
   normally (bit 5) are swallowed by it.

@@ -2101,17 +2101,6 @@ local function think()
       return eta
     end
   end
-  -- safeGoal plus: not a cell a chaser can walk to before P1 is there
-  -- with 40 frames to spare (dodges walked toward a chaser in 5-1).
-  function ride.chaseSafe(goal, t0)
-    if not ride.chaserEta then return goal end
-    local eta = ride.chaserEta(nil, nil)
-    return function(c2, r2, n)
-      if not goal(c2, r2, n) then return false end
-      local e = eta[r2 * KEY_W + c2]
-      return not e or e > (t0 or 0) + n * FPT + 40
-    end
-  end
   -- A $DD track block pushes P1 along its $4D track (4-2: P1 waited in a
   -- pocket on the track and was pushed into its own blast): with one on
   -- the map, a track cell is never a place to stop.
@@ -2864,27 +2853,6 @@ local function think()
     end
   end
 
-  -- Kite chasers: with nothing to do (or only waiting) and a chaser able to
-  -- reach P1 within 150 frames, go where P1 is well ahead of every chaser
-  -- (5-1: P1 stood 190 frames where it could not bomb safely, and a 1.25
-  -- px/f chaser walked up).
-  if ride.chaserEta and (not dir or plan == "wait" or plan == "explore") and plan ~= "flee" then
-    local eta = ride.chaserEta(nil, nil)
-    if os.getenv("SBM2_DBG") and frame % 20 == 0 then
-      local cs = {}
-      for _, e in ipairs(elist) do if e.chaser then cs[#cs + 1] = string.format("%02X(%d,%d)%s tile%02X", e.type, e.c, e.r, e.harmful and "h" or "-", g[e.r][e.c]) end end
-      local row = {}
-      for cc2 = c - 1, c + 4 do row[#row + 1] = string.format("(%d,%d)%02X:%s", cc2, r, g[r][cc2] or 0, tostring(eta[r * KEY_W + cc2])) end
-      log(string.format("%6d dbg kite eta here %s chasers %s row %s", frame, tostring(eta[here]), table.concat(cs, " "), table.concat(row, " ")))
-    end
-    if (eta[here] or math.huge) < 150 then
-      local d2 = bfs(g, c, r, function(c2, r2, n)
-        local k = r2 * KEY_W + c2
-        return not danger[k] and (eta[k] or math.huge) > n * FPT + 150
-      end, nearEnemy, cw)
-      if d2 then plan, dir, step = "kite", d2, nil end
-    end
-  end
   -- Off a $DD's track when not going anywhere (4-2: waiting or exploring
   -- on the track, the block pushed P1 into its own blast, twice).
   if ride.hasDD and (g[r][c] == 0x4D or g[r][c] == 0xCD)
@@ -3026,6 +2994,71 @@ local function think()
           and emu.read(P1 + P_BOMBS_LEFT, WRAM, false) > 0 then
         input.a = frame % 2 == 0
         throw.liftAt = frame
+      end
+    end
+  end
+  -- (Opt-in, SBM2_THROW=1: on the glove stages it lifted often but rarely
+  -- found a >= 40% landing, and held bombs cost bombing time: 3-5/7 glove
+  -- stages cleared against 6/7 without, one seed each.)
+  -- Throws at enemies (with the glove, not 5-8): a thrown bomb that lands
+  -- on an enemy's cell hurts it at once (C1:1F95 -> EnemyHit; at 1 HP it
+  -- dies: docs/mechanics.md 10b), 3 cells ahead, no fuse to wait out.
+  -- Holding: throw where an enemy is likely on the landing cell when the
+  -- bomb comes down (~12 frames, +3 to turn). Not holding: place a bomb
+  -- and lift it when a throw would likely hit after the lift (~30 frames).
+  if not finalForm2() and emu.read(0x1A, WRAM, false) ~= 0x57 and emu.read(P1 + 0xFE, WRAM, false) > 0
+      and #elist > 0 and os.getenv("SBM2_THROW") == "1" then
+    local holding = (r16(P1 + 0x52) & 0x6) ~= 0
+    local DV = { up = { 0, -1 }, down = { 0, 1 }, left = { -1, 0 }, right = { 1, 0 } }
+    local function chance(d, tl)
+      local v = DV[d]
+      local lc, lr = c + v[1] * 3, r + v[2] * 3
+      if not walkable(g, lc, lr) then return 0 end
+      local _, best = Enemies.killChance(samples, elist, { [lr * KEY_W + lc] = true }, tl - 4, tl + 6)
+      return best
+    end
+    local function bestDir(base)
+      local best, bd = 0, nil
+      for d in pairs(DV) do
+        local delay = (throw.face == d and throw.faceFrames >= 2) and 0 or 3
+        local p = chance(d, base + delay)
+        if p > best then best, bd = p, d end
+      end
+      return bd, best
+    end
+    for d in pairs(DV) do if input[d] then throw.face = d end end
+    if holding then
+      throw.eHeld = throw.eHeld or frame
+      input.a = true
+      local bd, best = bestDir(12)
+      if bd and best >= 0.4 then
+        if throw.face == bd and throw.faceFrames >= 2 then
+          input.a = nil
+          log(string.format("%6d throw %s at an enemy (chance %.2f) from (%d,%d)", frame, bd, best, c, r))
+          throw.at, throw.eHeld, throw.faceFrames = frame, nil, 0
+        elseif plan ~= "dodge" and plan ~= "flee" then
+          input = { a = true, [bd] = true }
+          if throw.face == bd then throw.faceFrames = throw.faceFrames + 1 else throw.face, throw.faceFrames = bd, 1 end
+        end
+      elseif frame - throw.eHeld > 60 and not danger[here] then
+        -- nothing came within reach: put it down ahead (it lands 3 out)
+        input.a = nil
+        log(string.format("%6d throw %s away (no target for 60 frames)", frame, tostring(throw.face)))
+        throw.at, throw.eHeld = frame, nil
+      end
+    else
+      throw.eHeld = nil
+      local onBomb = isBomb(g[r][c])
+      if onBomb and throw.eLift and frame - throw.eLift < 40 then
+        input = { a = frame % 2 == 0 }  -- release, press again: lift (edge)
+      elseif not onBomb and not danger[here] and not nearEnemy[here] and frame - throw.at > 40
+          and emu.read(P1 + P_BOMBS_LEFT, WRAM, false) > 0 and plan ~= "flee" and plan ~= "dodge" then
+        local bd, best = bestDir(30)
+        if bd and best >= 0.5 then
+          input.a = frame % 2 == 0
+          throw.eLift = frame
+          log(string.format("%6d lift for a throw %s (chance %.2f)", frame, bd, best))
+        end
       end
     end
   end

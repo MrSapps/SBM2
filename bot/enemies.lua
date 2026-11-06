@@ -20,11 +20,9 @@ return function(env)
   local SAFE_TYPES = { [0x30] = true, [0x31] = true, [0x16] = true, [0x24] = true, [0x25] = true,
     [0x26] = true, [0x27] = true, [0x28] = true }  -- C5:D850: never kill on contact
   -- Types that use the chaser once +$D0 bit 7 is set (and $89 always).
-  -- ($8C, 1-x, is one too: C1:844F sets +$D0 bits 6-7 on its first frame
-  -- and then runs ChaseUpdate. Listing it made 1-3 worse without rewinds,
-  -- 0/2 seeds and 12 deaths against 1/2 and 4: the chaser rollouts and
-  -- the escape rule are too pessimistic for a 0.5 px/f chaser. Not listed.)
-  local CHASERS = { [0x82] = true, [0x85] = true, [0x89] = true, [0x8A] = true, [0x91] = true,
+  -- ($8C, 1-x: C1:844F sets +$D0 bits 6-7 on its first frame and then
+  -- runs ChaseUpdate. Not in stages with magnets, see E.read.)
+  local CHASERS = { [0x82] = true, [0x85] = true, [0x89] = true, [0x8A] = true, [0x8C] = true, [0x91] = true,
     [0x93] = true, [0x97] = true }
   local DIRS = { { 0, -1 }, { 0, 1 }, { -1, 0 }, { 1, 0 } }  -- $0400 & 3: up, down, left, right
 
@@ -71,6 +69,9 @@ return function(env)
           e.killable = not e.gadget and typ ~= 0xDD and (hp & 0x7F) ~= 0x7F and (f4 & 0x40) == 0
           e.immune = (hp & 0x7F) == 0x7F
           e.chaser = CHASERS[typ] and ((rd8(base + 0xD0) & 0x80) ~= 0 or typ == 0x89)
+          -- ($8C as a chaser sent P1 fleeing across magnet lines in 1-3,
+          -- where the magnet caught it: not in stages with magnets)
+          if typ == 0x8C and MagLine and next(MagLine) then e.chaser = false end
           -- $8A/$97: x-ray chasers by the light switch $7E5AAC ($8A even, $97 odd).
           local light = r16(0x5AAC)
           if (typ == 0x8A or typ == 0x97) and light ~= 0xFFFF then

@@ -71,14 +71,25 @@ return function(env)
   local B = {}
 
   -- Call once per frame (endFrame): what the boss code ran this frame.
+  -- (Objects seen in either of the last two frames: some bosses run their
+  -- contact check every other frame only, BossFrameCount bit 0 in
+  -- BossContactP1; the list was empty every other frame and the bot
+  -- dithered under the 1-8 boss as its danger came and went.)
+  local prev = {}
   function B.frame()
-    last, cur = cur, {}
+    prev, last, cur = last, cur, {}
     tick = tick + 1
   end
 
   function B.read()
     local list = {}
-    for base, o in pairs(last) do
+    local both = {}
+    -- (1-8 and 3-8 only: elsewhere an object deleted last frame, a 5-8 ball,
+    -- stayed listed and the whole 5-8 fight was lost)
+    local stg = r16(0x1A) & 0xFF
+    if stg == 0x17 or stg == 0x37 then for base, o in pairs(prev) do both[base] = o end end
+    for base, o in pairs(last) do both[base] = o end
+    for base, o in pairs(both) do
       local x, y = s16(r16(base + 0x11)), s16(r16(base + 0x14))
       -- Speed over the last 16 frames (a blink adds $100 to x: skip those).
       local t = track[base]
@@ -100,8 +111,13 @@ return function(env)
         if old and math.abs(x - old[1]) < 48 and math.abs(y - old[2]) < 48 then
           vx, vy = (x - old[1]) / span, (y - old[2]) / span
         end
+        t.vx, t.vy = vx, vy
       else
+        -- (blink frame: the speed of the last real one; 0 made every
+        -- other frame's prediction stand still, the danger flickered and
+        -- P1 dithered under the 1-8 boss until caught)
         x = x - 0x100
+        vx, vy = t.vx or 0, t.vy or 0
       end
       local state = r16(base) | (rd8(base + 2) << 16)
       list[#list + 1] = { base = base, state = state, x = x, y = y, vx = vx, vy = vy, box = o.box, sense = o.sense, hurt = o.hurt }
@@ -207,8 +223,14 @@ return function(env)
       return b.x + dx / d * go, b.y + dy / d * go
     end
     local x, y = b.x + b.vx * t, b.y + b.vy * t
+    -- (bounds learnt from where it has been: only once they span an arena;
+    -- early on they turned 1-8's body back at x 153, and P1 waited at the
+    -- edge it then reached)
     local bb = bounds[b.base]
-    if bb then x, y = reflect(x, b.vx, bb[1], bb[2]), reflect(y, b.vy, bb[3], bb[4]) end
+    if bb then
+      if bb[2] - bb[1] >= 96 then x = reflect(x, b.vx, bb[1], bb[2]) end
+      if bb[4] - bb[3] >= 48 then y = reflect(y, b.vy, bb[3], bb[4]) end
+    end
     return x, y
   end
 
@@ -225,14 +247,21 @@ return function(env)
         local k = r * KEY_W + c
         local l = w[k]
         if not l then l = {}; w[k] = l end
+        -- (merge only with an overlapping window and keep the earlier start:
+        -- windows from a second pass, the 1-8 hands or 5-8's branches, come
+        -- after later ones from the first, and a [0, ..] one folded into a
+        -- [292, ..] one left the cell "safe" until 292)
+        local t0, t1 = math.max(0, t - slack), t + STEP + slack
         local last = l[#l]
-        if last and last[2] >= t - STEP - slack then last[2] = math.max(last[2], t + STEP + slack)
-        else l[#l + 1] = { math.max(0, t - slack), t + STEP + slack } end
+        if last and last[2] >= t0 - STEP and last[1] <= t1 then
+          last[1], last[2] = math.min(last[1], t0), math.max(last[2], t1)
+        else l[#l + 1] = { t0, t1 } end
       end
     end
   end
   function B.windows(list, horizon, margin, slack)
     local w = {}
+    local handsDone = false
     local STEP = 4
     for _, b in ipairs(list) do
       if b.box and b.x > -64 and b.x < 0x200 then
@@ -247,16 +276,37 @@ return function(env)
           if b.state == BALL then m = margin + (spread or 0) end
           mark(w, b, px, py, t, m, STEP, slack)
         end
-        -- 1-8 (stage $17): the arm tip (CC:A203, box +-16) shoots straight
-        -- down from the body at 4 px/f to 88 px below it, holds ~50 frames
-        -- and comes back (state CC:9BDD; it reaches the bottom in ~22
-        -- frames, faster than P1 walks out): the column under the body,
-        -- x +-16 down to +104, is contact danger all along its path.
-        if b.base == 0x1000 and (env.r16(0x1A) & 0xFF) == 0x17 then
-          local arm = { box = { -16, 17, 0, 105 } }
-          for t = 0, horizon, STEP do
-            local px, py = B.predict(b, t)
-            if px then mark(w, arm, px, py, t, margin, STEP, slack) end
+        -- 1-8 (stage $17): two hands (CC:A203, box +-16) hang at (+-28, +36)
+        -- from the body and shoot straight down to +124 at 4 px/f (state
+        -- CC:9BDD), faster than P1 walks out. Their objects are stored back
+        -- at the body's position each frame: only the contact check sees
+        -- where they are (port probe at CC:A569). Both columns, x +-12..44
+        -- and y +20..140, are contact danger along the body's path.
+        -- (A hand strikes when P1 is anywhere below within x 16..40 of its
+        -- side, sight boxes CC:9E9A/9EA2: entering a column is deadly. Inside
+        -- one already, a slice d px below the body is reached only after
+        -- (d - 36) / 4 frames: its window starts then, leaving a way out.)
+        -- (anchored on the body or a hand: the hands are stored at the
+        -- body's position, and in idle frames only they are listed)
+        if (b.base == 0x1000 or b.base == 0x1140 or b.base == 0x1240) and not handsDone
+            and (env.r16(0x1A) & 0xFF) == 0x17 then
+          handsDone = true
+          local hx = { { -44, -11 }, { 12, 45 } }
+          local p1x, p1y = r16(0x8010) - b.x, r16(0x8018) - b.y
+          for _, h in ipairs(hx) do
+            -- (staging the windows when P1 is inside let it bomb in a
+            -- one-cell corridor inside a column: always on)
+            local inside = false
+            for s0 = 20, 140, 16 do
+              local t0 = inside and math.max(0, math.floor((s0 - 36) / 4) - 2) or 0
+              local slice = { box = { h[1], h[2], s0, math.min(s0 + 16, 141) } }
+              for t = t0 - t0 % STEP, horizon, STEP do
+                local px, py = B.predict(b, t)
+                -- (no margin: the box is exact, and margin + cell padding
+                -- closed the next column too, so P1 dodged along its own)
+                if px then mark(w, slice, px, py, t, -6, STEP, slack) end
+              end
+            end
           end
         end
         -- 5-8 form 2: within 24 px of its waypoint it picks a random new one

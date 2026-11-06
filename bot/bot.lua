@@ -1484,8 +1484,8 @@ local function think()
         end
       end
       -- (on the exit cell this lock is the warp out, not a death)
-      log(string.format("%6d %s %s at px(%d,%d) enemies %s", frame,
-        r16(P1 + 0xA8) == r16(0x5D72) and "EXIT warp" or "DEATH", cause,
+      log(string.format("%6d %s %s lives %d at px(%d,%d) enemies %s", frame,
+        r16(P1 + 0xA8) == r16(0x5D72) and "EXIT warp" or "DEATH", cause, emu.read(0x1C6C, WRAM, false),
         r16(P1 + P_X), r16(P1 + P_Y), table.concat(es, " ")) .. string.format(" stats[E0..FF] %s after: %s",
         table.concat(st, " "), table.concat(recent, " | ")))
       writeFile(string.format("%s/death_%06d.png", OUT, frame), emu.takeScreenshot())
@@ -2407,8 +2407,24 @@ local function think()
     -- shift, and turning back each other frame is how the 5-8 body corners us.
     if nearEnemy[here] then throw.dodgeAt = frame end
     plan = "dodge"
-    dir = bfs(g, c, r, safeGoal(windows), nil, cw)
-      or bfs(g, c, r, function(cc, rr)
+    -- Keep the dodge goal for up to 40 frames while it stays safe and in
+    -- reach: chosen afresh each frame it flipped as predictions shifted,
+    -- and P1 dithered under the 1-8 boss until it was caught.
+    local sg = safeGoal(windows)
+    local dg = ride.dodgeGoal
+    if dg and frame < dg[3] and dg[1] * 1 == dg[1] and sg(dg[1], dg[2], 0) and not (dg[1] == c and dg[2] == r) then
+      dir = bfs(g, c, r, function(cc, rr) return cc == dg[1] and rr == dg[2] end, nil, cw)
+    end
+    if not dir then
+      local gk
+      dir = bfs(g, c, r, function(cc, rr, n)
+        local ok = sg(cc, rr, n)
+        if ok then gk = { cc, rr, frame + 40 } end
+        return ok
+      end, nil, cw)
+      ride.dodgeGoal = dir and gk or nil
+    end
+    dir = dir or bfs(g, c, r, function(cc, rr)
         return not nearEnemy[rr * KEY_W + cc] and not danger[rr * KEY_W + cc]
       end, nil, windows)
   elseif finalForm2() and emu.read(P1 + 0xFE, WRAM, false) > 0 and (function()

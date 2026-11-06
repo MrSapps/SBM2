@@ -56,7 +56,23 @@ def run_one(out, stage, frames, seed=0):
     return os.path.basename(d)
 
 
+_last_lives = [None]
+
+
+def repeat_death(line):
+    # A lock that lasts (1-8's restart after a death) was logged as more
+    # deaths: one only counts when lives went down (logs since 'lives N').
+    m = re.search(r' lives (\d+) ', line)
+    if not m:
+        return False
+    n = int(m.group(1))
+    rep = _last_lives[0] is not None and n >= _last_lives[0]
+    _last_lives[0] = n
+    return rep
+
+
 def result(out, stage):
+    _last_lives[0] = None
     d = os.path.join(out, stage)
     stages, deaths, rollbacks, end = [], 0, 0, '-'
     for log in sorted(glob.glob(os.path.join(d, 'bot_*.log'))):
@@ -66,7 +82,7 @@ def result(out, stage):
                 stages.append((int(m.group(1)), m.group(2)))
             elif ' END ' in line:
                 end = ' '.join(line.split()[2:])
-            elif ' DEATH ' in line and 'contact:C0' not in line:
+            elif ' DEATH ' in line and 'contact:C0' not in line and not repeat_death(line):
                 # (only in the benched stage, not the ones a run goes on to;
                 # contact:C0 was the exit warp in logs before the EXIT label)
                 # (any stage change: a game over goes back a stage)

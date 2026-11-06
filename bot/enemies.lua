@@ -60,7 +60,7 @@ return function(env)
           if (typ == 0x8A or typ == 0x97) and light ~= 0xFFFF then
             e.chaser = (light & 1) == (typ == 0x97 and 1 or 0)
           end
-          e.moving = (r16(base + 0xC0) & 0x8000) ~= 0
+          e.moving = (r16(base + 0xC0) & 0x8000) ~= 0 or typ == 0xB2
           local step = r16(base + 0x4A)
           if step >= 0x8000 then step = step - 0x10000 end
           if step == 0x80 then e.dr = 1 elseif step == -0x80 then e.dr = -1 else e.dr = 0 end
@@ -68,6 +68,12 @@ return function(env)
           e.tc, e.tr = cellOf(r16(base + 0x4C))
           e.wait = r16(base + 0x4E)
           local speed = r16(base + 0x46) + r16(base + 0x48) / 0x10000
+          -- $B2: $90's shot (1.5 px/f across, 2.0 up/down; its speed
+          -- fields read 0), always flying, gone at the first solid cell.
+          if typ == 0xB2 then
+            e.shot, e.moving = true, true
+            speed = e.dr ~= 0 and 2.0 or 1.5
+          end
           if speed <= 0.05 then speed = 0.5 end
           e.cpf = 16 / speed
           if e.moving then
@@ -120,6 +126,18 @@ return function(env)
       if #frees == 0 then return nil end
       local d = frees[math.random(#frees)]
       return d[1], d[2]
+    end
+    if e.shot then
+      -- straight on until a solid cell, then gone (no occupancy after)
+      local cpf, hf = e.cpf, e.cpf / 2
+      local enter = 0  -- (+$4C is 0 for a shot: step from its own cell)
+      t = hf
+      while t < horizon and (e.dc ~= 0 or e.dr ~= 0) and not blocked(g, c + e.dc, r + e.dr) do
+        path[#path + 1] = { r * KEY_W + c, enter, t + hf }
+        c, r, enter, t = c + e.dc, r + e.dr, t + hf, t + cpf
+      end
+      path[#path + 1] = { r * KEY_W + c, enter, t + hf }
+      return path
     end
     -- $86 (docs/enemies.md, C1:664B): rests 128 frames, then dashes at
     -- most 4 cells at 2.5 px/f, toward P1 when P1 is in sight (straight

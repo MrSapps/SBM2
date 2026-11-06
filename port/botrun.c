@@ -570,7 +570,16 @@ int main(int argc, char **argv)
             uint32_t sn;
             uint16_t *sl = load_words(side, &sn);
             if (!sl || sn > n || memcmp(sl, log, sn * 2)) { fprintf(stderr, "botrun: %s is not a prefix of the log\n", side); return 2; }
-            if (replay_words(sl, sn, side)) return 2;
+            /* A port state (a run saved by botrun) is restored as is: its
+             * sidecar may itself be stitched from timed runs and not replay
+             * from power-on in frame-step. */
+            size_t pn;
+            char *pd = read_file(rs, &pn);
+            if (pd && pn >= 8 && !memcmp(pd, MAGIC, 8)) {
+                if (!restore_state(pd, pn)) { fprintf(stderr, "botrun: %s is a port state of another build\n", rs); return 2; }
+                printf("start: port state %s, frame %u stage %02X\n", rs, m.frame, m.wram[0x1A]);
+            } else if (replay_words(sl, sn, side)) return 2;
+            free(pd);
             skip = sn;
         }
         m.framestep = 0;

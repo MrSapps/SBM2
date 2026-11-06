@@ -1110,6 +1110,36 @@ local THROW_PATH = {
 THROW_PATH.up, THROW_PATH.right = {}, {}
 for i, p in ipairs(THROW_PATH.down) do THROW_PATH.up[i] = { 0, -32 - p[2] } end
 for i, p in ipairs(THROW_PATH.left) do THROW_PATH.right[i] = { -p[1], p[2] } end
+-- 5-8 form 2 aim: a BFS goal for cells from which a throw, made on arrival
+-- (n steps of FPT frames, plus a lift and a turn), would meet the body where
+-- it is predicted then. Without this P1 only threw when the body happened to
+-- pass (9 throws, 2-5 hits per 9000 frames). Cell centres: px (c*16, r*16+7).
+-- A predicted form 2 position is sure while the body is still on its way
+-- to the waypoint: within 24 px of it, it picks a random new one (7.4).
+function Boss.sure(body, px, py)
+  local tg = Boss.target[body.base]
+  return not tg or math.abs(px - tg[1]) > 24 or math.abs(py - tg[2]) > 24
+end
+function Boss.aimGoal(body, avoid)
+  return function(cc, rr, n)
+    if avoid[rr * KEY_W + cc] then return false end
+    local t0 = n * FPT + 6
+    if t0 > 160 then return false end
+    local cx, cy = cc * 16, rr * 16 + 7
+    -- not where the body is on arrival (the throw is made standing there)
+    local bx0, by0 = Boss.predict(body, t0)
+    if math.abs(cx - bx0) < 36 and math.abs(cy - by0) < 36 then return false end
+    for _, path in pairs(THROW_PATH) do
+      for k = 4, #path do
+        local o = path[k]
+        local px, py = Boss.predict(body, t0 + k)
+        if not Boss.sure(body, px, py) then break end
+        if math.abs(cx + o[1] - px) <= 16 and math.abs(cy + o[2] - py) <= 16 then return true end
+      end
+    end
+    return false
+  end
+end
 local function finalForm2()
   return emu.read(0x1A, WRAM, false) == 0x57 and emu.read(0x1002, WRAM, false) == 0xCC and r16(0x1000) >= 0xD0B8
 end
@@ -1698,6 +1728,9 @@ local function think()
     -- got away goes off anyway, to free the bomb.
     remoteSince = remoteSince or frame
     if frame - remoteSince > 300 and not ride.f1Home then remoteWorth = true end
+    -- 5-8 form 2: flames don't hurt it, and a missed throw lands as a remote
+    -- bomb that blocks the next lift: set it off as soon as we are clear.
+    if finalForm2() then remoteWorth = true end
     -- Not on a spring pad (the one free frame after a landing: the press
     -- did nothing and 3-6 went round its pads for good) or locked.
     -- (5-8's slam: a ball near P1 is no reason to wait, the body rises)
@@ -1707,6 +1740,17 @@ local function think()
       nextDetonate = frame + 20
       log(string.format("%6d detonate%s", frame, emu.read(0x1A, WRAM, false) == 0x57 and
         string.format(" (body %02X%04X at %d,%d hp %d)", emu.read(0x1002, WRAM, false), r16(0x1000), r16(0x1011), r16(0x1014), r16(0x1020)) or ""))
+      if os.getenv("SBM2_DBG") then
+        local bs = {}
+        for _, b in ipairs(lastBombs) do bs[#bs + 1] = string.format("(%d,%d)t%d%s", b[1], b[2], b[3], b[5] and "r" or "") end
+        log(string.format("%6d dbg remote bombs %s; P1 (%d,%d) f52 %04X", frame, table.concat(bs, " "), c, r, r16(P1 + 0x52)))
+      end
+    end
+    -- Set off in the last few frames (it goes off ~8 frames after the
+    -- press): its blast is danger now. (5-8 form 2: the aim plan walked P1
+    -- back into a missed throw's blast after the press, 40 rollbacks.)
+    if frame < nextDetonate - 4 then
+      for k in pairs(remoteCells) do danger[k] = true end
     end
   else
     remoteSince = nil
@@ -2154,6 +2198,28 @@ local function think()
       or bfs(g, c, r, function(cc, rr)
         return not nearEnemy[rr * KEY_W + cc] and not danger[rr * KEY_W + cc]
       end, nil, windows)
+  elseif finalForm2() and emu.read(P1 + 0xFE, WRAM, false) > 0 and (function()
+      -- Form 2 with the glove: walk to a throw spot (Boss.aimGoal).
+      local body
+      for _, b in ipairs(bosses) do if b.base == 0x1000 and not b.hurt and b.state ~= 0xCCD2E7 then body = b end end
+      if not body then return false end
+      local avoid = setmetatable({}, { __index = function(_, k) return nearEnemy[k] or danger[k] end })
+      local d1, n = bfs(g, c, r, Boss.aimGoal(body, avoid), nearEnemy, cw)
+      if not n then
+        -- No sure shot yet: wait inside the waypoints' box (x 64..208,
+        -- y 64..200, cells 4..13 x 4..12), not in the body's way, rather
+        -- than in a corner it never comes near.
+        d1, n = bfs(g, c, r, function(cc, rr, m)
+          if avoid[rr * KEY_W + cc] or cc < 5 or cc > 12 or rr < 5 or rr > 11 then return false end
+          local bx, by = Boss.predict(body, m * FPT)
+          return math.abs(cc * 16 - bx) >= 48 or math.abs(rr * 16 + 7 - by) >= 48
+        end, nearEnemy, cw)
+        if not n then return false end
+      end
+      dir = d1
+      return true
+    end)() then
+    plan = "aim"
   else
     -- Is bombing here useful (a soft block or enemy in reach)?
     -- Is bombing at (cc,rr) useful? "obj" (soft block, switch, panel),
@@ -2412,7 +2478,10 @@ local function think()
       if why == "enemy" and not ambush then ambushStart = true end
       -- Bomb placement is edge-triggered: press on alternate frames.
       input.a = frame % 2 == 0
-    elseif remoteCells[here] and (remoteWorth or not haveBomb) then
+    elseif remoteCells[here] and (remoteWorth or not haveBomb)
+        and not (finalForm2() and (r16(P1 + 0x52) & 6) ~= 0) then
+      -- (holding a bomb, B sets nothing off: the remote one waits; walking
+      -- out of its blast and back for 500 frames was 5-8 form 2's stall)
       plan = "clear"
       dir = bfs(g, c, r, function(cc, rr) return not remoteCells[rr * KEY_W + cc] and not windows[rr * KEY_W + cc] end,
         nearEnemy, cw)
@@ -2679,7 +2748,11 @@ local function think()
     local bx, by = r16(0x1011), r16(0x1014)
     local DV = { up = { 0, -1 }, down = { 0, 1 }, left = { -1, 0 }, right = { 1, 0 } }
     for d in pairs(DV) do if input[d] then throw.face = d end end
-    if holding then
+    -- (hurt, CC:D2E7: a hit then does nothing; hold the bomb for later)
+    if body and (body.hurt or body.state == 0xCCD2E7) then body = nil end
+    if holding and not body then
+      input.a = true
+    elseif holding then
       input.a = true
       -- A throw hits if the bomb is inside the body's +-24 box (CC:97E8)
       -- on some frame of its flight; turning first costs ~2 frames.
@@ -2688,7 +2761,10 @@ local function think()
         local delay = (throw.face == d and throw.faceFrames >= 2) and 0 or 3
         for k, o in ipairs(path) do
           local px, py = bx, by
-          if body then px, py = Boss.predict(body, k + delay) end
+          if body then
+            px, py = Boss.predict(body, k + delay)
+            if not Boss.sure(body, px, py) then break end
+          end
           if math.abs(x + o[1] - px) <= 22 and math.abs(y + o[2] - py) <= 22 then want = d; break end
         end
         if want then break end
@@ -2717,6 +2793,7 @@ local function think()
         -- Our bomb is here: release, then press again to lift it (edge).
         input = { a = frame % 2 == 0 }
       elseif not onBomb and dist >= 40 and dist <= 140 and not danger[here] and not nearEnemy[here]
+          and not next(remoteCells)
           and emu.read(P1 + P_BOMBS_LEFT, WRAM, false) > 0 then
         input.a = frame % 2 == 0
         throw.liftAt = frame

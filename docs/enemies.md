@@ -432,6 +432,15 @@ locked. `D0B8` sets HP = 6. After 224 frames the fight resumes in `D139`
   sweep and slams; P1 then runs 3 cells along row 12 (below the slam's
   box) and the remote blast reaches the sense block at row 10. A few
   hits per 9000 frames so far; ball deaths off the bomb are the limit.
+* **Form 2 aim.** The bot walks to a cell from which a throw made on
+  arrival meets the body's predicted position (`Boss.aimGoal`), and only
+  trusts a prediction until the body is within 24 px of its waypoint (it
+  then picks a random new one). With no such cell it waits inside the
+  waypoints' box, away from the body. No throws during the hurt state
+  (D2E7). With the remote, a missed throw lands as a remote bomb: the bot
+  sets it off before lifting the next one (B does nothing while holding).
+  Port scenario: 6/6 seeds beat form 2 in 5600-7900 frames; the whole
+  5-8 fight in 27-35k frames (the 10:00 timer is 36000).
 * `Boss.read` (bot/boss.lua) lists objects whose contact code ran last
   frame; the first frame of a slam it lists none.
 * The stage timer is 10:00 here (6:00 in 2-6).

@@ -2120,7 +2120,7 @@ local function think()
   -- every frame: for escapes they are chasers already. 4-6: 12 deaths to
   -- a $93 after bombing for it and backing into a pocket.)
   for _, e in ipairs(elist) do
-    if e.harmful and not e.shot and (e.chaser or e.type == 0x93 or e.type == 0x85) then chasers[#chasers + 1] = e end
+    if e.harmful and not e.shot and (e.chaser or e.type == 0x93 or e.type == 0x85 or e.type == 0x8C) then chasers[#chasers + 1] = e end
   end
   if #chasers > 0 then
     ride.chaserEta = function(bc, br, bt)

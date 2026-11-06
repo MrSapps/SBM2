@@ -293,6 +293,37 @@ local function readBombs(g)
       byCell[r * KEY_W + c] = b
     end
   end
+  -- Magnets (docs/mechanics.md 8, list $7E5828: +2 cell, +8 dir 0/2/4/6 =
+  -- up/right/down/left): each scans 4 cells ahead to the first tile with bit
+  -- 6 or 7 set and pulls a ticking bomb there (or P1 on the line) up to the
+  -- cell next to it. A bomb so caught is modelled where it will end up;
+  -- the scanned cells are kept in MagLine (no place to stop: 1-3,
+  -- P1 waited on one and was pulled into a blast, 18 times).
+  MagLine = {}
+  local MD = { [0] = { 0, -1 }, [2] = { 1, 0 }, [4] = { 0, 1 }, [6] = { -1, 0 } }
+  for i = 0, 3 do
+    local m = 0x5828 + i * 0x40
+    local cell, dir = r16(m + 2), r16(m + 8)
+    local mc, mr = (cell & 0x7F) // 2, cell >> 7
+    local t = g[mr] and g[mr][mc]
+    local d = MD[dir]
+    if d and (t == 0xD2 or t == 0xD5 or t == 0xE0 or t == 0xE1) then
+      for k = 1, 4 do
+        local cc, rr = mc + d[1] * k, mr + d[2] * k
+        local tt = g[rr] and g[rr][cc]
+        if not tt then break end
+        local b = byCell[rr * KEY_W + cc]
+        if b and b[3] >= 6 and k > 1 then
+          byCell[rr * KEY_W + cc] = nil
+          b[1], b[2] = mc + d[1], mr + d[2]
+          byCell[b[2] * KEY_W + b[1]] = b
+          break
+        end
+        if (tt & 0xC0) ~= 0 then break end
+        MagLine[rr * KEY_W + cc] = true
+      end
+    end
+  end
   -- 2-8 boss drops (docs/enemies.md 6): a bomb falls at 2 px/f (state
   -- CC:B189) onto the marker under it (CC:B2F1, same x) and explodes on
   -- landing with range 10. Each marker is a bomb due when the faller gets
@@ -1802,7 +1833,7 @@ local function think()
   do
     local a8 = r16(P1 + 0xA8)
     local ak = (a8 // 0x80) * KEY_W + (a8 % 0x80) // 2
-    if ak ~= here and danger[ak] then danger[here] = true end
+    if ak ~= here and danger[ak] then danger[here] = true; ride.a8Hot = true else ride.a8Hot = nil end
   end
   -- Remote bombs: cells their blasts would cover, and whether setting them
   -- off now would hit anything worth it.
@@ -2113,6 +2144,7 @@ local function think()
       local k = rr * KEY_W + cc
       local t = (t0 or 0) + n * FPT
       if ride.hasDD and g[rr][cc] == 0x4D then return false end
+      if MagLine and MagLine[k] then return false end
       return not w[k] and not hit(eWin, k, t - FPT, t + 90)
     end
   end
@@ -3063,6 +3095,16 @@ local function think()
         end
       end
     end
+  end
+  -- On a cell boundary with the game's cell (+$A8) in a blast and P1's own
+  -- tile safe: the flee goal is "here", so nothing moved P1; walk it to the
+  -- centre of its tile (1-3: 18 deaths at y 152/153 between rows 18/19).
+  if ride.a8Hot and not windows[here] then
+    local cx, cy = tileCentre(c, r)
+    cy = cy - 1  -- (rows are walked at r*16+7)
+    input.up, input.down, input.left, input.right = nil, nil, nil, nil
+    if y > cy + 1 then input.up = true elseif y < cy - 1 then input.down = true end
+    if x > cx + 1 then input.left = true elseif x < cx - 1 then input.right = true end
   end
   -- Last guard: never step into fire. A pressed direction whose next
   -- position (2 px on) is in a cell burning or blasting within 6 frames,

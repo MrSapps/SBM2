@@ -20,6 +20,10 @@ return function(env)
   local SAFE_TYPES = { [0x30] = true, [0x31] = true, [0x16] = true, [0x24] = true, [0x25] = true,
     [0x26] = true, [0x27] = true, [0x28] = true }  -- C5:D850: never kill on contact
   -- Types that use the chaser once +$D0 bit 7 is set (and $89 always).
+  -- ($8C, 1-x, is one too: C1:844F sets +$D0 bits 6-7 on its first frame
+  -- and then runs ChaseUpdate. Listing it made 1-3 worse without rewinds,
+  -- 0/2 seeds and 12 deaths against 1/2 and 4: the chaser rollouts and
+  -- the escape rule are too pessimistic for a 0.5 px/f chaser. Not listed.)
   local CHASERS = { [0x82] = true, [0x85] = true, [0x89] = true, [0x8A] = true, [0x91] = true,
     [0x93] = true, [0x97] = true }
   local DIRS = { { 0, -1 }, { 0, 1 }, { -1, 0 }, { 1, 0 } }  -- $0400 & 3: up, down, left, right

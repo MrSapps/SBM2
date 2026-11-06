@@ -1769,6 +1769,12 @@ local function think()
       if win[1] <= FPT * 1.5 and win[2] >= 0 then nearEnemy[k] = true; break end
     end
   end
+  -- 1-8: the body's lane (rows 2-7, its box from y 32 to 120) counts as
+  -- enemy-held: routes keep out of it and P1 caught in it dodges out (it
+  -- went up there by dodges and seeks, and the hands got it).
+  if emu.read(0x1A, WRAM, false) == 0x17 then
+    for rr = 2, 7 do for cc = 0, MAP_W - 1 do nearEnemy[rr * KEY_W + cc] = true end end
+  end
   local panelTodo, panelDone = panels()
   local heartNow = heartCells()
   -- Mode 1 panels (worlds 3-5) flip on every blast, so which spots to bomb
@@ -2154,12 +2160,17 @@ local function think()
   -- the map, a track cell is never a place to stop.
   ride.hasDD = false
   for _, e in ipairs(elist) do if e.type == 0xDD then ride.hasDD = true end end
+  stageNow17 = emu.read(0x1A, WRAM, false) == 0x17
   local function safeGoal(w, t0)
     return function(cc, rr, n)
       local k = rr * KEY_W + cc
       local t = (t0 or 0) + n * FPT
       if ride.hasDD and g[rr][cc] == 0x4D then return false end
       if MagLine and MagLine[k] then return false end
+      -- 1-8: the body sweeps sideways at y 64 with a box down to +56 (rows
+      -- 2-7): no place to stop up there; its sense grid reaches row 6, so
+      -- bombs from row 8 down still hurt it (P1 was caught at (10,3)).
+      if stageNow17 and rr <= 7 then return false end
       return not w[k] and not hit(eWin, k, t - FPT, t + 90)
     end
   end

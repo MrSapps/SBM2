@@ -69,7 +69,8 @@ def result(out, stage):
             elif ' DEATH ' in line and 'contact:C0' not in line:
                 # (only in the benched stage, not the ones a run goes on to;
                 # contact:C0 was the exit warp in logs before the EXIT label)
-                if not any(int(s, 16) > int(stage[:2], 16) for _, s in stages):
+                # (any stage change: a game over goes back a stage)
+                if not any(s != stage[:2].upper() for _, s in stages):
                     deaths += 1
             elif 'rollback to' in line:
                 rollbacks += 1

@@ -2055,10 +2055,16 @@ local function think()
     end
   end
   local plan, dir
+  -- A $DD track block pushes P1 along its $4D track (4-2: P1 waited in a
+  -- pocket on the track and was pushed into its own blast): with one on
+  -- the map, a track cell is never a place to stop.
+  ride.hasDD = false
+  for _, e in ipairs(elist) do if e.type == 0xDD then ride.hasDD = true end end
   local function safeGoal(w, t0)
     return function(cc, rr, n)
       local k = rr * KEY_W + cc
       local t = (t0 or 0) + n * FPT
+      if ride.hasDD and g[rr][cc] == 0x4D then return false end
       return not w[k] and not hit(eWin, k, t - FPT, t + 90)
     end
   end
@@ -2783,6 +2789,13 @@ local function think()
     end
   end
 
+  -- Off a $DD's track when not going anywhere (4-2: waiting or exploring
+  -- on the track, the block pushed P1 into its own blast, twice).
+  if ride.hasDD and (g[r][c] == 0x4D or g[r][c] == 0xCD)
+      and (not dir or plan == "wait" or plan == "explore") then
+    local d2 = bfs(g, c, r, safeGoal(windows), nearEnemy, cw)
+    if d2 then plan, dir, step = "offtrack", d2, nil end
+  end
   -- A route over a platform lane starts here: wait on the $36 for the ride.
   if dir == "ride" then
     plan, dir, step = "ride", nil, nil

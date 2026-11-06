@@ -157,6 +157,20 @@ test("1-8 hands: both columns below the body are danger, the middle is not", fun
   check(firstWindow(w, 7, 10) == nil, "the gap under the body stays clear")
 end)
 
+test("1-8 body path: 1 px/f while +$34 runs, 50 frames still, turns, 128 frames", function()
+  local B = bossModule(0x17)
+  E.poke(0x1A, 0x17)
+  bossObj(0x1000, 0xCC9ABA, 100, 64)
+  E.poke(0x100F, 0x00)          -- facing right
+  E.poke16(0x1034, 20)          -- 20 frames of this leg left
+  check(B.sunX(10) == 110, "moving right: 110 after 10, got " .. tostring(B.sunX(10)))
+  check(B.sunX(40) == 120, "then standing: 120 after 40, got " .. tostring(B.sunX(40)))
+  check(B.sunX(80) == 110, "then back left: 110 after 80, got " .. tostring(B.sunX(80)))
+  bossObj(0x1000, 0xCC9BDD, 100, 64)
+  E.poke16(0x1036, 30)          -- striking: frozen 30 frames, then resumes
+  check(B.sunX(30) == 100 and B.sunX(35) == 105, "strike freezes it, then the leg goes on")
+end)
+
 -- Enemy model (bot/enemies.lua) ---------------------------------------------
 
 local function enemyModule(text)

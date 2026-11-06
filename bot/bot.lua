@@ -1697,6 +1697,9 @@ local function think()
     end
   end
   local bosses = Boss.read()
+  if os.getenv("SBM2_DBG") and emu.read(0x1A, WRAM, false) == 0x17 and frame % 60 == 0 then
+    log(string.format("%6d dbg sunX now %s +150 %s", frame, tostring(Boss.sunX(0)), tostring(Boss.sunX(150))))
+  end
   bossesNow = bosses
   local bossNow, bossSense, bossEat = {}, {}, {}
   if #bosses > 0 then
@@ -3002,6 +3005,62 @@ local function think()
     end
   end
 
+  -- 1-8: the only safe place under the body is the gap between its hands
+  -- (+-11 px of its x, below the lane), and it slides with the body at
+  -- 0.3-0.7 px/f: route steps of a cell can't follow it. Shadow it in the
+  -- open rows (8, 10, 12), steering x onto the body's every frame.
+  -- Attack from there: set a bomb where P1 stands when the body, by its
+  -- path (it turns at the arena edges), will be 14-36 px from that column
+  -- when it blows (its sense grid is +-32: a hit), then leave the bomb's
+  -- row at the next other even column (2 rows down, or up from row 12) and
+  -- keep shadowing 8 px off the body on the side away from the column.
+  if emu.read(0x1A, WRAM, false) == 0x17 then
+    local body
+    for _, b in ipairs(bosses) do if b.base == 0x1000 or b.base == 0x1140 then body = body or b end end
+    local sb = ride.sb
+    if sb and frame - sb.at > NEW_FUSE + 60 then ride.sb, sb = nil, nil end
+    local ox = origin()
+    local function colX(cc) return cc * 16 + 8 - ox end
+    if body and r >= 8 and math.abs(x - body.x) <= 18 and (sb or (plan ~= "flee" and plan ~= "bomb")) then
+      local tx = (Boss.predict(body, 4) or body.x)
+      -- (with a bomb out: hold the even column 2 over, on the body's side;
+      -- the body drifts toward P1 and so over the bomb's sense reach,
+      -- 32 px off its column, with P1 outside the column)
+      if sb then tx = tx + ((body.x >= colX(sb.c)) and 8 or -8) end
+      -- (still in the bomb's row: make for the nearest even column off the
+      -- bomb's, on the body's side, to go down or up there; following a
+      -- body that had stopped kept P1 on an odd column in the row)
+      if sb and r == sb.r then
+        local side = (body.x >= colX(sb.c)) and 1 or -1
+        local ec = sb.c + 2 * side
+        if math.abs(c - sb.c) >= 2 and c % 2 == 0 then ec = c end
+        -- (only inside the gap: 32 px off the body is a hand's zone)
+        -- (or anywhere while it is hurt, CC:9CA7: the hands hang at rest)
+        local hurt = (r16(0x1000) | (emu.read(0x1002, WRAM, false) << 16)) == 0xCC9CA7
+        if hurt or math.abs(colX(ec) - body.x) <= 10 then tx = colX(ec) end
+      end
+      if not sb and r % 2 == 0 and r - RANGE <= 6 and c % 2 == 0 and emu.read(P1 + P_BOMBS_LEFT, WRAM, false) > 0 and math.abs(x - colX(c)) <= 3 then
+        local bx = Boss.predict(body, NEW_FUSE)
+        if bx and math.abs(bx - colX(c)) >= 14 and math.abs(bx - colX(c)) <= 36 then
+          ride.sb = { c = c, r = r, at = frame }
+          sb = ride.sb
+          input.a = true
+          log(string.format("%6d shadow bomb at (%d,%d), body at x %.0f", frame, c, r, body.x))
+        end
+      end
+      local nd, vd
+      if sb and r == sb.r and c ~= sb.c and c % 2 == 0 and math.abs(x - colX(c)) <= 3 then
+        vd = (r < 12) and "down" or "up"  -- leave the bomb's row here
+      end
+      if not vd then
+        if x < tx - 3 then nd = "right" elseif x > tx + 3 then nd = "left" end
+      end
+      if r % 2 == 0 or vd or sb then
+        plan, dir, step = "shadow", nil, nil
+        ride.shadowDir, ride.shadowV = nd, vd
+      end
+    end
+  end
   -- Off a $DD's track when not going anywhere (4-2: waiting or exploring
   -- on the track, the block pushed P1 into its own blast, twice).
   if ride.hasDD and (g[r][c] == 0x4D or g[r][c] == 0xCD)
@@ -3220,6 +3279,20 @@ local function think()
     input.up, input.down, input.left, input.right = nil, nil, nil, nil
     if y > cy + 1 then input.up = true elseif y < cy - 1 then input.down = true end
     if x > cx + 1 then input.left = true elseif x < cx - 1 then input.right = true end
+  end
+  if plan == "shadow" then
+    input = { a = input.a, b = input.b }
+    if ride.shadowV then
+      input[ride.shadowV] = true
+    else
+      if ride.shadowDir then input[ride.shadowDir] = true end
+      local _, cy = tileCentre(c, r)
+      cy = cy - 1  -- (rows are walked at r*16+7)
+      if r % 2 == 1 then
+        input.down = (ride.sb and ride.sb.r < r) or nil
+        input.up = not input.down or nil
+      elseif y > cy + 1 then input.up = true elseif y < cy - 1 then input.down = true end
+    end
   end
   -- Last guard: never step into fire. A pressed direction whose next
   -- position (2 px on) is in a cell burning or blasting within 6 frames,

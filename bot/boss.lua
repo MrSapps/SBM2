@@ -205,7 +205,39 @@ return function(env)
     end
     return dx
   end
+  -- 1-8 body (stage $17), from its code (CC:9ABA/9B54/9BDD): it moves at
+  -- 1 px/f in its facing (+$0F bit 7: left) while +$34 counts down, then
+  -- stands 50 frames (+$3A), turns, and moves 128 frames; a strike (9BDD,
+  -- +$36 frames) freezes it and then resumes. So x swings over 64..192 on a
+  -- fixed beat, whatever P1 does (strikes aside). Exact x t frames on.
+  function B.sunX(t)
+    local st = r16(0x1000) | (rd8(0x1002) << 16)
+    local x = s16(r16(0x1011))
+    if x >= 0x100 then x = x - 0x100 end
+    local dir = (rd8(0x100F) & 0x80) ~= 0 and -1 or 1
+    local move, pause, hold = r16(0x1034), 0, 0
+    if st == 0xCC9B54 then move, pause = 0, r16(0x103A)
+    elseif st == 0xCC9BDD then hold = r16(0x1036)
+    elseif st ~= 0xCC9ABA then return nil end
+    local left = t
+    local take = math.min(left, hold); left = left - take
+    while left > 0 do
+      if move > 0 then
+        take = math.min(left, move); x = x + dir * take; move = move - take; left = left - take
+        if move == 0 and pause == 0 then pause = 50 end
+      elseif pause > 0 then
+        take = math.min(left, pause); pause = pause - take; left = left - take
+        if pause == 0 then dir, move = -dir, 128 end
+      else pause = 50 end
+    end
+    return x
+  end
+
   function B.predict(b, t)
+    if (b.base == 0x1000 or b.base == 0x1140 or b.base == 0x1240) and (r16(0x1A) & 0xFF) == 0x17 then
+      local sx = B.sunX(t)
+      if sx then return sx, b.y end
+    end
     if b.state == SLAM then return b.x, b.y + slamDy(r16(b.base + 0x36), t) end
     -- 5-8 form 2 hurt (FinalBossForm2Hurt CC:D2E7, 63 frames): it stays put
     -- (the waypoint prediction had it fly on, and dodges walked into it)
@@ -318,7 +350,9 @@ return function(env)
             -- (staging the windows when P1 is inside let it bomb in a
             -- one-cell corridor inside a column: always on)
             local inside = false
-            for s0 = 20, 140, 16 do
+            -- (body hurt, CC:9CA7: no strikes, the hands hang at rest +36)
+            local hurtNow = (r16(0x1000) | (rd8(0x1002) << 16)) == 0xCC9CA7
+            for s0 = 20, hurtNow and 52 or 140, 16 do
               local t0 = inside and math.max(0, math.floor((s0 - 36) / 4) - 2) or 0
               local slice = { box = { h[1], h[2], s0, math.min(s0 + 16, 141) } }
               for t = t0 - t0 % STEP, horizon, STEP do

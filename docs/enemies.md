@@ -298,6 +298,32 @@ wakes them was not traced.
   the water column and on the islands, which are reached only by spring
   pads.
 
+## 6a. 1-8 boss (stage `$17`)
+
+From the code (CC:9A85-9CA7) and port probes:
+
+* **Path.** `CC:9ABA` moves the body at **1 px/f** (`BossMoveXFacing`,
+  `$40` = `$0100`) in its facing (`+$0F` bit 7: left) while `+$34` counts
+  down (64 after the intro, then 128). `CC:9B54` stands still 50 frames
+  (`+$3A`), flips the facing and sets `+$34` = 128. So x swings over
+  64..192 on a fixed beat. y stays 64.
+* **Strike.** In either state, once the cooldown `+$38` is 0 and P1 is in
+  a sight box (x -40..-16 or +16..+40, y 0..224 below, CC:9E9A/9EA2), it
+  goes to `CC:9BDD` for `$C0` frames (`+$36`): the hand on that side
+  (`CC:A203`, box +-16) shoots from (+-28, +36) straight down to +124 at
+  4 px/f. Then `+$38` = `$80` and the path resumes. The hand objects are
+  stored back at the body's position after each frame; only the contact
+  check (CC:A538/A569, X = the object) sees where they are.
+* **Hurt** (`CC:9CA7`): the body stays put; its own box (x +-32, y
+  -32..+56) is checked, the hands hang at rest.
+* Contact checks run every other frame (`BossFrameCount` bit 0).
+* **The bot** (no rewinds): shadows the gap between the hands (+-11 px of
+  the body's x, rows 8/10/12), sets a bomb where it stands when the
+  predicted x (`Boss.sunX`) 150 frames on is 14-36 px off that column, then
+  leaves the bomb's row at an even column inside the gap (anywhere while
+  the body is hurt). 2/2 seeds from the 1-8 start on one life, 0 deaths,
+  frame 6691.
+
 ## 6b. 2-8 boss (stage `$27`): bomb drops
 
 **[port probe]** (`build/lib/stage_27.mss`, P1 idle with endless hearts;

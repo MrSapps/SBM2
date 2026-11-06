@@ -379,7 +379,9 @@ local BLAST_ENDS = { [0x04] = true, [0x0B] = true, [0x26] = true }
 -- died two cells past a soft block the model said stopped it). pierce =
 -- nil means P1's own kind (a bomb P1 would place).
 local PIERCE_TYPES = { [0x02] = true, [0x04] = true, [0x0B] = true }
-local function blastCells(g, c, r, p, pierce)
+local barrelDepth  -- (set while expanding a barrel: its bursts don't recurse)
+local blastCells
+function blastCells(g, c, r, p, pierce)
   if pierce == nil then pierce = (emu.read(P1 + 0xF3, WRAM, false) & 4) ~= 0 end
   local cells = { { c, r } }
   for _, dir in ipairs(DIRS) do
@@ -391,24 +393,22 @@ local function blastCells(g, c, r, p, pierce)
         cells[#cells + 1] = { cc, rr, dir }
       elseif t >= 0x80 and t ~= GATE_OPEN then
         if BLAST_HITS[t] then cells[#cells + 1] = { cc, rr, dir } end
-        if t == BARREL then
-          -- BarrelExplode C1:26AA: range-1 blasts on the barrel and on the
-          -- cells 2 away (not where the tile has bit 6 set).
-          cells[#cells + 1] = { cc, rr }
+        if t == BARREL and not barrelDepth then
+          -- BarrelExplode C1:26AA: blasts on the barrel and on the cells 2
+          -- away (not where the tile has bit 6 set), each a bomb with +0 =
+          -- $8024 (pierce, bit 2) and +7 = 1: range 2 through soft blocks
+          -- (C1:275F). (The model had range 1, stopped by blocks: 1-5 died
+          -- 2 cells from a burst, every continue alike.)
+          barrelDepth = true
+          local centres = { { cc, rr } }
           for _, d in ipairs(DIRS) do
             local bc, br = cc + 2 * d[1], rr + 2 * d[2]
-            local centres = { { cc, rr } }
-            if g[br] and g[br][bc] and (g[br][bc] & 0x40) == 0 then centres[2] = { bc, br } end
-            for _, ctr in ipairs(centres) do
-              for _, d2 in ipairs(DIRS) do
-                local nc, nr = ctr[1] + d2[1], ctr[2] + d2[2]
-                if g[nr] and g[nr][nc] and (g[nr][nc] < 0x80 or BLAST_HITS[g[nr][nc]]) then
-                  cells[#cells + 1] = { nc, nr }
-                end
-              end
-              cells[#cells + 1] = ctr
-            end
+            if g[br] and g[br][bc] and (g[br][bc] & 0x40) == 0 then centres[#centres + 1] = { bc, br } end
           end
+          for _, ctr in ipairs(centres) do
+            for _, cell in ipairs(blastCells(g, ctr[1], ctr[2], 2, true)) do cells[#cells + 1] = { cell[1], cell[2] } end
+          end
+          barrelDepth = nil
         end
         break
       end
@@ -1231,7 +1231,9 @@ local SEED = tonumber(os.getenv("SBM2_SEED") or "0")
 -- SBM2_NOREWIND=1: play as a human would: no rollbacks after deaths or
 -- stalls, no ambush retries (no savestate is ever loaded).
 NOREWIND = os.getenv("SBM2_NOREWIND") == "1"
-math.randomseed(SEED)
+-- (+ the segment's start frame: after a game over drive.py continues from
+-- the same stage state, and the same choices lost the same way 50 times)
+math.randomseed(SEED + FRAME0 * 7919)
 local function think()
   input = {}
   -- Locked ($52 bit 0): dying, on the exit, warping, a boss's freeze, ...

@@ -66,8 +66,11 @@ def result(out, stage):
                 stages.append((int(m.group(1)), m.group(2)))
             elif ' END ' in line:
                 end = ' '.join(line.split()[2:])
-            elif 'DEATH' in line:
-                deaths += 1
+            elif ' DEATH ' in line and 'contact:C0' not in line:
+                # (only in the benched stage, not the ones a run goes on to;
+                # contact:C0 was the exit warp in logs before the EXIT label)
+                if not any(int(s, 16) > int(stage[:2], 16) for _, s in stages):
+                    deaths += 1
             elif 'rollback to' in line:
                 rollbacks += 1
     # A game over sends the bot back a stage: only a later stage is a clear.

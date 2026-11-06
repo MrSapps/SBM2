@@ -121,6 +121,60 @@ return function(env)
       local d = frees[math.random(#frees)]
       return d[1], d[2]
     end
+    -- $86 (docs/enemies.md, C1:664B): rests 128 frames, then dashes at
+    -- most 4 cells at 2.5 px/f, toward P1 when P1 is in sight (straight
+    -- line, 8 cells, walls block), else a random free way. The generic
+    -- model had it at 0.5 px/f: 2-2 died to its dash three times.
+    if e.type == 0x86 then
+      local cpf, hf = 16 / 2.5, 8 / 2.5
+      local function sight()
+        for _, d in ipairs(DIRS) do
+          for k = 1, 8 do
+            local cc, rr = c + d[1] * k, r + d[2] * k
+            if blocked(g, cc, rr) then break end
+            if cc == pc and rr == pr then return d[1], d[2] end
+          end
+        end
+      end
+      local enter = 0
+      local steps = 4
+      if e.moving then
+        if (e.tc ~= c or e.tr ~= r) then
+          path[#path + 1] = { r * KEY_W + c, 0, hf }
+          c, r, enter, t = e.tc, e.tr, hf, cpf
+        end
+        dc, dr = e.dc, e.dr
+        steps = 3
+      else
+        t = math.max(e.wait or 0, 0)
+        dc, dr = nil, nil
+      end
+      while t < horizon do
+        if not dc then
+          -- (half the samples dash a random way: P1 moving into another of
+          -- its lines is seen there, and windows must cover every line)
+          if math.random() < 0.5 then dc, dr = sight() end
+          if not dc then
+            local frees = {}
+            for _, d in ipairs(DIRS) do if free(c + d[1], r + d[2]) then frees[#frees + 1] = d end end
+            if #frees == 0 then break end
+            local d = frees[math.random(#frees)]
+            dc, dr = d[1], d[2]
+          end
+          steps = 4
+        end
+        if steps > 0 and free(c + dc, r + dr) then
+          path[#path + 1] = { r * KEY_W + c, enter, t + hf }
+          c, r, enter, t = c + dc, r + dr, t + hf, t + cpf
+          steps = steps - 1
+        else
+          t = t + 128
+          dc, dr = nil, nil
+        end
+      end
+      path[#path + 1] = { r * KEY_W + c, enter, math.huge }
+      return path
+    end
     -- In motion toward the target cell: occupy the current cell until the
     -- half-way point, the target from then on.
     local enter = 0

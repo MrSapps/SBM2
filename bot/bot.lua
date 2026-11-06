@@ -2060,6 +2060,58 @@ local function think()
     end
   end
   local plan, dir
+  -- Walking time (frames) from the nearest chaser to each cell, a bomb at
+  -- (bc,br) and the map's bombs blocking (for canEscape).
+  ride.chaserEta = nil
+  local chasers = {}
+  for _, e in ipairs(elist) do if e.harmful and e.chaser and not e.shot then chasers[#chasers + 1] = e end end
+  if #chasers > 0 then
+    ride.chaserEta = function(bc, br, bt)
+      -- A bomb blocks a chaser only if it gets there before the bomb goes
+      -- off (after that the way is open: 5-1 backed into a pocket that the
+      -- escape bomb closed only until it blew).
+      local bombT = {}
+      for i, b in ipairs(lastBombs or {}) do bombT[b[2] * KEY_W + b[1]] = (lastTimes and lastTimes[i]) or b[3] end
+      if bc then bombT[br * KEY_W + bc] = bt or NEW_FUSE end
+      local eta = {}
+      for _, e in ipairs(chasers) do
+        local start = e.r * KEY_W + e.c
+        local dist, q, qi = { [start] = 0 }, { { e.c, e.r } }, 1
+        while q[qi] do
+          local cc, rr = q[qi][1], q[qi][2]; qi = qi + 1
+          local k0 = rr * KEY_W + cc
+          local tt = dist[k0] * e.cpf
+          if not eta[k0] or tt < eta[k0] then eta[k0] = tt end
+          if dist[k0] < 12 then
+            for _, dd in ipairs(DIRS) do
+              local nc, nr = cc + dd[1], rr + dd[2]
+              local k = nr * KEY_W + nc
+              local tile = g[nr] and g[nr][nc]
+              local tb = bombT[k]
+              local blockedByBomb = tile and (tb or (isBomb(tile) and math.huge))
+                and (dist[k0] + 1) * e.cpf < (tb or math.huge) - 20
+              if tile and not dist[k] and (walkable(g, nc, nr) or tb or isBomb(tile)) and not blockedByBomb then
+                dist[k] = dist[k0] + 1
+                q[#q + 1] = { nc, nr }
+              end
+            end
+          end
+        end
+      end
+      return eta
+    end
+  end
+  -- safeGoal plus: not a cell a chaser can walk to before P1 is there
+  -- with 40 frames to spare (dodges walked toward a chaser in 5-1).
+  function ride.chaseSafe(goal, t0)
+    if not ride.chaserEta then return goal end
+    local eta = ride.chaserEta(nil, nil)
+    return function(c2, r2, n)
+      if not goal(c2, r2, n) then return false end
+      local e = eta[r2 * KEY_W + c2]
+      return not e or e > (t0 or 0) + n * FPT + 40
+    end
+  end
   -- A $DD track block pushes P1 along its $4D track (4-2: P1 waited in a
   -- pocket on the track and was pushed into its own blast): with one on
   -- the map, a track cell is never a place to stop.
@@ -2437,7 +2489,20 @@ local function think()
       local w = withBomb(g, windows, cc, rr, NEW_FUSE + t)
       -- With the remote, the end cell must also be clear of the remote
       -- bombs' blasts, or setting them off later would mean dying.
-      local safe = safeGoal(w, t)
+      local safe0 = safeGoal(w, t)
+      -- Chasers follow P1 wherever it goes (the rollouts aim them at where
+      -- P1 is now): the end cell must be one P1 holds well before any
+      -- chaser can walk there, the new bomb in its way (5-1: P1 bombed and
+      -- backed into a column a 1.25 px/f chaser was coming up).
+      local safe = safe0
+      if ride.chaserEta then
+        local eta = ride.chaserEta(cc, rr, NEW_FUSE + t)
+        safe = function(c2, r2, n)
+          if not safe0(c2, r2, n) then return false end
+          local e = eta[r2 * KEY_W + c2]
+          return not e or e > t + n * FPT + 40
+        end
+      end
       local goal = remoteOn and function(c2, r2, n)
         return safe(c2, r2, n) and not remoteCells[r2 * KEY_W + c2]
       end or safe
@@ -2574,6 +2639,11 @@ local function think()
         tostring(why), tostring(why and canEscape(c, r, 0)), emu.read(P1 + P_BOMBS_LEFT, WRAM, false), tostring(next(remoteCells) ~= nil)))
     end
     if why and canEscape(c, r, 0) then
+      if os.getenv("SBM2_DBG") then
+        local es = {}
+        for _, e in ipairs(elist) do es[#es + 1] = string.format("%02X(%d,%d)%s%s cpf%.1f", e.type, e.c, e.r, e.chaser and "C" or "", e.harmful and "h" or "", e.cpf) end
+        log(string.format("%6d dbg bomb here (%d,%d) why=%s enemies %s", frame, c, r, why, table.concat(es, " ")))
+      end
       plan, bombWhy = "bomb", why
       if pushCell == here then ride.planBomb = here end  -- the planner's bomb (remote: set it off soon)
       if os.getenv("SBM2_DBG") and why == "obj" and lastPlan and not lastPlan:find("^bomb") then
@@ -2794,6 +2864,27 @@ local function think()
     end
   end
 
+  -- Kite chasers: with nothing to do (or only waiting) and a chaser able to
+  -- reach P1 within 150 frames, go where P1 is well ahead of every chaser
+  -- (5-1: P1 stood 190 frames where it could not bomb safely, and a 1.25
+  -- px/f chaser walked up).
+  if ride.chaserEta and (not dir or plan == "wait" or plan == "explore") and plan ~= "flee" then
+    local eta = ride.chaserEta(nil, nil)
+    if os.getenv("SBM2_DBG") and frame % 20 == 0 then
+      local cs = {}
+      for _, e in ipairs(elist) do if e.chaser then cs[#cs + 1] = string.format("%02X(%d,%d)%s tile%02X", e.type, e.c, e.r, e.harmful and "h" or "-", g[e.r][e.c]) end end
+      local row = {}
+      for cc2 = c - 1, c + 4 do row[#row + 1] = string.format("(%d,%d)%02X:%s", cc2, r, g[r][cc2] or 0, tostring(eta[r * KEY_W + cc2])) end
+      log(string.format("%6d dbg kite eta here %s chasers %s row %s", frame, tostring(eta[here]), table.concat(cs, " "), table.concat(row, " ")))
+    end
+    if (eta[here] or math.huge) < 150 then
+      local d2 = bfs(g, c, r, function(c2, r2, n)
+        local k = r2 * KEY_W + c2
+        return not danger[k] and (eta[k] or math.huge) > n * FPT + 150
+      end, nearEnemy, cw)
+      if d2 then plan, dir, step = "kite", d2, nil end
+    end
+  end
   -- Off a $DD's track when not going anywhere (4-2: waiting or exploring
   -- on the track, the block pushed P1 into its own blast, twice).
   if ride.hasDD and (g[r][c] == 0x4D or g[r][c] == 0xCD)

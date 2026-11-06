@@ -2493,27 +2493,11 @@ local function think()
       for _, b in ipairs(bosses) do bs[#bs + 1] = string.format("%04X:%06X(%d,%d v%.2f,%.2f)%s", b.base, b.state, b.x, b.y, b.vx, b.vy, b.box and string.format("box%d..%d,%d..%d", b.box[1], b.box[2], b.box[3], b.box[4]) or "") end
       log(string.format("%6d dbg bosses %s", frame, table.concat(bs, " ")))
     end
-    -- No fully safe goal: the least bad step, of here and the open,
-    -- blast-free neighbours the one whose first enemy contact comes latest
-    -- (the old fallback routed on blast windows only and walked P1 next to
-    -- a $91 in 5-3).
-    if not dir then
-      local function firstContact(k)
-        local f = math.huge
-        for _, iv in ipairs(eWin[k] or {}) do if iv[2] >= 0 and iv[1] < f then f = iv[1] end end
-        return f
-      end
-      local best, bestT = nil, firstContact(here)
-      for _, d in ipairs(DIRS) do
-        local nc, nr = c + d[1], r + d[2]
-        local k = nr * KEY_W + nc
-        if walkable(g, nc, nr) and not danger[k] then
-          local ft = firstContact(k)
-          if ft > bestT + 4 then best, bestT = d[3], ft end
-        end
-      end
-      dir = best
-    end
+    -- (no fully safe goal: any cell clear of blasts and enemies now; a
+    -- "least bad step" by first contact helped 5-3 a little and lost 3-8)
+    dir = dir or bfs(g, c, r, function(cc, rr)
+        return not nearEnemy[rr * KEY_W + cc] and not danger[rr * KEY_W + cc]
+      end, nil, windows)
   elseif finalForm2() and emu.read(P1 + 0xFE, WRAM, false) > 0 and (function()
       -- Form 2 with the glove: walk to a throw spot (Boss.aimGoal).
       local body
@@ -2846,12 +2830,37 @@ local function think()
       if not dir and haveBomb then
         -- Objectives (blocks, panels) first; enemy-only spots after.
         plan = "seek"
-        for _, want in ipairs({ "obj", "enemy" }) do
+        -- Soft blocks hiding a useful item (list $7E3C48; kind bit 14 set =
+        -- already out): speed (4: +$E0, the skate; run 7 met the 1-8 boss
+        -- at walking speed 1 and could not keep in the gap), heart (11),
+        -- glove (7), remote (1), bomb+ (0), fire+ (2). Opened first.
+        local itemBlk = {}
+        for i = 0, 63 do
+          local cell = r16(ITEMLIST + 4 * i)
+          if cell >= 0x8000 then break end
+          local kind = r16(ITEMLIST + 4 * i + 2)
+          local kd = kind & 0x3FFF
+          if (kind & 0x4000) == 0 and (kd == 4 or kd == 11 or kd == 7 or kd == 1 or kd == 0 or kd == 2) then
+            local ic, ir = (cell & 0x7F) // 2, cell >> 7
+            if g[ir] and SOFT[g[ir][ic]] then itemBlk[ir * KEY_W + ic] = true end
+          end
+        end
+        local wants = next(itemBlk) and { "item", "obj", "enemy" } or { "obj", "enemy" }
+        for _, want in ipairs(wants) do
           local goalK
           dir = bfs(g, c, r, function(cc, rr, n)
             if (cc == c and rr == r) or danger[rr * KEY_W + cc] then return false end
             local why = targetsInReach(cc, rr, n * FPT)
-            local ok = why == want and (want == "obj" or frame >= ambushHold)
+            if want == "item" then
+              if why ~= "obj" then return false end
+              local hits = false
+              for _, cell in ipairs(blastCells(g, cc, rr, rangeAt(g, cc, rr))) do
+                if itemBlk[cell[2] * KEY_W + cell[1]] then hits = true; break end
+              end
+              if not hits then return false end
+              why = "item"
+            end
+            local ok = why == want and (want ~= "enemy" or frame >= ambushHold)
               and canEscape(cc, rr, n * FPT)
             if ok then goalK = rr * KEY_W + cc end
             return ok

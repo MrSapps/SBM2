@@ -1472,6 +1472,9 @@ local function think()
     local c1, r1 = playerTile()
     if not springLand[springFrom] then
       log(string.format("%6d spring %s landed (%d,%d)", frame, springFrom, c1, r1))
+      -- (a new landing learnt is progress: the stall check's random
+      -- exploring had 3-6, run 27, wandering 6000 frames between tries)
+      progressAt = frame
     end
     springLand[springFrom] = { c1, r1 }
   elseif springFrom then
@@ -3813,7 +3816,10 @@ local function think()
     for _, d in ipairs(DIRS) do
       if input[d[3]] then
         local key = (r * KEY_W + c) .. d[3]
-        if springLand[key] ~= false then
+        -- (never one already made: a landing learnt means it launches;
+        -- 3-6, run 27, banned (10,10) right and down after waits there and
+        -- was shut in the upper right)
+        if springLand[key] == nil then
           log(string.format("%6d pad (%d,%d) %s: no launch in 180 frames; not a way", frame, c, r, d[3]))
           springLand[key], springLand[key .. "!"] = false, false
           frozenAt = { x, y, frame }

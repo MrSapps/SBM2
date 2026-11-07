@@ -1,0 +1,10 @@
+# world 1 boss from full no-rewind run 13's own stage start (walking speed 1,
+# range 5): beat 1-8 with no death. (It shadowed at row 12, out of reach,
+# for 240000 frames.)
+start 17r13
+budget 21600
+pass STAGE 20
+fail  DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+pads

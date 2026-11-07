@@ -273,8 +273,8 @@ local function readBombs(g)
       local cell = r16(base + 2)
       local c, r = (cell & 0x3F) // 2, cell >> 6
       local fuse = emu.read(base + 4, WRAM, false)
-      local t = (flags & 0x40) ~= 0 and 0 or fuse * 2
       local now, seen = r16(0x36), fuseSeen[i]  -- NmiCount as the clock
+      local t = (flags & 0x40) ~= 0 and 0 or fuse * 2
       if not seen or seen[1] ~= fuse or seen[3] ~= cell then
         fuseSeen[i] = { fuse, now, cell }
       elseif (now - seen[2]) & 0xFFFF > FROZEN and t > 0 then
@@ -3080,6 +3080,15 @@ local function think()
     for _, b in ipairs(bosses) do if b.base == 0x1000 or b.base == 0x1140 then body = body or b end end
     local sb = ride.sb
     if sb and frame - sb.at > NEW_FUSE + 60 then ride.sb, sb = nil, nil end
+    -- (the pad is read every other frame: a one-frame A press was lost half
+    -- the time, and P1 then left "its bomb" for a whole fuse; press 2
+    -- frames, and forget a bomb that never appeared)
+    if sb and frame - sb.at <= 1 then input.a = true end
+    if sb and frame - sb.at >= 8 then
+      local seen = false
+      for _, b in ipairs(lastBombs or {}) do if b[1] == sb.c and b[2] == sb.r then seen = true end end
+      if not seen and not sb.seen then ride.sb, sb = nil, nil elseif sb then sb.seen = true end
+    end
     local ox = origin()
     local function colX(cc) return cc * 16 + 8 - ox end
     if body and r >= 8 and math.abs(x - body.x) <= 18 and (sb or (plan ~= "flee" and plan ~= "bomb")) then
@@ -3113,10 +3122,18 @@ local function think()
       if sb and r == sb.r and c ~= sb.c and c % 2 == 0 and math.abs(x - colX(c)) <= 3 then
         vd = (r < 12) and "down" or "up"  -- leave the bomb's row here
       end
+      -- No bomb out and too low for P1's blast to reach the body's sense
+      -- rows (row - RANGE <= 6): climb at an even column to the lowest row
+      -- that does (fullNR13: left a bomb's row down to 12 at RANGE 5 and
+      -- shadowed there 240000 frames without another bomb).
+      local rt = 6 + RANGE
+      rt = rt - rt % 2
+      local climb = not sb and rt >= 8 and r > rt
+      if climb and r % 2 == 0 and c % 2 == 0 and math.abs(x - colX(c)) <= 3 then vd = "up" end
       if not vd then
         if x < tx - 3 then nd = "right" elseif x > tx + 3 then nd = "left" end
       end
-      if r % 2 == 0 or vd or sb then
+      if r % 2 == 0 or vd or sb or climb then
         plan, dir, step = "shadow", nil, nil
         ride.shadowDir, ride.shadowV = nd, vd
       end

@@ -1647,7 +1647,7 @@ local function think()
   -- frames after the gate opens (run 14 left 1-6 and 1-7 with one in each,
   -- met the 1-8 boss at speed 1 and could not hit it). Revealed useful
   -- items lying about are picked up before the exit too (usefulNow).
-  usefulNow = {}
+  usefulNow, skateNow = {}, {}
   local skateHere = false
   for i = 0, 63 do
     local cell = r16(ITEMLIST + 4 * i)
@@ -1657,6 +1657,7 @@ local function think()
     local lying = (kind & 0x4000) ~= 0 and emu.read(MAP + cell, WRAM, false) == 0x44
     local k = (cell >> 7) * KEY_W + (cell & 0x7F) // 2
     if lying and (kd == 4 or kd == 11 or kd == 7 or kd == 1 or kd == 0 or kd == 2) then usefulNow[k] = true end
+    if lying and kd == 4 and emu.read(P1 + 0xE0, WRAM, false) < 2 then skateNow[k] = true end
     if kd == 4 and ((kind & 0x4000) == 0 or lying) then skateHere = true end
   end
   if gateOpen and not ride.gateAt then ride.gateAt = frame elseif not gateOpen and not gloveHidden then ride.gateAt = nil end
@@ -2832,6 +2833,14 @@ local function think()
     end
     local why = haveBomb and targetsInReach(c, r, 0)
     if why == "enemy" and frame < ambushHold then why = nil end
+    -- At speed 1, a skate lying within 4 steps is picked up before any bomb
+    -- (1-6: P1 bombed a block beside the skate it was walking to; a magnet
+    -- pulled the bomb onto the skate and the blast destroyed it). (For
+    -- every useful item it cost 1-5 10 of 18.)
+    if why and next(skateNow) then
+      local _, n = bfs(g, c, r, function(cc, rr) return skateNow[rr * KEY_W + cc] end, nearEnemy, cw)
+      if n and n <= 4 then why = nil end
+    end
     if os.getenv("SBM2_DBG") and frame % 60 == 0 then
       log(string.format("%6d dbg here (%d,%d) haveBomb=%s why=%s esc=%s left=%d remote=%s", frame, c, r, tostring(haveBomb),
         tostring(why), tostring(why and canEscape(c, r, 0)), emu.read(P1 + P_BOMBS_LEFT, WRAM, false), tostring(next(remoteCells) ~= nil)))

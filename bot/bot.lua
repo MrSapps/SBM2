@@ -3763,12 +3763,12 @@ local function think()
   -- the pad never went, 600 frames, and again after each "rollback").
   -- (not while bouncing on purpose, "stay": 3-6, run 24, marked the pad
   -- "no way" while it waited out an $8B by the landing, then fled by it)
-  if g[r][c] == SPRING and frame - frozenAt[3] > 60 and springDir ~= "stay" and (ride.stays or 0) == 0 then
+  if g[r][c] == SPRING and frame - frozenAt[3] > 180 and springDir ~= "stay" and (ride.stays or 0) == 0 then
     for _, d in ipairs(DIRS) do
       if input[d[3]] then
         local key = (r * KEY_W + c) .. d[3]
         if springLand[key] ~= false then
-          log(string.format("%6d pad (%d,%d) %s: no launch in 60 frames; not a way", frame, c, r, d[3]))
+          log(string.format("%6d pad (%d,%d) %s: no launch in 180 frames; not a way", frame, c, r, d[3]))
           springLand[key], springLand[key .. "!"] = false, false
           frozenAt = { x, y, frame }
         end

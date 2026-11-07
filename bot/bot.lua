@@ -3736,6 +3736,21 @@ local function think()
   if not pressing or held or math.abs(x - frozenAt[1]) + math.abs(y - frozenAt[2]) > 3 or frame < frozenAt[3] then
     frozenAt = { x, y, frame }
   end
+  -- On a spring pad pressing one way for 60 frames without a launch: that
+  -- jump is no way (3-1, run 22: the exit route jumped right off (4,6),
+  -- the pad never went, 600 frames, and again after each "rollback").
+  if g[r][c] == SPRING and frame - frozenAt[3] > 60 then
+    for _, d in ipairs(DIRS) do
+      if input[d[3]] then
+        local key = (r * KEY_W + c) .. d[3]
+        if springLand[key] ~= false then
+          log(string.format("%6d pad (%d,%d) %s: no launch in 60 frames; not a way", frame, c, r, d[3]))
+          springLand[key], springLand[key .. "!"] = false, false
+          frozenAt = { x, y, frame }
+        end
+      end
+    end
+  end
   if frame - frozenAt[3] > 600 and timeLeft() > 1 then
     log(string.format("%6d frozen at (%d,%d) since %d; rolling back", frame, c, r, frozenAt[3]))
     rollback, rollbackBefore = true, frozenAt[3] - 100

@@ -76,9 +76,24 @@ return function(env)
   -- BossContactP1; the list was empty every other frame and the bot
   -- dithered under the 1-8 boss as its danger came and went.)
   local prev = {}
+  -- 1-8: game frames per real frame, from the body's own countdowns (+$34
+  -- while it walks, +$3A while it stands): the game falls behind when the
+  -- screen is busy (0.65 with range-8 flames about: a 50-frame stand took
+  -- 64), and the path model (sunX) counts game frames.
+  B.rate = 1
+  local lagPrev
   function B.frame()
     prev, last, cur = last, cur, {}
     tick = tick + 1
+    if (r16(0x1A) & 0xFF) == 0x17 then
+      local st = r16(0x1000) | (rd8(0x1002) << 16)
+      local c = st == 0xCC9ABA and r16(0x1034) or st == 0xCC9B54 and r16(0x103A) or nil
+      if c and lagPrev and lagPrev[1] == st then
+        local d = lagPrev[2] - c
+        if d == 0 or d == 1 then B.rate = B.rate * 0.98 + d * 0.02 end
+      end
+      lagPrev = c and { st, c } or nil
+    end
   end
 
   function B.read()
@@ -216,6 +231,10 @@ return function(env)
   -- (CC:9E9A). A slow P1 lags at the turns and sets strikes off: at speed
   -- 1 every shadow bomb missed by 49 px, the body frozen at x 79/177.
   function B.sunX(t, p1x, vp)
+    -- (t real frames -> game frames; P1 then walks vp / rate a game frame)
+    local rate = math.max(0.3, B.rate or 1)
+    t = math.floor(t * rate + 0.5)
+    if vp then vp = vp / rate end
     local st = r16(0x1000) | (rd8(0x1002) << 16)
     local x = s16(r16(0x1011))
     if x >= 0x100 then x = x - 0x100 end

@@ -1,0 +1,9 @@
+# world 1 boss from full no-rewind run 17's own stage start (speed 3, range 8):
+# beat 1-8 with no death.
+start 17r17
+budget 21600
+pass STAGE 20
+fail  DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+pads

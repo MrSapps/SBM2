@@ -3193,7 +3193,7 @@ local function think()
           ride.sb = { c = c, r = r, at = frame }
           sb = ride.sb
           input.a = true
-          log(string.format("%6d shadow bomb at (%d,%d), body at x %.0f, expect x %.0f at %d (P1 %.2f px/f, cool %d)", frame, c, r, body.x, bx, ride.fuse18 or NEW_FUSE, ride.vp or 1, r16(0x1038)))
+          log(string.format("%6d shadow bomb at (%d,%d), body at x %.0f, expect x %.0f at %d (plain %s; P1 %.2f px/f, cool %d, face %02X, move %d)", frame, c, r, body.x, bx, ride.fuse18 or NEW_FUSE, tostring(Boss.sunX(ride.fuse18 or NEW_FUSE)), ride.vp or 1, r16(0x1038), emu.read(0x100F, WRAM, false), r16(0x1034)))
         end
       end
       local nd, vd
@@ -3220,7 +3220,7 @@ local function think()
   -- Boss fights: don't wait in a cell with under 3 open sides; go to a safe
   -- junction (2-8: waited at (3,4) on the arena edge; a drop's column and
   -- the body's glide closed both its sides).
-  if next(bossNow) and plan == "wait" then
+  if next(bossNow) and plan == "wait" and not stageNow17 then
     local function open(cc, rr)
       local n = 0
       for _, d in ipairs(DIRS) do if walkable(g, cc + d[1], rr + d[2]) then n = n + 1 end end

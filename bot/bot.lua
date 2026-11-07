@@ -2856,6 +2856,9 @@ local function think()
     end
     local why = haveBomb and targetsInReach(c, r, 0)
     if why == "enemy" and frame < ambushHold then why = nil end
+    -- (not on a $8C's pull line: fleeing its blast, the pull holds P1 back
+    -- and the escape timing is off; run 17's 1-6 bombed one from below)
+    if why and PullLine[here] then why = nil end
     -- At speed 1, a skate lying within 4 steps is picked up before any bomb
     -- (1-6: P1 bombed a block beside the skate it was walking to; a magnet
     -- pulled the bomb onto the skate and the blast destroyed it). (For

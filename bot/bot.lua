@@ -1642,6 +1642,27 @@ local function think()
     end
   end
   if gloveHidden and gateOpen then gateOpen = false; g[gr][gc] = 0xC9 end
+  -- At walking speed 1 (+$E0; a death takes the skate away), a skate (item
+  -- kind 4) still in the stage comes before the exit, for up to 3000
+  -- frames after the gate opens (run 14 left 1-6 and 1-7 with one in each,
+  -- met the 1-8 boss at speed 1 and could not hit it). Revealed useful
+  -- items lying about are picked up before the exit too (usefulNow).
+  usefulNow = {}
+  local skateHere = false
+  for i = 0, 63 do
+    local cell = r16(ITEMLIST + 4 * i)
+    if cell >= 0x8000 then break end
+    local kind = r16(ITEMLIST + 4 * i + 2)
+    local kd = kind & 0x3FFF
+    local lying = (kind & 0x4000) ~= 0 and emu.read(MAP + cell, WRAM, false) == 0x44
+    local k = (cell >> 7) * KEY_W + (cell & 0x7F) // 2
+    if lying and (kd == 4 or kd == 11 or kd == 7 or kd == 1 or kd == 0 or kd == 2) then usefulNow[k] = true end
+    if kd == 4 and ((kind & 0x4000) == 0 or lying) then skateHere = true end
+  end
+  if gateOpen and not ride.gateAt then ride.gateAt = frame elseif not gateOpen and not gloveHidden then ride.gateAt = nil end
+  if skateHere and gateOpen and emu.read(P1 + 0xE0, WRAM, false) < 2 and frame - ride.gateAt < 3000 then
+    gateOpen = false; g[gr][gc] = 0xC9
+  end
   if gateOpen then g[gr][gc] = GATE_OPEN end
   RANGE = emu.read(P1 + P_FIRE, WRAM, false) + 1
   remoteOn = (emu.read(P1 + 0xF3, WRAM, false) & 1) ~= 0
@@ -2870,7 +2891,10 @@ local function think()
       -- 2-1's furnace never stops making enemies).
       -- A heart or glove lying in reach comes before the exit.
       plan = "item"
-      dir = bfs(g, c, r, function(cc, rr) return g[rr][cc] == ITEM and heartNow[rr * KEY_W + cc] == "item" end, nearEnemy, cw)
+      dir = bfs(g, c, r, function(cc, rr)
+        local k = rr * KEY_W + cc
+        return g[rr][cc] == ITEM and (heartNow[k] == "item" or usefulNow[k])
+      end, nearEnemy, cw)
       if not dir and gateOpen and r16(0x5D70) < 0x8000 and not gloveHidden then
         plan = "exit"
         dir = bfs(g, c, r, function(cc, rr) return g[rr][cc] == GATE_OPEN end, nearEnemy, cw)

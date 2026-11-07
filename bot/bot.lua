@@ -2977,6 +2977,16 @@ local function think()
     end
     local why = haveBomb and targetsInReach(c, r, 0)
     if why == "enemy" and frame < ambushHold then why = nil end
+    -- A walker about to reach P1 in a corridor (two open sides or fewer):
+    -- a bomb here blocks it and may well kill it, P1 leaving the other way
+    -- (2-4, run 21: waited at (6,4) in the row-4 corridor as a $82 came,
+    -- then was driven back into the (3,3) pocket and caught).
+    if not why and haveBomb and ride.walkerEta and not PullLine[here] then
+      local open = 0
+      for _, d in ipairs(DIRS) do if walkable(g, c + d[1], r + d[2]) then open = open + 1 end end
+      local we = ride.walkerEta()[here]
+      if open <= 2 and we and we < 90 then why = "enemy" end
+    end
     -- (not on a $8C's pull line: fleeing its blast, the pull holds P1 back
     -- and the escape timing is off; run 17's 1-6 bombed one from below)
     if why and PullLine[here] then why = nil end
@@ -3203,13 +3213,24 @@ local function think()
       if not dir and plan ~= "slam" and #walkers > 0 and haveBomb then
         -- Nothing to bomb from here: close in on the nearest enemy.
         plan = "hunt"
-        dir = bfs(g, c, r, function(cc, rr)
-          if not sealOK(cc, rr) or FireLine[rr * KEY_W + cc] then return false end
-          for _, e in ipairs(walkers) do
-            if math.abs(e[1] - cc) + math.abs(e[2] - rr) <= 3 then return true end
-          end
-          return false
-        end, nearEnemy, cw)
+        -- (first a junction, 3+ open sides: 2-4, run 21, waited for a $82 in
+        -- the row-4 corridor, then backed into the (3,3) pocket ahead of it)
+        for pass = 1, 2 do
+          local hn
+          dir, hn = bfs(g, c, r, function(cc, rr)
+            if not sealOK(cc, rr) or FireLine[rr * KEY_W + cc] then return false end
+            if pass == 1 then
+              local open = 0
+              for _, d in ipairs(DIRS) do if walkable(g, cc + d[1], rr + d[2]) then open = open + 1 end end
+              if open < 3 then return false end
+            end
+            for _, e in ipairs(walkers) do
+              if math.abs(e[1] - cc) + math.abs(e[2] - rr) <= 3 then return true end
+            end
+            return false
+          end, nearEnemy, cw)
+          if dir or hn then break end
+        end
       end
       if not dir and plan ~= "slam" then
         -- Nothing left on this side: try a spring jump not made yet. Where

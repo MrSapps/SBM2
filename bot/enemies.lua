@@ -113,9 +113,13 @@ return function(env)
     return list
   end
 
-  local function blocked(g, c, r)
+  local function blocked(g, c, r, typ)
     if r < 0 or r >= MAP_H or c < 0 or c >= MAP_W then return true end
     local t = g[r][c]
+    -- $8E walks through soft blocks and every solid tile but $C5/$C6;
+    -- bombs and flames stop it (docs/enemies.md; 3-6, run 27: came
+    -- through the blocks to P1 in the (2,27) corner, twice).
+    if typ == 0x8E then return t == 0xC5 or t == 0xC6 or t == 0x43 or t == 0x01 or (t >= 0x40 and t <= 0x42) end
     return t >= 0x80 or (t >= 0x40 and t <= 0x43)
   end
 
@@ -128,7 +132,7 @@ return function(env)
     local function free(cc, rr)
       -- $DD track blocks only move along the $4D track (docs/mechanics.md section 7).
       if e.type == 0xDD then return g[rr] ~= nil and g[rr][cc] == 0x4D end
-      return not blocked(g, cc, rr) and not occupied[rr * KEY_W + cc]
+      return not blocked(g, cc, rr, e.type) and not occupied[rr * KEY_W + cc]
     end
     local function chooseDir()
       if e.chaser then
@@ -154,7 +158,7 @@ return function(env)
       local cpf, hf = e.cpf, e.cpf / 2
       local enter = 0  -- (+$4C is 0 for a shot: step from its own cell)
       t = hf
-      while t < horizon and (e.dc ~= 0 or e.dr ~= 0) and not blocked(g, c + e.dc, r + e.dr) do
+      while t < horizon and (e.dc ~= 0 or e.dr ~= 0) and not blocked(g, c + e.dc, r + e.dr, e.type) do
         path[#path + 1] = { r * KEY_W + c, enter, t + hf }
         c, r, enter, t = c + e.dc, r + e.dr, t + hf, t + cpf
       end

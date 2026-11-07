@@ -634,6 +634,9 @@ function ride.springGuess(g, c, r, dir, hold)
     local cc, rr = c + j * dir[1], r + j * dir[2]
     local t = g[rr] and g[rr][cc]
     if not t or t == 0xD0 then return nil end
+    -- (a soft block there: P1 lands inside it and is stuck; 3-6, (5,8)
+    -- right came down in (10,8), boxed in until an $8E got through)
+    if SOFT[t] then return nil end
     if walkable(g, cc, rr) or t == SPRING then return { cc, rr } end
   end
   return nil
@@ -663,11 +666,14 @@ local function bfs(g, c0, r0, goal, avoid, windows, t0)
     for _, v in ipairs({ "", "!" }) do
       local land = springLand[(pr * KEY_W + pc) .. dir[3] .. v]
       if land == nil then land = ride.springGuess(g, pc, pr, dir, v == "!") end
+      if land and g[land[2]] and SOFT[g[land[2]][land[1]]] then land = nil end
       if land then
         local lk = land[2] * KEY_W + land[1]
         local t = t0 + (n + 6) * FPT  -- ~20 frames on the pad + ~70 in the air
+        -- (nor a landing in the avoid set: 3-6 fled onto the (10,10) pad
+        -- and jumped up beside an $8E at (10,6))
         if (walkable(g, land[1], land[2]) or (g[land[2]] and g[land[2]][land[1]] == SPRING))
-            and not (windows and hit(windows, lk, t - FPT, t + FPT)) then
+            and not (windows and hit(windows, lk, t - FPT, t + FPT)) and not (avoid and avoid[lk]) then
           push(land[1], land[2], first or (dir[3] .. v), n + 6)
         end
       end
@@ -1400,7 +1406,8 @@ local function think()
           local land = springLand[(pr0 * KEY_W + pc0) .. d[3] .. v]
           if land == nil then land = ride.springGuess(g0, pc0, pr0, d, v == "!") end
           if land and (land[1] ~= pc0 or land[2] ~= pr0) and not rc[land[2] * KEY_W + land[1]]
-              and not hotLand[land[2] * KEY_W + land[1]] then
+              and not hotLand[land[2] * KEY_W + land[1]]
+              and ((ride.padAvoid or {})[(pr0 * KEY_W + pc0) .. d[3] .. v] or 0) <= frame then
             local _, n = bfs(g0, land[1], land[2], work)
             if next(rc) and walkable(g0, land[1], land[2]) then n = (n or 1000) - 10000 end
             if n and (not bestN or n < bestN) then best, bestN = d[3] .. v, n end
@@ -1448,7 +1455,16 @@ local function think()
         for _, e in ipairs(foes) do
           if math.abs(e[1] - land[1]) + math.abs(e[2] - land[2]) <= 2 then
             log(string.format("%6d pad (%d,%d): enemy near the landing (%d,%d); bouncing", frame, pc0, pr0, land[1], land[2]))
-            springDir, ride.stays = "stay", ride.stays + 1
+            local pk0 = pr0 * KEY_W + pc0
+            ride.lastStay = frame
+            local we = ride.walkerEta and ride.walkerEta()[pk0]
+            if we and we < 150 then
+              ride.padAvoid = ride.padAvoid or {}
+              ride.padAvoid[pk0 .. springDir] = frame + 300
+              springDir = nil
+            else
+              springDir, ride.stays = "stay", ride.stays + 1
+            end
             break
           end
         end
@@ -2200,6 +2216,12 @@ local function think()
     -- the gate shut, they are targets again: a dormant enemy may sit in
     -- the last one (1-5 ended with one block and the gate shut).
     if not gateOpen then softGone = {} end
+    -- Jumps written off (a death after one, no launch seen) are tried
+    -- again: written off for good, they had 3-6's right side unreachable
+    -- with its last two enemies there, until time ran out.
+    if not gateOpen then
+      for k, v in pairs(springLand) do if v == false then springLand[k] = nil end end
+    end
     local es = {}
     for k in pairs(panelTodo) do es[#es + 1] = string.format("panel@(%d,%d)", k % KEY_W, k // KEY_W) end
     for _, d in ipairs(dormant) do es[#es + 1] = string.format("dormant@(%d,%d)", d[1], d[2]) end
@@ -2256,7 +2278,8 @@ local function think()
               local nc, nr = cc + dd[1], rr + dd[2]
               local k = nr * KEY_W + nc
               local tile = g[nr] and g[nr][nc]
-              if tile and (walkable(g, nc, nr) or bombT[k] or isBomb(tile)) then
+              local thru = e.type == 0x8E and tile and tile ~= 0xC5 and tile ~= 0xC6 and tile ~= 0x01
+              if tile and (walkable(g, nc, nr) or thru or bombT[k] or isBomb(tile)) then
                 local tn = tt + e.cpf
                 local tb = bombT[k] or (isBomb(tile) and 100000) or nil
                 local ok = true
@@ -3812,7 +3835,7 @@ local function think()
   -- the pad never went, 600 frames, and again after each "rollback").
   -- (not while bouncing on purpose, "stay": 3-6, run 24, marked the pad
   -- "no way" while it waited out an $8B by the landing, then fled by it)
-  if g[r][c] == SPRING and frame - frozenAt[3] > 180 and springDir ~= "stay" then
+  if g[r][c] == SPRING and frame - frozenAt[3] > 180 and springDir ~= "stay" and frame - (ride.lastStay or -1000) > 300 then
     for _, d in ipairs(DIRS) do
       if input[d[3]] then
         local key = (r * KEY_W + c) .. d[3]

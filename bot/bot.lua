@@ -253,6 +253,7 @@ local FPT = 20                -- frames per tile walked (measured 17-23 at base 
 -- can set off.
 local FROZEN, fuseSeen = 120, {}
 local softSeen, softGone = {}, {}  -- world 2 regrowth (think)
+softBlownAt = {}  -- frame each was first seen gone (global: the main chunk is at the local limit)
 -- Remote control (P1 +$F3 bit 0): bombs never time out; each B press sets off
 -- the oldest (docs/mechanics.md). They count as far-off until we press B.
 local REMOTE_T, remoteOn = 100000, false
@@ -1583,6 +1584,7 @@ local function think()
     end
     savedStage = stNow
     softSeen, softGone, springLand, springTry, ride.fail, ride.edges, ride.tried = {}, {}, {}, nil, {}, {}, {}
+    softBlownAt = {}
     badCell, planSteps, planCo, noBombUntil = {}, nil, nil, {}
     stageTicks = ticks
     log(string.format("%6d STAGE %02X hearts %02X flash %04X/%02X", frame, stNow, emu.read(P1 + 0xEF, WRAM, false),
@@ -1986,7 +1988,16 @@ local function think()
     -- (5-8's slam: a ball near P1 is no reason to wait, the body rises)
     -- (not while a thrown bomb flies or has just landed: it is not listed
     -- yet, and B sets it off too; 5-8 form 2 died 3 cells from one)
-    if remoteWorth and not remoteCells[here] and (not nearEnemy[here] or ride.f1Home) and frame >= nextDetonate
+    -- (nor while a $8C may pull P1 into the blast: 1-3, run 20, waited
+    -- a cell off the remote bomb's row on a pull line; the pull and the
+    -- detonation came together)
+    local pulledIn = false
+    if PullLine and PullLine[here] then
+      for k in pairs(remoteCells) do
+        if math.abs(k % KEY_W - c) + math.abs(k // KEY_W - r) <= 2 then pulledIn = true end
+      end
+    end
+    if remoteWorth and not remoteCells[here] and not pulledIn and (not nearEnemy[here] or ride.f1Home) and frame >= nextDetonate
         and frame - throw.at > 40 and (r16(P1 + 0x52) & 6) == 0
         and g[r][c] ~= SPRING and (r16(P1 + P_LOCK) & 1) == 0 then
       input.b = true
@@ -2019,7 +2030,12 @@ local function think()
   for _, cr in ipairs(g.softs) do softSeen[cr[2] * KEY_W + cr[1]] = true end
   soft = #g.softs
   for k in pairs(softSeen) do
-    if not SOFT[g[k // KEY_W][k % KEY_W]] then softGone[k] = true end
+    if not SOFT[g[k // KEY_W][k % KEY_W]] then
+      softGone[k] = true
+      softBlownAt[k] = softBlownAt[k] or frame
+    else
+      softBlownAt[k] = nil
+    end
   end
   for _ in pairs(panelTodo) do todo = todo + 1 end
   -- Not the enemy count: spawners (the 2-1 furnace) keep adding enemies.
@@ -2288,13 +2304,18 @@ local function think()
   -- into it (1-3 and 1-5: "waiting", P1 pulled 7-30 px into the $8C).
   PullLine = {}
   for _, e in ipairs(elist) do
+    -- (from the cell it is walking to as well: 1-3, run 20, waited beside
+    -- its remote bomb's row; a $8C came up the column, stopped one cell
+    -- on and pulled P1 into the row as the bomb went off)
     if e.type == 0x8C and e.harmful then
-      for _, d in ipairs({ { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }) do
-        for k = 1, 4 do
-          local cc, rr = e.c + d[1] * k, e.r + d[2] * k
-          local tt = g[rr] and g[rr][cc]
-          if not tt or (tt & 0x80) ~= 0 or tt == 0x43 then break end
-          PullLine[rr * KEY_W + cc] = true
+      for _, at in ipairs({ { e.c, e.r }, e.moving and { e.tc, e.tr } or nil }) do
+        for _, d in ipairs({ { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }) do
+          for k = 1, 4 do
+            local cc, rr = at[1] + d[1] * k, at[2] + d[2] * k
+            local tt = g[rr] and g[rr][cc]
+            if not tt or (tt & 0x80) ~= 0 or tt == 0x43 then break end
+            PullLine[rr * KEY_W + cc] = true
+          end
         end
       end
     end
@@ -2307,9 +2328,12 @@ local function think()
   -- column, shot from 5 cells.)
   FireLine = {}
   for _, e in ipairs(elist) do
-    if e.type == 0x90 and e.harmful then
+    -- (and a $86: rests 128 frames, then dashes up to 4 cells at 2.5 px/f,
+    -- toward P1 if it sees it within 8, walls blocking; 2-2, run 20,
+    -- waited in its row and was run down, twice, a game over)
+    if (e.type == 0x90 or e.type == 0x86) and e.harmful then
       for _, d in ipairs({ { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }) do
-        for k = 1, 10 do
+        for k = 1, e.type == 0x86 and 8 or 10 do
           local cc, rr = e.c + d[1] * k, e.r + d[2] * k
           local tt = g[rr] and g[rr][cc]
           if not tt or (tt & 0x80) ~= 0 or tt == 0x43 then break end
@@ -2764,6 +2788,26 @@ local function think()
     end
     -- After placing a bomb at (cc,rr) at time t, can we reach a cell no blast
     -- will ever touch, without being in any blast on the way?
+    -- World 2 and 5-5: blown soft blocks grow back ~190 frames later, so
+    -- an escape is searched with those blown 150+ frames ago back (the
+    -- bomb's own cell excepted; a fresher gap stays open long enough to
+    -- leave by: 2-4's plan bombs inside (3,8) and leaves through (4,8)). (2-2, run 20: bombed at (17,5) with the way out through
+    -- (14,5), blown earlier; it grew back and P1 sat between it and the
+    -- bomb.)
+    local escGrid
+    local stgE = emu.read(0x1A, WRAM, false)
+    if (stgE & 0xF0) == 0x20 or stgE == 0x54 then
+      escGrid = {}
+      for r2 = 0, MAP_H - 1 do escGrid[r2] = g[r2] end
+      for k in pairs(softSeen) do
+        local r2, c2 = k // KEY_W, k % KEY_W
+        if not SOFT[g[r2][c2]] and g[r2][c2] < 0x40 and not (c2 == c and r2 == r)
+            and frame - (softBlownAt[k] or frame) > 150 then
+          if escGrid[r2] == g[r2] then local row = {}; for c3 = 0, MAP_W - 1 do row[c3] = g[r2][c3] end; escGrid[r2] = row end
+          escGrid[r2][c2] = 0xC2
+        end
+      end
+    end
     local function canEscape(cc, rr, t)
       local w = withBomb(g, windows, cc, rr, NEW_FUSE + t)
       -- With the remote, the end cell must also be clear of the remote
@@ -2807,7 +2851,9 @@ local function think()
       -- (not through a cell an enemy holds now: 3-3, run 19, bombed with
       -- the only way out up a one-wide column a $90 was coming down, the
       -- route timed past it on its predicted walk; shot, every time)
-      local ok = bfs(g, cc, rr, goal, mobNow, combine(w, eWin), t) ~= nil
+      local eg = g
+      if escGrid and not SOFT[escGrid[rr][cc]] then eg = escGrid end
+      local ok = bfs(eg, cc, rr, goal, mobNow, combine(w, eWin), t) ~= nil
       allowRide = true
       return ok
     end
@@ -3389,6 +3435,10 @@ local function think()
   -- Never stand on a $8C's pull line (see PullLine): walk off it.
   if PullLine[here] and (not dir or plan == "wait") and plan ~= "bomb" then
     local d2 = bfs(g, c, r, safeGoal(windows), nearEnemy, cw)
+      or bfs(g, c, r, function(cc, rr)
+        local k = rr * KEY_W + cc
+        return not PullLine[k] and not remoteCells[k] and not windows[k]
+      end, nearEnemy, cw)
     if d2 then plan, dir, step = "offpull", d2, nil end
   end
   -- Off a $DD's track when not going anywhere (4-2: waiting or exploring
@@ -3444,7 +3494,7 @@ local function think()
   end
   if step then
     local tx, ty = tileCentre(step.tc, step.tr)
-    if math.abs(x - tx) <= 1 and math.abs(y - ty) <= 1 then
+    if math.abs(x - tx) <= 1 and math.abs(y - ty) <= 2 then
       step = nil
     elseif plan ~= "flee" and (danger[step.tr * KEY_W + step.tc]
         or (plan ~= "dodge" and nearEnemy[step.tr * KEY_W + step.tc])) then
@@ -3461,9 +3511,12 @@ local function think()
       input[steer(step.dir, x, y, step.c, step.r)] = true
       -- Once on the target tile, keep moving toward its centre.
       if c == step.tc and r == step.tr then
+        -- (one axis at a time, y to within 2: P1 rests a row at +7, and
+        -- with a wall below, Down+Left held against it moved P1 neither
+        -- way; 2-2 sat 6800 frames under the open gate, 2 px off centre)
         input = { a = input.a, b = input.b }
-        if x < tx - 1 then input.right = true elseif x > tx + 1 then input.left = true end
-        if y < ty - 1 then input.down = true elseif y > ty + 1 then input.up = true end
+        if x < tx - 1 then input.right = true elseif x > tx + 1 then input.left = true
+        elseif y < ty - 2 then input.down = true elseif y > ty + 2 then input.up = true end
       end
     end
   end

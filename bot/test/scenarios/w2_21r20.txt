@@ -1,0 +1,8 @@
+# from full no-rewind run 20's own stage start: clear 2-2 with no death (run 20 was run down by a $86 dash at ~260 frames, twice: a game over).
+start 21r20
+budget 21600
+pass STAGE 22
+fail  DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+pads

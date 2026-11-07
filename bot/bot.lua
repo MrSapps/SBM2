@@ -2521,7 +2521,18 @@ local function think()
     -- (5-8 form 1, above)
   elseif danger[here] then
     plan = "flee"
-    dir = bfs(g, c, r, safeGoal(windows), nearEnemy, cw)
+    -- (first a goal chasers reach 120+ frames after P1: P1 waits there for
+    -- the blasts to pass. 1-3, runs 14-16: fled to (6,19) with a $8C
+    -- coming up the next column and barrel bursts due on the way out;
+    -- it was pulled in, every run alike)
+    if ride.chaserEta then
+      local eta, sg = ride.chaserEta(), safeGoal(windows)
+      dir = bfs(g, c, r, function(cc, rr, n)
+        local e = eta[rr * KEY_W + cc]
+        return sg(cc, rr, n) and (not e or e > n * FPT + 120)
+      end, nearEnemy, cw)
+    end
+    dir = dir or bfs(g, c, r, safeGoal(windows), nearEnemy, cw)
       or bfs(g, c, r, safeGoal(windows), enemyNow, windows)
       or bfs(g, c, r, function(cc, rr) return not windows[rr * KEY_W + cc] end, enemyNow)
   elseif nearEnemy[here] or (frame - throw.dodgeAt < 12 and hit(eWin, here, 0, 90)) then

@@ -1262,6 +1262,8 @@ local SEED = tonumber(os.getenv("SBM2_SEED") or "0")
 -- SBM2_NOREWIND=1: play as a human would: no rollbacks after deaths or
 -- stalls, no ambush retries (no savestate is ever loaded).
 NOREWIND = os.getenv("SBM2_NOREWIND") == "1"
+-- SBM2_STOPEARLY=1 (scenarios): stop at the first death or stage change.
+STOPEARLY = os.getenv("SBM2_STOPEARLY") == "1"
 -- (+ the segment's start frame: after a game over drive.py continues from
 -- the same stage state, and the same choices lost the same way 50 times)
 math.randomseed(SEED + FRAME0 * 7919)
@@ -1512,6 +1514,8 @@ local function think()
         r16(P1 + P_X), r16(P1 + P_Y), table.concat(es, " ")) .. string.format(" stats[E0..FF] %s after: %s",
         table.concat(st, " "), table.concat(recent, " | ")))
       writeFile(string.format("%s/death_%06d.png", OUT, frame), emu.takeScreenshot())
+      -- SBM2_STOPEARLY (scenarios): the first death settles the run.
+      if STOPEARLY and r16(P1 + 0xA8) ~= r16(0x5D72) then StopNow = true end
       logMapNext = true  -- (the map then: what the blast model got wrong)
     end
     step = false
@@ -1546,6 +1550,10 @@ local function think()
   -- from it rather than the world's password state.
   local stNow = emu.read(0x1A, WRAM, false)
   if stNow ~= savedStage then
+    -- SBM2_STOPEARLY: so does the next stage.
+    if STOPEARLY and savedStage then
+      log(string.format("%6d STAGE %02X", frame, stNow)); StopNow = true; return
+    end
     savedStage = stNow
     softSeen, softGone, springLand, springTry, ride.fail, ride.edges, ride.tried = {}, {}, {}, nil, {}, {}, {}
     badCell, planSteps, planCo, noBombUntil = {}, nil, nil, {}
@@ -3399,6 +3407,7 @@ end
 
 
 local function onFrame()
+  if StopNow then flushLog(); emu.stop(0); return end
   Boss.frame()
   -- The ending (stage $60): the game is beaten. Let it play a while, save
   -- the run and stop for good (no rollbacks: its locks are not deaths).

@@ -1,0 +1,9 @@
+# world 1 from full no-rewind run 11's own stage start (its lives, speed,
+# items): clear 1-2 with no death.
+start 11r11
+budget 21600
+pass STAGE 12
+fail  DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+pads

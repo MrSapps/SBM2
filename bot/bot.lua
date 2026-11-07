@@ -2532,6 +2532,18 @@ local function think()
         return sg(cc, rr, n) and (not e or e > n * FPT + 120)
       end, nearEnemy, cw)
     end
+    -- (in a boss fight, first a junction, 3+ open sides: 2-8 waited at the
+    -- arena edge in (3,4), two sides, and a drop's column and the body's
+    -- glide closed both)
+    if not dir and next(bossNow) then
+      local sg = safeGoal(windows)
+      dir = bfs(g, c, r, function(cc, rr, n)
+        if not sg(cc, rr, n) then return false end
+        local open = 0
+        for _, d in ipairs(DIRS) do if walkable(g, cc + d[1], rr + d[2]) then open = open + 1 end end
+        return open >= 3
+      end, nearEnemy, cw)
+    end
     dir = dir or bfs(g, c, r, safeGoal(windows), nearEnemy, cw)
       or bfs(g, c, r, safeGoal(windows), enemyNow, windows)
       or bfs(g, c, r, function(cc, rr) return not windows[rr * KEY_W + cc] end, enemyNow)
@@ -3200,6 +3212,21 @@ local function think()
         plan, dir, step = "shadow", nil, nil
         ride.shadowDir, ride.shadowV = nd, vd
       end
+    end
+  end
+  -- Boss fights: don't wait in a cell with under 3 open sides; go to a safe
+  -- junction (2-8: waited at (3,4) on the arena edge; a drop's column and
+  -- the body's glide closed both its sides).
+  if next(bossNow) and plan == "wait" then
+    local function open(cc, rr)
+      local n = 0
+      for _, d in ipairs(DIRS) do if walkable(g, cc + d[1], rr + d[2]) then n = n + 1 end end
+      return n
+    end
+    if open(c, r) < 3 then
+      local sg = safeGoal(windows)
+      local d2, n = bfs(g, c, r, function(cc, rr, m) return sg(cc, rr, m) and open(cc, rr) >= 3 end, nearEnemy, cw)
+      if d2 and n <= 3 then plan, dir, step = "junction", d2, nil end
     end
   end
   -- Never stand on a $8C's pull line (see PullLine): walk off it.

@@ -1133,7 +1133,11 @@ local function steer(dir, x, y, c, r)
   if dir == "up" or dir == "down" then
     if x < cx - STEER_SLACK then return "right" elseif x > cx + STEER_SLACK then return "left" end
   else
-    if y < cy - STEER_SLACK then return "down" elseif y > cy + STEER_SLACK then return "up" end
+    -- (a pixel more above when the cell below is stairs $66: 3-5, run 23,
+    -- off the sub at (12,9), Left slid P1 to y 149, Down put it back at
+    -- 152 by the docked sub, every 3 frames, until its own bomb went off)
+    local below66 = emu.read(MAP + ((r + 1) << 7) + c * 2, WRAM, false) == 0x66
+    if y < cy - STEER_SLACK - (below66 and 1 or 0) then return "down" elseif y > cy + STEER_SLACK then return "up" end
   end
   return dir
 end

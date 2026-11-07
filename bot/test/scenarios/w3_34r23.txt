@@ -1,0 +1,8 @@
+# from full no-rewind run 23's own stage start: clear 3-5 with no death (run 23 looped game overs here, blast deaths ~1400 frames in).
+start 34r23
+budget 21600
+pass STAGE 35
+fail  DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+pads

@@ -3281,10 +3281,21 @@ local function think()
             end
             return false
           end, nearEnemy, cw)
-          if dir or hn then break end
+          if dir or hn then
+            -- (already on a hunt goal: wait for the enemy here rather than
+            -- go pad-exploring; 3-6 flipped hunt/spring at (10,3)/(10,4))
+            if not dir and hn then plan = "wait"; ride.huntHere = frame end
+            break
+          end
         end
       end
-      if not dir and plan ~= "slam" then
+      -- (not with a remote bomb out: set it off first, standing still. 3-6,
+      -- run 27: the press came as P1 landed off a pad and did nothing; with
+      -- no bomb free it went pad-exploring, back to the same landing, for
+      -- 20000 frames)
+      if not dir and plan ~= "slam" and next(remoteCells) and not remoteCells[here] and g[r][c] ~= SPRING then
+        plan = "wait"
+      elseif not dir and plan ~= "slam" and ride.huntHere ~= frame then
         -- Nothing left on this side: try a spring jump not made yet. Where
         -- it lands (or that it drowns: rollback) is learnt, so the planner
         -- can then route over the spring network (3-1, 3-6).

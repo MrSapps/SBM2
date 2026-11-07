@@ -1,0 +1,8 @@
+# from full no-rewind run 27's own stage start: clear 3-6 with no death.
+start 35r27
+budget 21600
+pass STAGE 36
+fail  DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+pads

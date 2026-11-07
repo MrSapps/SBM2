@@ -283,8 +283,14 @@ local function readBombs(g)
       -- Enemy bombs (flags bit 3: 4-7's $A8 lays range-1 bombs) go off
       -- early when P1 comes near (one at fuse 45 of 72 killed P1 next to
       -- it): treat them as due any moment.
+      -- (only within 2 cells of P1: an $A5's bomb is an ordinary one, and
+      -- "due any moment" froze P1 for 130 frames short of the next cell
+      -- in 1-7 until the real blast came and caught it)
       local enemyBomb = (flags & 0x08) ~= 0
-      if enemyBomb and t > 8 then t = 8 end
+      if enemyBomb and t > 8 then
+        local pc, pr = toTile(r16(P1 + P_X), r16(P1 + P_Y))
+        if math.abs(pc - c) + math.abs(pr - r) <= 2 then t = 8 end
+      end
       if remoteOn and t > 0 and not enemyBomb then t = REMOTE_T end
       -- Blast length = +7 + 1 (C0:3386).
       local b = { c, r, t, emu.read(base + 7, WRAM, false) + 1, remoteOn and t == REMOTE_T and not enemyBomb,

@@ -1,0 +1,10 @@
+# world 2 boss from full no-rewind run 16's own stage start (lives 1):
+# beat 2-8 with no death. (Its first death was a game over, and every
+# continue died the same way.)
+start 27r16
+budget 21600
+pass STAGE 30
+fail  DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+pads

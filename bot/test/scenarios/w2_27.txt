@@ -1,0 +1,9 @@
+# world 2 boss from the library's 2-8 start (build/libp/stage_27): beat it
+# with no death.
+start 27
+budget 21600
+pass STAGE 30
+fail  DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+pads

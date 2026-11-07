@@ -69,9 +69,8 @@ return function(env)
           e.killable = not e.gadget and typ ~= 0xDD and (hp & 0x7F) ~= 0x7F and (f4 & 0x40) == 0
           e.immune = (hp & 0x7F) == 0x7F
           e.chaser = CHASERS[typ] and ((rd8(base + 0xD0) & 0x80) ~= 0 or typ == 0x89)
-          -- ($8C as a chaser sent P1 fleeing across magnet lines in 1-3,
-          -- where the magnet caught it: not in stages with magnets)
-          if typ == 0x8C and MagLine and next(MagLine) then e.chaser = false end
+          -- (the "magnet caught P1" in 1-3 was the $8C's own pull: see
+          -- PullLine in bot.lua; it is a chaser in every stage)
           -- $8A/$97: x-ray chasers by the light switch $7E5AAC ($8A even, $97 odd).
           local light = r16(0x5AAC)
           if (typ == 0x8A or typ == 0x97) and light ~= 0xFFFF then

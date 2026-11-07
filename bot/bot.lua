@@ -2208,12 +2208,32 @@ local function think()
   ride.hasDD = false
   for _, e in ipairs(elist) do if e.type == 0xDD then ride.hasDD = true end end
   stageNow17 = emu.read(0x1A, WRAM, false) == 0x17
+  -- A $8C pulls P1 (C1:84B0 -> C1:85D5/861F): at a cell centre, if it sees
+  -- P1 (SeesP1 C1:8AF9: same 8 px row or column band, up to 4 cells, the
+  -- scan stopped by a tile with bit 7 or a bomb $43) it halts and sets P1's
+  -- acceleration ($8028/$8030/$8032 = $8FFF) toward itself for up to 320
+  -- frames (+$BE). Walking beats it; standing still on the line drifts P1
+  -- into it (1-3 and 1-5: "waiting", P1 pulled 7-30 px into the $8C).
+  PullLine = {}
+  for _, e in ipairs(elist) do
+    if e.type == 0x8C and e.harmful then
+      for _, d in ipairs({ { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }) do
+        for k = 1, 4 do
+          local cc, rr = e.c + d[1] * k, e.r + d[2] * k
+          local tt = g[rr] and g[rr][cc]
+          if not tt or (tt & 0x80) ~= 0 or tt == 0x43 then break end
+          PullLine[rr * KEY_W + cc] = true
+        end
+      end
+    end
+  end
   local function safeGoal(w, t0)
     return function(cc, rr, n)
       local k = rr * KEY_W + cc
       local t = (t0 or 0) + n * FPT
       if ride.hasDD and g[rr][cc] == 0x4D then return false end
       if MagLine and MagLine[k] then return false end
+      if PullLine[k] then return false end
       -- 1-8: the body sweeps sideways at y 64 with a box down to +56 (rows
       -- 2-7): no place to stop up there; its sense grid reaches row 6, so
       -- bombs from row 8 down still hurt it (P1 was caught at (10,3)).
@@ -3077,6 +3097,11 @@ local function think()
         ride.shadowDir, ride.shadowV = nd, vd
       end
     end
+  end
+  -- Never stand on a $8C's pull line (see PullLine): walk off it.
+  if PullLine[here] and (not dir or plan == "wait") and plan ~= "bomb" then
+    local d2 = bfs(g, c, r, safeGoal(windows), nearEnemy, cw)
+    if d2 then plan, dir, step = "offpull", d2, nil end
   end
   -- Off a $DD's track when not going anywhere (4-2: waiting or exploring
   -- on the track, the block pushed P1 into its own blast, twice).

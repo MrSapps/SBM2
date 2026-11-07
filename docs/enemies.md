@@ -219,6 +219,7 @@ records.
 | type | seen in | routine | hp | speed | behaviour |
 |---|---|---|---|---|---|
 | `$94` | 1-x | C1:62D7 | 1 | 0.5 | generic **[log]** |
+| `$8C` | 1-x | C1:844F | 1 | 0.5 | chaser (ChaseUpdate) that **pulls P1**. At a cell centre, if `SeesP1` (C1:8AF9) holds (P1 in the same 8 px row or column band, up to 4 cells, scan stopped by a tile with bit 7 or a bomb `$43`), it halts on its cell and sets P1's acceleration (`$8028` direction bits, `$8030/$8032` = `$8FFF`, C1:861F) toward itself. The pull holds while it still sees P1, for up to 320 frames (`+$BE` to `$140`); one `$8C` at a time (`$7E5D9A/$5D9C`). Walking beats it, but **a P1 standing still drifts into it** (~0.3-0.5 px/f) **[probe]** (1-3, P1 still at (7,18), pulled 7 px down into it at f866-888) |
 | `$8D` | 2-x | C1:62D7 | 1 | 0.5 | generic **[log]** |
 | `$8F` | 3-x | C1:62D7 | `$FF` | 0.5 | generic walker, **immune**. Dies only all together, see below **[log]** |
 | `$83/$84` | | C1:62D7 | | | generic |

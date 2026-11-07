@@ -1,0 +1,8 @@
+# from full no-rewind run 22's own stage start: clear 3-1 with no death (run 22 hunted a $98 mount by the open gate until time ran out).
+start 30r26
+budget 21600
+pass STAGE 31
+fail  DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+pads

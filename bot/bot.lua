@@ -3054,7 +3054,14 @@ local function think()
         log(string.format("%6d dbg bomb here (%d,%d) why=%s enemies %s", frame, c, r, why, table.concat(es, " ")))
       end
       plan, bombWhy = "bomb", why
-      if pushCell == here then ride.planBomb = here end  -- the planner's bomb (remote: set it off soon)
+      if pushCell == here then
+        ride.planBomb = here  -- the planner's bomb (remote: set it off soon)
+        -- (a planned bomb is progress: no stall-explore right after it.
+        -- 2-4, run 26: bombed (13,9) open from (13,8) for the (13,12)
+        -- panel, then the stall check sent P1 exploring for 600 frames
+        -- while the block grew back)
+        progressAt = frame
+      end
       if os.getenv("SBM2_DBG") and why == "obj" and lastPlan and not lastPlan:find("^bomb") then
         local t = {}
         for _, cell in ipairs(blastCells(g, c, r, rangeAt(g, c, r))) do
@@ -3580,8 +3587,13 @@ local function think()
         -- (one axis at a time, y to within 2: P1 rests a row at +7, and
         -- with a wall below, Down+Left held against it moved P1 neither
         -- way; 2-2 sat 6800 frames under the open gate, 2 px off centre)
+        -- (the axis of the step's own move first: 3-1, run 26, stepping down
+        -- into (12,4) at y 64, Left for x slid P1 back up into (12,3) by
+        -- the wall, Down again, every frame for 600 frames)
         input = { a = input.a, b = input.b }
-        if x < tx - 1 then input.right = true elseif x > tx + 1 then input.left = true
+        local vert = step.dir == "up" or step.dir == "down"
+        if vert and y < ty - 2 then input.down = true elseif vert and y > ty + 2 then input.up = true
+        elseif x < tx - 1 then input.right = true elseif x > tx + 1 then input.left = true
         elseif y < ty - 2 then input.down = true elseif y > ty + 2 then input.up = true end
       end
     end
@@ -3786,7 +3798,7 @@ local function think()
   -- the pad never went, 600 frames, and again after each "rollback").
   -- (not while bouncing on purpose, "stay": 3-6, run 24, marked the pad
   -- "no way" while it waited out an $8B by the landing, then fled by it)
-  if g[r][c] == SPRING and frame - frozenAt[3] > 180 and springDir ~= "stay" and (ride.stays or 0) == 0 then
+  if g[r][c] == SPRING and frame - frozenAt[3] > 180 and springDir ~= "stay" then
     for _, d in ipairs(DIRS) do
       if input[d[3]] then
         local key = (r * KEY_W + c) .. d[3]

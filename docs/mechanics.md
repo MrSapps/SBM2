@@ -397,6 +397,11 @@ retreating.
   as form 1 dies only fills effect slots (`$7F1000`, CC:E998), it drops
   nothing. 5-7 hides a glove at (13,10). A 5-8 start state without a glove
   (as made from a password 0-4 run that never picked one up) cannot be won.
+* **No bomb on bit-6 tiles** (`BombButton` C0:3082): when the tile under
+  P1 (`+$B4`) has bit 6 set (`$40`-`$7F`: bombs, stairs `$66`, panels `$69`,
+  lit panels `$70`, `$72`...), the button places nothing (except the
+  lift below and the line-bomb path, `+$F5` = 2) **[port]**. 2-4 seen live:
+  the bot waited on a lit panel to bomb from it and was sealed in.
 * **Lift** (`BombButton` C0:3082): pressing the bomb button (an edge:
   `+$0E` bit 10) while standing on a bomb (tile under P1 `+$B4` has bit 6
   and `& $3F` = 3) with `+$FE` ≠ 0 and `+$50` ≠ 8 calls C0:2F6E. `+$52`

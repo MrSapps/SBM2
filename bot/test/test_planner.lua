@@ -86,6 +86,15 @@ test("planner: a sealed room has no plan", function()
   eq(steps, nil, "plan " .. kinds(steps))
 end)
 
+test("planner: no bomb on a bit-6 tile (2-4: P1 sealed in on a lit panel $70)", function()
+  -- BombButton C0:3082 places nothing when the tile under P1 has bit 6;
+  -- the bot's planner sent P1 to (13,12), a lit panel, to bomb from.
+  local bot, g, c, r = setup("2-4_sealed")
+  local todo = bot.panels()
+  local steps = bot.stagePlan(g, c, r, ctxFor(bot, 0, function(cc, rr) return todo[rr * bot.KEY_W + cc] end))
+  for _, st in ipairs(steps or {}) do eq(st.desc == "bomb(13,12)", false, "plan " .. kinds(steps)) end
+end)
+
 test("planner: bomb pushes the block into the hole", function()
   local bot, g, c, r = setup("push_into_hole")
   local steps = bot.stagePlan(g, c, r, ctxFor(bot, 0))

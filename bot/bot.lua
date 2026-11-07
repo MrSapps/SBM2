@@ -924,7 +924,7 @@ local function stagePlan(g, c0, r0, ctx)
               local bt = grid[br] and grid[br][bc]
               if bt == nil or bt >= 0x80 then break end
               local bk = br * KEY_W + bc
-              if region[bk] and bt ~= 0x66 and walkable(grid, bc, br) and not (ctx.noBomb and ctx.noBomb(bk, bt)) then
+              if region[bk] and (bt & 0x40 == 0 or bt == ITEM) and walkable(grid, bc, br) and not (ctx.noBomb and ctx.noBomb(bk, bt)) then
                 cand[bk] = true
               end
               if BLAST_ENDS[bt & 0x3F] then break end
@@ -1897,7 +1897,7 @@ local function think()
       -- failed to appear, e.g. the $74 panels themselves).
       local ct = g[cell[2]][cell[1]]
       local ck = cell[2] * KEY_W + cell[1]
-      if ct == 0x66 or (noBombTile[ct] or 0) >= 1 or (noBombUntil[ck] or 0) > frame then goto nextCell end
+      if (ct < 0x100 and ct & 0x40 ~= 0 and ct ~= ITEM) or (noBombTile[ct] or 0) >= 1 or (noBombUntil[ck] or 0) > frame then goto nextCell end
       do
       local m = 0
       for _, bc in ipairs(blastCells(g, cell[1], cell[2], rangeAt(g, cell[1], cell[2]))) do
@@ -2200,8 +2200,8 @@ local function think()
   for _, e in ipairs(elist) do
     if e.harmful and not e.shot and (e.chaser or e.type == 0x93 or e.type == 0x85 or e.type == 0x8C) then chasers[#chasers + 1] = e end
   end
-  if #chasers > 0 then
-    ride.chaserEta = function(bc, br, bt)
+  local function makeEta(chasers)
+    return function(bc, br, bt)
       -- A bomb blocks a chaser only if it gets there before the bomb goes
       -- off (after that the way is open: 5-1 backed into a pocket that the
       -- escape bomb closed only until it blew).
@@ -2245,6 +2245,28 @@ local function think()
       end
       return eta
     end
+  end
+  if #chasers > 0 then ride.chaserEta = makeEta(chasers) end
+  -- Any harmful walker, as if it chased (for waits in a dead end).
+  local roamers = {}
+  for _, e in ipairs(elist) do
+    if e.harmful and not e.shot and not e.gadget and e.type ~= 0xDD then roamers[#roamers + 1] = e end
+  end
+  ride.walkerEta = #roamers > 0 and makeEta(roamers) or nil
+  -- A place to sit out blasts with walkers about: a junction (3+ open
+  -- sides), or a cell no walker reaches until 120 frames after P1. (2-4,
+  -- run 18: cleared its remote bomb's row into the dead end at (5,5) as a
+  -- $82 came up the column.)
+  local wEtaNow
+  local function walkerSafe(cc, rr, n)
+    if not ride.walkerEta then return true end
+    wEtaNow = wEtaNow or ride.walkerEta()
+    local e = wEtaNow[rr * KEY_W + cc]
+    if not e or e > n * FPT + 120 then return true end
+    if e <= n * FPT + 30 then return false end  -- (not even a junction a walker gets to first: 1-6 fled up into a $8C)
+    local open = 0
+    for _, d in ipairs(DIRS) do if walkable(g, cc + d[1], rr + d[2]) then open = open + 1 end end
+    return open >= 3
   end
   -- A $DD track block pushes P1 along its $4D track (4-2: P1 waited in a
   -- pocket on the track and was pushed into its own blast): with one on
@@ -2544,6 +2566,10 @@ local function think()
         return open >= 3
       end, nearEnemy, cw)
     end
+    if not dir and ride.walkerEta then
+      local sg = safeGoal(windows)
+      dir = bfs(g, c, r, function(cc, rr, n) return sg(cc, rr, n) and walkerSafe(cc, rr, n) end, nearEnemy, cw)
+    end
     dir = dir or bfs(g, c, r, safeGoal(windows), nearEnemy, cw)
       or bfs(g, c, r, safeGoal(windows), enemyNow, windows)
       or bfs(g, c, r, function(cc, rr) return not windows[rr * KEY_W + cc] end, enemyNow)
@@ -2637,7 +2663,13 @@ local function think()
       if n8A + n97 > 0 then swWant = (n8A >= n97) and 1 or 0 end
     end
     local function targetsInReach(cc, rr, t)
-      if g[rr][cc] == 0x66 then return nil end  -- no bombs on stairs
+      -- No bomb on a tile with bit 6 set ($40-$7F: stairs $66, panels $69,
+      -- lit panels $70, $72...): BombButton C0:3082 returns when the tile
+      -- under P1 (+$B4) has it. (2-4, run 18: walked down a pocket to bomb
+      -- from a lit panel, nothing came out, and the soft block behind P1
+      -- grew back: sealed in for good.)
+      local ht = g[rr][cc]
+      if ht < 0x100 and ht & 0x40 ~= 0 and ht ~= ITEM then return nil end  -- (an item is picked up first)
       if (noBombUntil[rr * KEY_W + cc] or 0) > frame then return nil end
       local why, cells, near = nil, {}, false
       if pushCell == rr * KEY_W + cc then why = "obj" end
@@ -2723,6 +2755,21 @@ local function think()
           if not safe0(c2, r2, n) then return false end
           local e = eta[r2 * KEY_W + c2]
           return not e or e > t + n * FPT + 40
+        end
+      end
+      -- Any walker: an end cell off a junction (two sides or fewer) that a
+      -- walker reaches before the blast is over is a trap, the blast on one
+      -- side and the walker on the other (2-4, run 18: bombed a $82 and
+      -- waited in the row-12 corridor at (8,12); the other $82 came in).
+      if ride.walkerEta then
+        local weta, safe1 = ride.walkerEta(cc, rr, NEW_FUSE + t), safe
+        safe = function(c2, r2, n)
+          if not safe1(c2, r2, n) then return false end
+          local e = weta[r2 * KEY_W + c2]
+          if not e or e > NEW_FUSE + t + FLAME_FRAMES then return true end
+          local open = 0
+          for _, d in ipairs(DIRS) do if walkable(g, c2 + d[1], r2 + d[2]) then open = open + 1 end end
+          return open >= 3
         end
       end
       local goal = remoteOn and function(c2, r2, n)
@@ -2909,7 +2956,9 @@ local function think()
       -- (holding a bomb, B sets nothing off: the remote one waits; walking
       -- out of its blast and back for 500 frames was 5-8 form 2's stall)
       plan = "clear"
-      dir = bfs(g, c, r, function(cc, rr) return not remoteCells[rr * KEY_W + cc] and not windows[rr * KEY_W + cc] end,
+      dir = bfs(g, c, r, function(cc, rr, n) return not remoteCells[rr * KEY_W + cc] and not windows[rr * KEY_W + cc]
+          and walkerSafe(cc, rr, n) end, nearEnemy, cw)
+        or bfs(g, c, r, function(cc, rr) return not remoteCells[rr * KEY_W + cc] and not windows[rr * KEY_W + cc] end,
         nearEnemy, cw)
         or bfs(g, c, r, function(cc, rr) return not remoteCells[rr * KEY_W + cc] end, nil, windows)
       -- Sealed in by our own remote bomb: setting it off is a death, so go
@@ -2921,6 +2970,53 @@ local function think()
         rollback, trappedSince, rollbackBefore = true, nil, (remoteSince or frame) - 10
       end
     else
+      -- Soft blocks grow back (world 2, 5-5): a cell behind one blown open
+      -- is a trap unless, with every blown block back, its area still has a
+      -- cell where a bomb (not on a bit-6 tile) breaks a soft block and P1
+      -- can step out of the blast. (2-4, run 18: hunted a $82 down the
+      -- right-hand column; (13,9) grew back and the three cells left were
+      -- all in reach of any bomb at range 9.)
+      local sealCache, gridR = {}, nil
+      local stg = emu.read(0x1A, WRAM, false)
+      local regrow = (stg & 0xF0) == 0x20 or stg == 0x54
+      local function sealOK(cc, rr)
+        if not regrow then return true end
+        if not gridR then
+          gridR = {}
+          for r2 = 0, MAP_H - 1 do gridR[r2] = g[r2] end
+          for k in pairs(softSeen) do
+            local r2, c2 = k // KEY_W, k % KEY_W
+            if not SOFT[gridR[r2][c2]] and gridR[r2][c2] < 0x40 then
+              if gridR[r2] == g[r2] then local row = {}; for c3 = 0, MAP_W - 1 do row[c3] = g[r2][c3] end; gridR[r2] = row end
+              gridR[r2][c2] = 0xC2
+            end
+          end
+        end
+        if not walkable(gridR, cc, rr) then return true end  -- a blown cell itself: judged by where it leads
+        local reg = regionOf(gridR, cc, rr)
+        if reg[r * KEY_W + c] then return true end
+        local minK = math.huge
+        for k in pairs(reg) do if k < minK then minK = k end end
+        if sealCache[minK] ~= nil then return sealCache[minK] end
+        local ok = false
+        for k in pairs(reg) do
+          local bc, br = k % KEY_W, k // KEY_W
+          local t = gridR[br][bc]
+          if t < 0x40 then
+            local opens, blast = false, {}
+            for _, cell in ipairs(blastCells(gridR, bc, br, rangeAt(gridR, bc, br))) do
+              blast[cell[2] * KEY_W + cell[1]] = true
+              if SOFT[gridR[cell[2]][cell[1]]] then opens = true end
+            end
+            if opens then
+              for k2 in pairs(reg) do if not blast[k2] then ok = true; break end end
+            end
+          end
+          if ok then break end
+        end
+        sealCache[minK] = ok
+        return ok
+      end
       -- An open, unblocked gate is the way out whatever is still alive
       -- (PlayerOnExitTile C1:41A8 checks only Exit_Blocked and the panels;
       -- 2-1's furnace never stops making enemies).
@@ -2960,7 +3056,7 @@ local function think()
         for _, want in ipairs(wants) do
           local goalK
           dir = bfs(g, c, r, function(cc, rr, n)
-            if (cc == c and rr == r) or danger[rr * KEY_W + cc] then return false end
+            if (cc == c and rr == r) or danger[rr * KEY_W + cc] or (want == "enemy" and not sealOK(cc, rr)) then return false end
             local why = targetsInReach(cc, rr, n * FPT)
             if want == "item" then
               if why ~= "obj" then return false end
@@ -3034,6 +3130,7 @@ local function think()
         -- Nothing to bomb from here: close in on the nearest enemy.
         plan = "hunt"
         dir = bfs(g, c, r, function(cc, rr)
+          if not sealOK(cc, rr) then return false end
           for _, e in ipairs(walkers) do
             if math.abs(e[1] - cc) + math.abs(e[2] - rr) <= 3 then return true end
           end
@@ -3232,6 +3329,30 @@ local function think()
       if d2 and n <= 3 then plan, dir, step = "junction", d2, nil end
     end
   end
+  -- Waiting where a chaser can walk within 150 frames: move to where P1's
+  -- lead on it is 30 frames longer and no blast comes for the walk + 90
+  -- frames (the flee logic moves P1 again before a later one). (2-4, run
+  -- 18: waited in the pocket at (3,3) for 100 frames while a $82 came up,
+  -- then dodged into it.)
+  -- (in a dead end, one open side, any walker counts: 2-4, run 18, sat in
+  -- the corner at (3,3) for 100 frames until a $82 wandered in)
+  local deadEnd = 0
+  for _, d in ipairs(DIRS) do if walkable(g, c + d[1], r + d[2]) then deadEnd = deadEnd + 1 end end
+  local etaF = deadEnd <= 1 and ride.walkerEta or nil
+  if etaF and plan == "wait" then
+    local eta = etaF()
+    local eh = eta[here]
+    if eh and eh < 150 then
+      local d2 = bfs(g, c, r, function(cc, rr, n)
+        local k = rr * KEY_W + cc
+        local e = eta[k]
+        return walkable(g, cc, rr) and not hit(windows, k, 0, n * FPT + 90) and not PullLine[k]
+          and not (MagLine and MagLine[k]) and not hit(eWin, k, n * FPT - FPT, n * FPT + 60)
+          and (not e or (e - n * FPT > 16 and e > eh + 16))
+      end, nearEnemy, cw)
+      if d2 then plan, dir, step = "evade", d2, nil end
+    end
+  end
   -- Never stand on a $8C's pull line (see PullLine): walk off it.
   if PullLine[here] and (not dir or plan == "wait") and plan ~= "bomb" then
     local d2 = bfs(g, c, r, safeGoal(windows), nearEnemy, cw)
@@ -3276,7 +3397,9 @@ local function think()
   -- flip back and forth on a tile boundary.
   if dir then dir = dir:match("^%a+") end  -- a jump's "!" (hold in the air) is for springDir
   ride.lastPlan = plan
-  if dir and not (step and plan ~= "flee" and plan ~= "dodge") then
+  -- (a clear too: bombing mid-step toward (5,4), 2-4's P1 kept the step
+  -- and the bomb then stood between it and the way out)
+  if dir and not (step and plan ~= "flee" and plan ~= "dodge" and plan ~= "clear") then
     local d = ({ up = { 0, -1 }, down = { 0, 1 }, left = { -1, 0 }, right = { 1, 0 } })[dir]
     step = { c = c, r = r, tc = c + d[1], tr = r + d[2], dir = dir }
     if plan == "trap" and g[step.tr] and (g[step.tr][step.tc] == 0x63 or g[step.tr][step.tc] == 0x4B) then

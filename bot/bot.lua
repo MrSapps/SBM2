@@ -430,7 +430,10 @@ local BLAST_ENDS = { [0x04] = true, [0x0B] = true, [0x26] = true }
 local PIERCE_TYPES = { [0x02] = true, [0x04] = true, [0x0B] = true }
 local barrelDepth  -- (set while expanding a barrel: its bursts don't recurse)
 local blastCells
-function blastCells(g, c, r, p, pierce)
+-- through: items (type $04) don't stop it. For danger: P1 picks up an item
+-- on its way out, and the blast then goes on past that cell (1-6: fled
+-- "behind" the item at (12,2) by walking over it, 6 seeds alike).
+function blastCells(g, c, r, p, pierce, through)
   if pierce == nil then pierce = (emu.read(P1 + 0xF3, WRAM, false) & 4) ~= 0 end
   local cells = { { c, r } }
   for _, dir in ipairs(DIRS) do
@@ -462,7 +465,7 @@ function blastCells(g, c, r, p, pierce)
         break
       end
       cells[#cells + 1] = { cc, rr, dir }
-      if t < 0x80 and BLAST_ENDS[t & 0x3F] then break end
+      if t < 0x80 and BLAST_ENDS[t & 0x3F] and not (through and (t & 0x3F) == 0x04) then break end
     end
   end
   return cells
@@ -484,7 +487,7 @@ local function blastWindows(g, extra)
   while changed do
     changed = false
     for i, b in ipairs(bombs) do
-      for _, cell in ipairs(blastCells(g, b[1], b[2], b[4], b[6])) do
+      for _, cell in ipairs(blastCells(g, b[1], b[2], b[4], b[6], true)) do
         local other = byCell[cell[2] * KEY_W + cell[1]]
         if other then
           for j, o in ipairs(bombs) do
@@ -503,7 +506,7 @@ local function blastWindows(g, extra)
     -- Remote and frozen bombs only go off when B is pressed or a blast
     -- reaches them (chained above); until then they are just obstacles.
     if times[i] < REMOTE_T then
-      for _, cell in ipairs(blastCells(g, b[1], b[2], b[4], b[6])) do
+      for _, cell in ipairs(blastCells(g, b[1], b[2], b[4], b[6], true)) do
         add(cell[2] * KEY_W + cell[1], times[i] - 4, times[i] + FLAME_FRAMES)
       end
     end
@@ -552,13 +555,13 @@ local function withBomb(g, windows, c, r, tfire)
     l[#l + 1] = { tfire - 4, tfire + FLAME_FRAMES }
     rawset(w, k, l)
   end
-  local cells = blastCells(g, c, r, rangeAt(g, c, r))
+  local cells = blastCells(g, c, r, rangeAt(g, c, r), nil, true)
   for _, cell in ipairs(cells) do add(cell[2] * KEY_W + cell[1]) end
   for i, b in ipairs(lastBombs) do
     if lastTimes[i] > tfire then
       for _, cell in ipairs(cells) do
         if cell[1] == b[1] and cell[2] == b[2] then
-          for _, bc in ipairs(blastCells(g, b[1], b[2], b[4], b[6])) do add(bc[2] * KEY_W + bc[1]) end
+          for _, bc in ipairs(blastCells(g, b[1], b[2], b[4], b[6], true)) do add(bc[2] * KEY_W + bc[1]) end
           break
         end
       end
@@ -1912,7 +1915,7 @@ local function think()
   local remoteCells, remoteWorth = {}, false
   for _, b in ipairs(lastBombs) do
     if b[5] then
-      for _, cell in ipairs(blastCells(g, b[1], b[2], b[4], b[6])) do
+      for _, cell in ipairs(blastCells(g, b[1], b[2], b[4], b[6], true)) do
         local k = cell[2] * KEY_W + cell[1]
         remoteCells[k] = true
         local t = g[cell[2]] and g[cell[2]][cell[1]]

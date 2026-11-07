@@ -1807,12 +1807,13 @@ local function think()
     end
   end
   -- Cells harmful enemies hold now (or are entering): fallback routes avoid them.
-  local enemyNow = {}
+  local enemyNow, mobNow = {}, {}
   for k in pairs(bossNow) do enemyNow[k] = true end
   for _, e in ipairs(elist) do
     if e.harmful then
       enemyNow[e.r * KEY_W + e.c] = true
-      if e.moving then enemyNow[e.tr * KEY_W + e.tc] = true end
+      mobNow[e.r * KEY_W + e.c] = true
+      if e.moving then enemyNow[e.tr * KEY_W + e.tc] = true; mobNow[e.tr * KEY_W + e.tc] = true end
     end
   end
   -- Cells an enemy may be in within the next 1.5 tiles' walk: never step there.
@@ -2508,8 +2509,10 @@ local function think()
     -- and P1 dithered under the 1-8 boss until it was caught.
     local sg = safeGoal(windows)
     local dg = ride.dodgeGoal
+    -- (never through a normal enemy's cell or the one it is entering: the
+    -- windows can let P1 "swap" with a walker head-on in a corridor)
     if dg and frame < dg[3] and dg[1] * 1 == dg[1] and sg(dg[1], dg[2], 0) and not (dg[1] == c and dg[2] == r) then
-      dir = bfs(g, c, r, function(cc, rr) return cc == dg[1] and rr == dg[2] end, nil, cw)
+      dir = bfs(g, c, r, function(cc, rr) return cc == dg[1] and rr == dg[2] end, mobNow, cw)
     end
     if not dir then
       local gk
@@ -2517,7 +2520,7 @@ local function think()
         local ok = sg(cc, rr, n)
         if ok then gk = { cc, rr, frame + 40 } end
         return ok
-      end, nil, cw)
+      end, mobNow, cw)
       ride.dodgeGoal = dir and gk or nil
     end
     if not dir and os.getenv("SBM2_DBG") and frame % 20 == 0 then

@@ -2623,9 +2623,27 @@ local function think()
       local sg = safeGoal(windows)
       dir = bfs(g, c, r, function(cc, rr, n) return sg(cc, rr, n) and walkerSafe(cc, rr, n) end, nearEnemy, cw)
     end
+    -- No way out on foot but a platform waiting beside P1 at a lane end:
+    -- board it (4-4: flipped between "ride" and "flee" each few frames by
+    -- the parked $DC at (3,10), never pressing into it, until the blast).
+    if not dir then
+      for _, ln in ipairs(laneEnds(g, c, r)) do
+        local dc, dr = (ln[1] - c) // ln[3], (ln[2] - r) // ln[3]
+        for _, e in ipairs(elist) do
+          if e.type == 0xDC and e.c == c + dc and e.r == r + dr then
+            plan, dir = "board", nil
+            ride.boardDir = (dc == 1 and "right") or (dc == -1 and "left") or (dr == 1 and "down") or "up"
+          end
+        end
+      end
+    end
+    if plan == "board" then
+      -- (input set below, after the step logic)
+    else
     dir = dir or bfs(g, c, r, safeGoal(windows), nearEnemy, cw)
       or bfs(g, c, r, safeGoal(windows), enemyNow, windows)
       or bfs(g, c, r, function(cc, rr) return not windows[rr * KEY_W + cc] end, enemyNow)
+    end
   elseif nearEnemy[here] or (frame - throw.dodgeAt < 12 and hit(eWin, here, 0, 90)) then
     -- Keep at a dodge for a few frames: nearEnemy flickers as predictions
     -- shift, and turning back each other frame is how the 5-8 body corners us.
@@ -3766,6 +3784,7 @@ local function think()
     frozenAt = { x, y, frame }
   end
   if os.getenv("SBM2_DBG") and input.a and plan ~= "bomb" then log(string.format("%6d dbg A pressed in plan %s", frame, tostring(plan))) end
+  if plan == "board" and ride.boardDir then input = { [ride.boardDir] = true } end
   local s = string.format("%s %s @(%d,%d) px(%d,%d)", plan == "bomb" and "bomb:" .. tostring(bombWhy) or plan, dir or "-", c, r, x, y)
   if s ~= lastPlan then
     log(string.format("%6d %s", frame, s)); lastPlan = s

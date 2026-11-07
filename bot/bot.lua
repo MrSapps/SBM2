@@ -3364,17 +3364,25 @@ local function think()
   -- position (2 px on) is in a cell burning or blasting within 6 frames,
   -- when P1's own cell is not, is dropped (5-8: steering for "aim left"
   -- walked P1 right into a column of flames).
+  -- Nor into a new cell that blasts while P1 crosses it (FPT + 4) and
+  -- sooner than P1's own cell (1-7: fled from an enemy bomb counted
+  -- as due in 8 frames, really 134, into its own bomb's row 7 frames
+  -- before it went off).
   do
-    local function hot(k)
-      for _, iv in ipairs(windows[k] or {}) do if iv[1] <= 6 and iv[2] >= 0 then return true end end
-      return false
+    local function first(k)
+      local f = 1e9
+      for _, iv in ipairs(windows[k] or {}) do if iv[2] >= 0 and iv[1] < f then f = iv[1] end end
+      return f
     end
-    if not hot(here) then
-      for d, v in pairs({ up = { 0, -2 }, down = { 0, 2 }, left = { -2, 0 }, right = { 2, 0 } }) do
-        if input[d] then
-          local nc, nr = toTile(x + v[1], y + v[2])
-          if hot(nr * KEY_W + nc) then input[d] = nil end
-        end
+    local fh = first(here)
+    -- (not in the final fight: there it kept P1 from its throw spots)
+    local cross = emu.read(0x1A, WRAM, false) ~= 0x57
+    for d, v in pairs({ up = { 0, -2 }, down = { 0, 2 }, left = { -2, 0 }, right = { 2, 0 } }) do
+      if input[d] then
+        local nc, nr = toTile(x + v[1], y + v[2])
+        local nk = nr * KEY_W + nc
+        local fn = first(nk)
+        if (fh > 6 and fn <= 6) or (cross and nk ~= here and fn <= FPT + 4 and fn < fh) then input[d] = nil end
       end
     end
   end

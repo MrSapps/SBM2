@@ -55,7 +55,9 @@ return function(env)
           -- that come straight back at P1 it stays harmful for planning;
           -- 4-6 fled onto a flashing $93. For all types it broke 3-3, whose
           -- hit $90/$98 flash where P1 has to pass: 0/2 seeds, 18 deaths.)
-          local flashHarm = typ == 0x93 or typ == 0x8A or typ == 0x97 or typ == 0x85
+          -- ($81 too: 3-4, run 26, a flashing $81 walked into P1 at (12,10)
+          -- as its flash ended, every life of a game over)
+          local flashHarm = typ == 0x93 or typ == 0x8A or typ == 0x97 or typ == 0x85 or typ == 0x81
           local hidden = (f4 & (flashHarm and 0x40 or 0x60)) ~= 0 or (rd8(base + 0x41) & 0x80) ~= 0
             or (r16(base + 0x68) & 2) ~= 0
             or ((typ == 0x98 or typ == 0x90) and (r16(base + 0xBE) & 0x8000) ~= 0)

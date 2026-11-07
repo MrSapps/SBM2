@@ -1,0 +1,8 @@
+# from full no-rewind run 26's own stage start: clear 3-4 with no death (run 26 looped game overs on an $81 here).
+start 33r26
+budget 21600
+pass STAGE 34
+fail  DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+pads

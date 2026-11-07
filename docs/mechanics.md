@@ -326,6 +326,19 @@ facing: `$D2` up (dir 0), `$D5` right (2), `$E0` down (4), `$E1` left
   `$12`/`$15`/`$20`/`$21`) **rotates it 90 degrees clockwise** (dir + 2)
   and rewrites its tile and art. The flame stops there.
 
+* **[probe]** (1-6, port, `stage_15r9`): the pull starts within a few
+  frames of placing (C1:4608 sets `+1` bit 4). While held, the bomb's
+  table entry keeps its **old cell**, and the carrier's tile `$54` sits
+  on the cell next to the magnet (in the scan's way). The fuse runs at
+  about half speed (~4 frames a unit). When it is nearly out, the bomb
+  lands (C0:8C14) on the cell next to the magnet. There `C0:8CF0` sets
+  `+7` = 9 (**length 10**) if that cell is a power spot (the `$14` pads
+  beside every world-1 magnet), else P1's fire, and it goes off at once.
+  A range-5 bomb pulled onto (7,9) flamed (7,2)..(7,9).
+* P1 is **not** pulled by magnets: only bombs, and objects in the enemy
+  list `$7E26A0` (C1:453E). The drift seen next to magnets was a `$8C`
+  pulling P1 (docs/enemies.md 5).
+
 **Bot recipe.** A bomb placed in a magnet's line of sight, within 4
 cells with nothing solid in between, does not stay where it was placed:
 it slides up to the magnet. Predict its blast from the cell next to the
@@ -335,8 +348,9 @@ it a quarter turn clockwise).
 ## 9. Other world 1 / world 2 tiles
 
 * `$14` (world 1) = **power spot**. `FindPowerSpots` C0:3761 lists them in
-  `$7E2FF0`. A bomb placed while P1 stands on one gets range 9
-  (`BombSetRange` C0:3583). Useful for reaching far targets.
+  `$7E2FF0`. A bomb placed while P1 stands on one gets `+7` = 9, i.e.
+  **length 10** (`BombSetRange` C0:3583); so does a magnet-pulled bomb
+  landing on one (section 8). Useful for reaching far targets.
 * `$D6` (type `$16`, 1-2) = **barrel**. A blast reaching it
   (`BarrelExplode` C1:26AA) clears it to `$00` and sets off 5 range-1
   explosions: on the barrel cell and on the cells 2 away in each

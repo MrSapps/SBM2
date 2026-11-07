@@ -288,7 +288,7 @@ local function readBombs(g)
       if remoteOn and t > 0 and not enemyBomb then t = REMOTE_T end
       -- Blast length = +7 + 1 (C0:3386).
       local b = { c, r, t, emu.read(base + 7, WRAM, false) + 1, remoteOn and t == REMOTE_T and not enemyBomb,
-        (emu.read(base, WRAM, false) & 4) ~= 0 }
+        (emu.read(base, WRAM, false) & 4) ~= 0, (flags & 0x10) ~= 0 }  -- [7]: held by a magnet
       list[#list + 1] = b
       byCell[r * KEY_W + c] = b
     end
@@ -308,15 +308,33 @@ local function readBombs(g)
     local t = g[mr] and g[mr][mc]
     local d = MD[dir]
     if d and (t == 0xD2 or t == 0xD5 or t == 0xE0 or t == 0xE1) then
+      -- A bomb already held (+1 bit 4) keeps its old cell in the table
+      -- while its carrier ($54) sits next to the magnet, blocking the scan.
+      for k = 2, 4 do
+        local hk = (mr + d[2] * k) * KEY_W + mc + d[1] * k
+        local b = byCell[hk]
+        if b and b[7] then
+          byCell[hk] = nil
+          b[1], b[2] = mc + d[1], mr + d[2]
+          byCell[b[2] * KEY_W + b[1]] = b
+          if b[3] < 100000 then b[3] = b[3] * 2 end
+          if g[b[2]] and (g[b[2]][b[1]] or 0) & 0x3F == 0x14 then b[4] = math.max(b[4], 10) end
+        end
+      end
       for k = 1, 4 do
         local cc, rr = mc + d[1] * k, mr + d[2] * k
         local tt = g[rr] and g[rr][cc]
         if not tt then break end
         local b = byCell[rr * KEY_W + cc]
-        if b and b[3] >= 6 and k > 1 then
+        if b and not b[7] and b[3] >= 6 and k > 1 then
           byCell[rr * KEY_W + cc] = nil
           b[1], b[2] = mc + d[1], mr + d[2]
           byCell[b[2] * KEY_W + b[1]] = b
+          -- Held, its fuse runs at about half speed; it lands when the fuse
+          -- is out and goes off at once, at length 10 on a $14 pad (C0:8CF0;
+          -- 1-6: range 5 became 10 and reached P1 7 cells up).
+          if b[3] < 100000 then b[3] = b[3] * 2 end
+          if g[b[2]] and (g[b[2]][b[1]] or 0) & 0x3F == 0x14 then b[4] = math.max(b[4], 10) end
           break
         end
         if (tt & 0xC0) ~= 0 then break end
@@ -519,9 +537,9 @@ end
 -- windows (from blastWindows(g) this frame) plus a bomb placed at (c,r)
 -- going off at tfire, or earlier if an existing blast reaches it. Bombs it
 -- reaches go off with it. Returns an overlay; windows is not modified.
--- Blast length of a bomb P1 places at (c,r): standing on $14 gives 9
--- (world 1, docs/mechanics.md).
-local function rangeAt(g, c, r) return g[r][c] == 0x14 and math.max(RANGE, 9) or RANGE end
+-- Blast length of a bomb P1 places at (c,r): a $14 pad gives +7 = 9, so
+-- length 10 (BombSetRange C0:3592, world 1; docs/mechanics.md).
+local function rangeAt(g, c, r) return g[r][c] == 0x14 and math.max(RANGE, 10) or RANGE end
 
 local function withBomb(g, windows, c, r, tfire)
   for _, win in ipairs(windows[r * KEY_W + c] or {}) do

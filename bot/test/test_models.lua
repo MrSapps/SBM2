@@ -111,6 +111,27 @@ test("a magnet pulls a ticking bomb on its line to the cell next to it (1-3)", f
   check(MagLine and MagLine[3 * KEY_W + 8], "the magnet's line is recorded (no place to stop)")
 end)
 
+test("a magnet-held bomb lands on the $14 pad at length 10 (1-6)", function()
+  -- magnet $E1 (facing left) at (12,3), pad $14 at (11,3) under the
+  -- carrier ($54); P1's range-2 bomb held (flags $90), still listed at its
+  -- old cell (9,3), with its fuse nearly out
+  setup(room(15, { [3] = "C6 . . . . . . . . . . 54 E1 . C6" }))
+  E.poke16(0x5828 + 2, 3 * 0x80 + 12 * 2); E.poke16(0x5828 + 8, 6)
+  bomb(0, 9, 3, 3, 0x90, 2)
+  local bot, g = loadBot()
+  local w = bot.blastWindows(g)
+  check(firstWindow(w, 11, 3) ~= nil, "it goes off on the pad")
+  check(firstWindow(w, 2, 3) ~= nil, "9 cells along the row (length 10)")
+end)
+
+test("a bomb placed on a $14 pad has length 10 (BombSetRange C0:3592)", function()
+  setup(room(15, { [3] = "C6 . . . . . . . . . . 14 . . C6" }))
+  bomb(0, 11, 3, 40, 0x80, 10)  -- what the game writes: +7 = 9
+  local bot, g = loadBot()
+  local w = bot.blastWindows(g)
+  check(firstWindow(w, 1, 3) ~= nil, "10 cells along the row")
+end)
+
 test("2-8 drops: a marker is a range-10 bomb due when the faller lands", function()
   setup(room(27))
   bossObj(0x1040, 0xCCB2F1, 128, 40)  -- marker at screen (128,40): cell (8,2)

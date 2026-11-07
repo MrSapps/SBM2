@@ -3761,7 +3761,9 @@ local function think()
   -- On a spring pad pressing one way for 60 frames without a launch: that
   -- jump is no way (3-1, run 22: the exit route jumped right off (4,6),
   -- the pad never went, 600 frames, and again after each "rollback").
-  if g[r][c] == SPRING and frame - frozenAt[3] > 60 then
+  -- (not while bouncing on purpose, "stay": 3-6, run 24, marked the pad
+  -- "no way" while it waited out an $8B by the landing, then fled by it)
+  if g[r][c] == SPRING and frame - frozenAt[3] > 60 and springDir ~= "stay" and (ride.stays or 0) == 0 then
     for _, d in ipairs(DIRS) do
       if input[d[3]] then
         local key = (r * KEY_W + c) .. d[3]

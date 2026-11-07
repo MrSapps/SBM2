@@ -210,7 +210,12 @@ return function(env)
   -- stands 50 frames (+$3A), turns, and moves 128 frames; a strike (9BDD,
   -- +$36 frames) freezes it and then resumes. So x swings over 64..192 on a
   -- fixed beat, whatever P1 does (strikes aside). Exact x t frames on.
-  function B.sunX(t)
+  -- With p1x/vp: P1 is taken to follow the body at vp px/f from p1x, and
+  -- the body strikes (CC:9BDD: stands 192 frames, then cooldown +$38 =
+  -- 128) whenever P1 is 16..40 px to its side with the cooldown out
+  -- (CC:9E9A). A slow P1 lags at the turns and sets strikes off: at speed
+  -- 1 every shadow bomb missed by 49 px, the body frozen at x 79/177.
+  function B.sunX(t, p1x, vp)
     local st = r16(0x1000) | (rd8(0x1002) << 16)
     local x = s16(r16(0x1011))
     if x >= 0x100 then x = x - 0x100 end
@@ -219,6 +224,26 @@ return function(env)
     if st == 0xCC9B54 then move, pause = 0, r16(0x103A)
     elseif st == 0xCC9BDD then hold = r16(0x1036)
     elseif st ~= 0xCC9ABA then return nil end
+    if p1x then
+      local cool = r16(0x1038)
+      for _ = 1, t do
+        if hold > 0 then hold = hold - 1; if hold == 0 then cool = 128 end
+        else
+          if cool > 0 then cool = cool - 1 end
+          local dx = math.abs(p1x - x)
+          if cool == 0 and dx >= 16 and dx <= 40 then hold = 192
+          elseif move > 0 then
+            x = x + dir; move = move - 1
+            if move == 0 then pause = 50 end
+          elseif pause > 0 then
+            pause = pause - 1
+            if pause == 0 then dir, move = -dir, 128 end
+          else pause = 50 end
+        end
+        if p1x < x - vp then p1x = p1x + vp elseif p1x > x + vp then p1x = p1x - vp else p1x = x end
+      end
+      return x
+    end
     local left = t
     local take = math.min(left, hold); left = left - take
     while left > 0 do

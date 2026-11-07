@@ -3085,12 +3085,25 @@ local function think()
     -- frames, and forget a bomb that never appeared)
     if sb and frame - sb.at <= 1 then input.a = true end
     if sb and frame - sb.at >= 8 then
-      local seen = false
-      for _, b in ipairs(lastBombs or {}) do if b[1] == sb.c and b[2] == sb.r then seen = true end end
-      if not seen and not sb.seen then ride.sb, sb = nil, nil elseif sb then sb.seen = true end
+      local seen, boom = false, false
+      for _, b in ipairs(lastBombs or {}) do
+        if b[1] == sb.c and b[2] == sb.r then seen = true; boom = b[3] == 0 end
+      end
+      if not seen and not sb.seen then ride.sb, sb = nil, nil
+      else
+        -- (how long our bombs take here, placed to blast: 150 frames in one
+        -- 1-8 start, 205 in another; the timing uses the last one)
+        if boom and not sb.timed then sb.timed = true; ride.fuse18 = frame - sb.at end
+        sb.seen = true
+      end
     end
     local ox = origin()
     local function colX(cc) return cc * 16 + 8 - ox end
+    -- P1's walking speed, px/f, from its moves along the rows here
+    if ride.lastX and ride.lastXf == frame - 1 and ride.shadowDir and math.abs(x - ride.lastX) > 0 and math.abs(x - ride.lastX) <= 3 then
+      ride.vp = (ride.vp or 1) * 0.9 + math.abs(x - ride.lastX) * 0.1
+    end
+    ride.lastX, ride.lastXf = x, frame
     if body and r >= 8 and math.abs(x - body.x) <= 18 and (sb or (plan ~= "flee" and plan ~= "bomb")) then
       local tx = (Boss.predict(body, 4) or body.x)
       -- (with a bomb out: hold the even column 2 over, on the body's side;
@@ -3110,12 +3123,18 @@ local function think()
         if hurt or math.abs(colX(ec) - body.x) <= 10 then tx = colX(ec) end
       end
       if not sb and r % 2 == 0 and r - RANGE <= 6 and c % 2 == 0 and emu.read(P1 + P_BOMBS_LEFT, WRAM, false) > 0 and math.abs(x - colX(c)) <= 3 then
-        local bx = Boss.predict(body, NEW_FUSE)
-        if bx and math.abs(bx - colX(c)) >= 14 and math.abs(bx - colX(c)) <= 36 then
+        -- (strikes P1 sets off by lagging count: Boss.sunX with P1's speed)
+        -- (with the fuse measured, ~215 frames in both 1-8 starts seen: the
+        -- body inside its +-32 sense reach of the column; until then the
+        -- old 150-frame / 14-36 px rule, tuned to hit at that real fuse)
+        local bx = Boss.sunX(ride.fuse18 or NEW_FUSE, x, ride.vp or 1)
+        local lo, hi = 14, 36
+        if ride.fuse18 then lo, hi = 0, 28 end
+        if bx and math.abs(bx - colX(c)) >= lo and math.abs(bx - colX(c)) <= hi then
           ride.sb = { c = c, r = r, at = frame }
           sb = ride.sb
           input.a = true
-          log(string.format("%6d shadow bomb at (%d,%d), body at x %.0f", frame, c, r, body.x))
+          log(string.format("%6d shadow bomb at (%d,%d), body at x %.0f, expect x %.0f at %d (P1 %.2f px/f, cool %d)", frame, c, r, body.x, bx, ride.fuse18 or NEW_FUSE, ride.vp or 1, r16(0x1038)))
         end
       end
       local nd, vd

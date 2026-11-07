@@ -1,5 +1,5 @@
 # world 1 boss from the library's 1-8 start (build/libp/stage_17): beat it
-# with no death (2/2 seeds, frame 6050).
+# with no death (4/4 seeds, frame 5543).
 start 17
 budget 21600
 pass STAGE 20

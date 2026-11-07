@@ -2999,16 +2999,6 @@ local function think()
     end
     local why = haveBomb and targetsInReach(c, r, 0)
     if why == "enemy" and frame < ambushHold then why = nil end
-    -- A walker about to reach P1 in a corridor (two open sides or fewer):
-    -- a bomb here blocks it and may well kill it, P1 leaving the other way
-    -- (2-4, run 21: waited at (6,4) in the row-4 corridor as a $82 came,
-    -- then was driven back into the (3,3) pocket and caught).
-    if not why and haveBomb and ride.walkerEta and not PullLine[here] then
-      local open = 0
-      for _, d in ipairs(DIRS) do if walkable(g, c + d[1], r + d[2]) then open = open + 1 end end
-      local we = ride.walkerEta()[here]
-      if open <= 2 and we and we < 90 then why = "enemy" end
-    end
     -- (not on a $8C's pull line: fleeing its blast, the pull holds P1 back
     -- and the escape timing is off; run 17's 1-6 bombed one from below)
     if why and PullLine[here] then why = nil end

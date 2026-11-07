@@ -1,0 +1,8 @@
+# from full no-rewind run 19's own stage start: clear 2-6 with no death (run 19 died to a $82 while waiting at (4,5)).
+start 25r19
+budget 21600
+pass STAGE 26
+fail  DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+pads

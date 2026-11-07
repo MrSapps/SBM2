@@ -1,0 +1,8 @@
+# from full no-rewind run 19's own stage start: clear 3-3 with no death (run 19 was shot by a $90 at frame 86, every time: a game-over loop).
+start 32r19
+budget 21600
+pass STAGE 33
+fail  DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+pads

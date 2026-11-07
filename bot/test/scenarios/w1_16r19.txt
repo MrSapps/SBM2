@@ -1,0 +1,8 @@
+# from full no-rewind run 19's own stage start: clear 1-7 with no death (run 19: two game overs, sealed between its bomb and an $A5 bomb).
+start 16r19
+budget 21600
+pass STAGE 17
+fail  DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+pads

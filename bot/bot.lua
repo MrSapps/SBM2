@@ -2293,13 +2293,32 @@ local function think()
       end
     end
   end
+  -- A $90 fires a $B2 shot (2 px/f up/down, 1.5 across) every 64 frames
+  -- at a centre when P1 is in line within 10 cells (walls and bombs
+  -- block). No place to stop or hunt from: in a corridor there is no
+  -- stepping aside. (3-3, run 19: fled to (11,23), a cell and a half
+  -- below a $90, and was shot every time; hunting one head-on up a
+  -- column, shot from 5 cells.)
+  FireLine = {}
+  for _, e in ipairs(elist) do
+    if e.type == 0x90 and e.harmful then
+      for _, d in ipairs({ { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }) do
+        for k = 1, 10 do
+          local cc, rr = e.c + d[1] * k, e.r + d[2] * k
+          local tt = g[rr] and g[rr][cc]
+          if not tt or (tt & 0x80) ~= 0 or tt == 0x43 then break end
+          FireLine[rr * KEY_W + cc] = true
+        end
+      end
+    end
+  end
   local function safeGoal(w, t0)
     return function(cc, rr, n)
       local k = rr * KEY_W + cc
       local t = (t0 or 0) + n * FPT
       if ride.hasDD and g[rr][cc] == 0x4D then return false end
       if MagLine and MagLine[k] then return false end
-      if PullLine[k] then return false end
+      if PullLine[k] or FireLine[k] then return false end
       -- 1-8: the body sweeps sideways at y 64 with a box down to +56 (rows
       -- 2-7): no place to stop up there; its sense grid reaches row 6, so
       -- bombs from row 8 down still hurt it (P1 was caught at (10,3)).
@@ -2779,7 +2798,10 @@ local function think()
       -- here: a $DC within 2 cells of the bomb (4-4, 4-2: a lane end was
       -- the only way out of a column the blast fills).
       allowRide = ride.dockedNear(cc, rr, 20)
-      local ok = bfs(g, cc, rr, goal, nil, combine(w, eWin), t) ~= nil
+      -- (not through a cell an enemy holds now: 3-3, run 19, bombed with
+      -- the only way out up a one-wide column a $90 was coming down, the
+      -- route timed past it on its predicted walk; shot, every time)
+      local ok = bfs(g, cc, rr, goal, mobNow, combine(w, eWin), t) ~= nil
       allowRide = true
       return ok
     end
@@ -3130,7 +3152,7 @@ local function think()
         -- Nothing to bomb from here: close in on the nearest enemy.
         plan = "hunt"
         dir = bfs(g, c, r, function(cc, rr)
-          if not sealOK(cc, rr) then return false end
+          if not sealOK(cc, rr) or FireLine[rr * KEY_W + cc] then return false end
           for _, e in ipairs(walkers) do
             if math.abs(e[1] - cc) + math.abs(e[2] - rr) <= 3 then return true end
           end
@@ -3352,6 +3374,11 @@ local function think()
       end, nearEnemy, cw)
       if d2 then plan, dir, step = "evade", d2, nil end
     end
+  end
+  -- Nor in a $90's line of fire (see FireLine).
+  if FireLine[here] and (not dir or plan == "wait") and plan ~= "bomb" then
+    local d2 = bfs(g, c, r, safeGoal(windows), nearEnemy, cw)
+    if d2 then plan, dir, step = "offfire", d2, nil end
   end
   -- Never stand on a $8C's pull line (see PullLine): walk off it.
   if PullLine[here] and (not dir or plan == "wait") and plan ~= "bomb" then

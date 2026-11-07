@@ -2387,7 +2387,7 @@ local function think()
       if PullRisk[k] then
         local open = 0
         for _, d in ipairs(DIRS) do if walkable(g, cc + d[1], rr + d[2]) then open = open + 1 end end
-        if open <= 1 then return false end
+        if open <= 2 then return false end
       end
       -- 1-8: the body sweeps sideways at y 64 with a box down to +56 (rows
       -- 2-7): no place to stop up there; its sense grid reaches row 6, so

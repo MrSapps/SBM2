@@ -102,6 +102,10 @@ return function(env)
     -- (1-8 and 3-8 only: elsewhere an object deleted last frame, a 5-8 ball,
     -- stayed listed and the whole 5-8 fight was lost)
     local stg = r16(0x1A) & 0xFF
+    -- Bosses live only in the x-8 stages ($17 ... $57). (Run 18's 2-4 still
+    -- contact-checked 1-8's hands at x 384, read as a blink at x 128: a
+    -- phantom boss on the map and the boss-fight rules on.)
+    if (stg & 0x0F) ~= 7 then return list end
     if stg == 0x17 or stg == 0x37 then for base, o in pairs(prev) do both[base] = o end end
     for base, o in pairs(last) do both[base] = o end
     for base, o in pairs(both) do

@@ -1,0 +1,8 @@
+# from full no-rewind run 18's own stage start: clear 2-4 with no death.
+start 23r18
+budget 30000
+pass STAGE 24
+fail  DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+pads

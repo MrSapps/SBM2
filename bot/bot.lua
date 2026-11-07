@@ -2346,6 +2346,34 @@ local function think()
       end
     end
   end
+  -- Cells a $8C could pull from within ~150 frames: the 4-cell lines from
+  -- every cell it can walk to by then. A dead end there is no place to sit
+  -- out a blast: it can't be walked out of (1-3, the full-run path: hid at
+  -- (5,14) after bombing at (6,15); a $8C came up the column and pulled
+  -- P1 into the bomb's row).
+  local PullRisk = {}
+  for _, e in ipairs(elist) do
+    if e.type == 0x8C and e.harmful then
+      local seen, q, qi = { [e.r * KEY_W + e.c] = 0 }, { { e.c, e.r } }, 1
+      while q[qi] do
+        local cc, rr = q[qi][1], q[qi][2]; qi = qi + 1
+        local tt = seen[rr * KEY_W + cc]
+        for _, d in ipairs({ { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }) do
+          for kk = 1, 4 do
+            local lc, lr = cc + d[1] * kk, rr + d[2] * kk
+            local lt = g[lr] and g[lr][lc]
+            if not lt or (lt & 0x80) ~= 0 or lt == 0x43 then break end
+            PullRisk[lr * KEY_W + lc] = true
+          end
+          local nc, nr = cc + d[1], rr + d[2]
+          local nk = nr * KEY_W + nc
+          if seen[nk] == nil and tt + e.cpf <= 150 and walkable(g, nc, nr) then
+            seen[nk] = tt + e.cpf; q[#q + 1] = { nc, nr }
+          end
+        end
+      end
+    end
+  end
   local function safeGoal(w, t0)
     return function(cc, rr, n)
       local k = rr * KEY_W + cc
@@ -2353,6 +2381,11 @@ local function think()
       if ride.hasDD and g[rr][cc] == 0x4D then return false end
       if MagLine and MagLine[k] then return false end
       if PullLine[k] or FireLine[k] then return false end
+      if PullRisk[k] then
+        local open = 0
+        for _, d in ipairs(DIRS) do if walkable(g, cc + d[1], rr + d[2]) then open = open + 1 end end
+        if open <= 1 then return false end
+      end
       -- 1-8: the body sweeps sideways at y 64 with a box down to +56 (rows
       -- 2-7): no place to stop up there; its sense grid reaches row 6, so
       -- bombs from row 8 down still hurt it (P1 was caught at (10,3)).

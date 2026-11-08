@@ -1,0 +1,8 @@
+# 4-4 from full run 37's arrival: rode a platform to the lane end (2,10) where an $89 sat, three deaths alike
+start 43r37
+budget 21600
+pass STAGE 44
+fail DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+pads

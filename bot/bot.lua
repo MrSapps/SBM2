@@ -182,6 +182,7 @@ end
 DeadPad = {}  -- pad key -> frame it was found not launching (floor for a while)
 HasPad = false  -- the stage has spring pads ($4C)
 Blind = false  -- enemies not placed yet: no bombs
+RideBlock = {}  -- platform lane ends not to ride to (an enemy there)
 Breaking = {}  -- soft block key -> frame seen next to flames (breaking)
 function bombAtKey(k)  -- a bomb tile ($40-$43) on cell key k
   local t = emu.read(MAP + (k // KEY_W) * ROW + (k % KEY_W) * 2, WRAM, false)
@@ -720,7 +721,7 @@ local function bfs(g, c0, r0, goal, avoid, windows, t0)
           if g[r][c] == BOARD and allowRide then
             local k0 = r * KEY_W + c
             for _, e in ipairs(laneEnds(g, c, r)) do
-              if not ride.fail[k0 .. ">" .. (e[2] * KEY_W + e[1])] then
+              if not ride.fail[k0 .. ">" .. (e[2] * KEY_W + e[1])] and not RideBlock[e[2] * KEY_W + e[1]] then
                 push(e[1], e[2], first or "ride", n + 3 * e[3] + 8)
               end
             end
@@ -1975,6 +1976,27 @@ local function think()
     end
   end
   local cw = combine(windows, eWin)   -- blasts + enemies, for routes
+  -- Lane ends with a harmful enemy on or by them: no ride there (4-4, run
+  -- 37: rode to (2,10), where an $89 sat, three deaths alike).
+  RideBlock = {}
+  -- (and lane ends a walker or chaser reaches within 250 frames, last
+  -- frame's estimate: a ride and a wait for the way back)
+  do
+    local we = ride.walkerEta and ride.walkerEta()
+    local ce = ride.chaserEta and ride.chaserEta()
+    for _, m in ipairs({ we or {}, ce or {} }) do
+      for k, t in pairs(m) do if t < 250 and g[k // KEY_W] and g[k // KEY_W][k % KEY_W] == BOARD then RideBlock[k] = true end end
+    end
+  end
+  for _, e in ipairs(elist) do
+    if e.harmful and not e.gadget then
+      -- (within 3 cells: a ride takes ~60 frames, and the $89 walked up
+      -- from (2,12) as P1 rode in)
+      for dr = -3, 3 do for dc = -3, 3 do
+        if math.abs(dr) + math.abs(dc) <= 3 then RideBlock[(e.r + dr) * KEY_W + e.c + dc] = true end
+      end end
+    end
+  end
   local enemies, walkers = {}, {}
   for _, cell in ipairs(Boss.centres(bosses)) do
     enemies[#enemies + 1] = cell; walkers[#walkers + 1] = cell
@@ -3855,7 +3877,7 @@ local function think()
     for _, ln in ipairs(laneEnds(g, c, r)) do
       local dc, dr = (ln[1] - c) // ln[3], (ln[2] - r) // ln[3]
       for _, e in ipairs(elist) do
-        if e.type == 0xDC and e.c == c + dc and e.r == r + dr then
+        if e.type == 0xDC and e.c == c + dc and e.r == r + dr and not RideBlock[ln[2] * KEY_W + ln[1]] then
           input = { [(dc == 1 and "right") or (dc == -1 and "left") or (dr == 1 and "down") or "up"] = true }
         end
       end

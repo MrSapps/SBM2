@@ -1,0 +1,8 @@
+# 5-1 from full run 34's arrival: 6 contact deaths to fast $8A
+start 50r34
+budget 21600
+pass STAGE 51
+fail DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+pads

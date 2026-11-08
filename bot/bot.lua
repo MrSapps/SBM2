@@ -182,6 +182,7 @@ end
 DeadPad = {}  -- pad key -> frame it was found not launching (floor for a while)
 HasPad = false  -- the stage has spring pads ($4C)
 Blind = false  -- enemies not placed yet: no bombs
+Breaking = {}  -- soft block key -> frame seen next to flames (breaking)
 StageStart = 0  -- frame the current stage was first seen
 Riding = false  -- P1 on a $90/$98 mount (+$60 bit 15)
 AvoidCell = {}  -- cells never walked into (a mount P1 would board where pads matter)
@@ -2183,6 +2184,17 @@ local function think()
       softBlownAt[k] = nil
     end
   end
+  -- A soft block next to flames is breaking: it still reads soft for a
+  -- while (5-1, run 34: (5,4) went ~15 frames after the bot planned a hide
+  -- behind it, and a $8A came through). Chaser times treat it as open.
+  for _, fk in ipairs(g.flames) do
+    local fc, fr = fk % KEY_W, fk // KEY_W
+    for _, d in ipairs(DIRS) do
+      local t = g[fr + d[2]] and g[fr + d[2]][fc + d[1]]
+      if t and SOFT[t] then Breaking[(fr + d[2]) * KEY_W + fc + d[1]] = frame end
+    end
+  end
+  for k, at in pairs(Breaking) do if frame - at > 120 or frame < at then Breaking[k] = nil end end
   for _ in pairs(panelTodo) do todo = todo + 1 end
   -- Not the enemy count: spawners (the 2-1 furnace) keep adding enemies.
   local sig = string.format("%d/%d/%d", score(), soft, todo)
@@ -2382,6 +2394,18 @@ local function think()
       local bombT = {}
       for i, b in ipairs(lastBombs or {}) do bombT[b[2] * KEY_W + b[1]] = (lastTimes and lastTimes[i]) or b[3] end
       if bc then bombT[br * KEY_W + bc] = bt or NEW_FUSE end
+      -- Soft blocks a pending blast breaks open then (5-1, run 34: hid in
+      -- the (2,5) pocket from a bomb that broke (5,4) and let a $8A in).
+      local softT = {}
+      local function opens(c0, r0, t0, rng)
+        for _, cell in ipairs(blastCells(g, c0, r0, rng)) do
+          local k = cell[2] * KEY_W + cell[1]
+          local tt = g[cell[2]] and g[cell[2]][cell[1]]
+          if tt and SOFT[tt] and (not softT[k] or t0 < softT[k]) then softT[k] = t0 + 20 end
+        end
+      end
+      for i, b in ipairs(lastBombs or {}) do opens(b[1], b[2], (lastTimes and lastTimes[i]) or b[3], b[4]) end
+      if bc then opens(bc, br, bt or NEW_FUSE, rangeAt(g, bc, br)) end
       local eta = {}
       -- Times, not steps (a label-correcting search): a chaser held up by a
       -- bomb goes on once it has blown, after the hurt freeze if the blast
@@ -2401,9 +2425,10 @@ local function think()
               local nc, nr = cc + dd[1], rr + dd[2]
               local k = nr * KEY_W + nc
               local tile = g[nr] and g[nr][nc]
-              local thru = e.type == 0x8E and tile and tile ~= 0xC5 and tile ~= 0xC6 and tile ~= 0x01
-              if tile and (walkable(g, nc, nr) or thru or bombT[k] or isBomb(tile)) then
+              local thru = (e.type == 0x8E and tile and tile ~= 0xC5 and tile ~= 0xC6 and tile ~= 0x01) or Breaking[k] ~= nil
+              if tile and (walkable(g, nc, nr) or thru or bombT[k] or isBomb(tile) or softT[k]) then
                 local tn = tt + e.cpf
+                if softT[k] and not thru and tn < softT[k] then tn = softT[k] + e.cpf end
                 local tb = bombT[k] or (isBomb(tile) and 100000) or nil
                 local ok = true
                 if tb and tn < tb - 20 then
@@ -3037,7 +3062,19 @@ local function think()
         safe = function(c2, r2, n)
           if not safe0(c2, r2, n) then return false end
           local e = eta[r2 * KEY_W + c2]
-          return not e or e > t + n * FPT + 40
+          if not e then return true end
+          local open = 0
+          for _, d in ipairs(DIRS) do if walkable(g, c2 + d[1], r2 + d[2]) then open = open + 1 end end
+          -- (a pocket or corridor: P1 still has to walk out after the blast;
+          -- 5-1, run 31: ambush bomb at a pocket's mouth, the 2-HP $8A was
+          -- only hurt, came on 100 frames later and caught P1 inside)
+          if e > NEW_FUSE + t + FLAME_FRAMES + (open >= 3 and 0 or 200) then return true end
+          -- (P1 waits there until the blast is over: a chaser coming
+          -- before that is met with the blast behind P1, unless it is a
+          -- junction to sidestep at. 5-1, run 34: bombed (2,7), hid on
+          -- row 4 and a $8A came along it.)
+          if e <= t + n * FPT + 40 then return false end
+          return open >= 3
         end
       end
       -- Any walker: an end cell off a junction (two sides or fewer) that a
@@ -3067,7 +3104,12 @@ local function think()
       -- route timed past it on its predicted walk; shot, every time)
       local eg = g
       if escGrid and not SOFT[escGrid[rr][cc]] then eg = escGrid end
-      local ok = bfs(eg, cc, rr, goal, mobNow, combine(w, eWin), t) ~= nil
+      local gotC
+      local ok = bfs(eg, cc, rr, function(c2, r2, n) local v = goal(c2, r2, n); if v then gotC = { c2, r2, n } end; return v end, mobNow, combine(w, eWin), t) ~= nil
+      if os.getenv("SBM2_DBG2") and ok and gotC then
+        local e = ride.chaserEta and ride.chaserEta(cc, rr, NEW_FUSE + t)[gotC[2] * KEY_W + gotC[1]]
+        log(string.format("%6d dbg2 escape from (%d,%d) t%d to (%d,%d) n%d chaserEta %s", frame, cc, rr, t, gotC[1], gotC[2], gotC[3], tostring(e)))
+      end
       allowRide = true
       return ok
     end
@@ -3426,7 +3468,12 @@ local function think()
         plan = "hunt"
         -- (first a junction, 3+ open sides: 2-4, run 21, waited for a $82 in
         -- the row-4 corridor, then backed into the (3,3) pocket ahead of it)
-        for pass = 1, 2 do
+        -- (with a chaser faster than P1 about, only junctions: 5-1, runs
+        -- 31-34, waited for a 1.25 px/f $8A at a pocket's mouth and was run
+        -- down in the pocket, again and again)
+        local fast = false
+        for _, e in ipairs(elist) do if e.chaser and e.harmful and e.cpf < FPT then fast = true end end
+        for pass = 1, fast and 1 or 2 do
           local hn
           dir, hn = bfs(g, c, r, function(cc, rr)
             if not sealOK(cc, rr) or FireLine[rr * KEY_W + cc] then return false end

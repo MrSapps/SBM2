@@ -1874,6 +1874,11 @@ local function think()
     log(string.format("%6d dbg sunX now %s +150 %s", frame, tostring(Boss.sunX(0)), tostring(Boss.sunX(150))))
   end
   bossesNow = bosses
+  if os.getenv("SBM2_DBG2") and frame % 4 == 0 then
+    local t = {}
+    for _, b in ipairs(bosses) do if b.base ~= 0x1000 then t[#t + 1] = string.format("%04X(%d,%d v%.2f,%.2f)", b.base, b.x, b.y, b.vx, b.vy) end end
+    log(string.format("%6d dbg2 kids %s", frame, table.concat(t, " ")))
+  end
   local bossNow, bossSense, bossEat = {}, {}, {}
   if #bosses > 0 then
     bossNow = Boss.contactCells(bosses, Boss.MARGIN, 0)
@@ -2819,6 +2824,14 @@ local function think()
         return ok
       end, mobNow, cw)
       ride.dodgeGoal = dir and gk or nil
+    end
+    if dir and os.getenv("SBM2_DBG2") then
+      local d = ({ up = { 0, -1 }, down = { 0, 1 }, left = { -1, 0 }, right = { 1, 0 } })[dir:match("^%a+")]
+      local function ws(k) local t = {} for _, iv in ipairs(eWin[k] or {}) do t[#t + 1] = string.format("%d-%d", iv[1], iv[2]) end return table.concat(t, ",") end
+      local nk = (r + d[2]) * KEY_W + c + d[1]
+      local nk2 = (r + 2 * d[2]) * KEY_W + c + 2 * d[1]
+      log(string.format("%6d dbg2 dodge %s here[%s] next[%s] next2[%s] goal %s", frame, dir, ws(here), ws(nk), ws(nk2),
+        ride.dodgeGoal and string.format("(%d,%d)", ride.dodgeGoal[1], ride.dodgeGoal[2]) or "-"))
     end
     if not dir and os.getenv("SBM2_DBG") and frame % 20 == 0 then
       local t = {}

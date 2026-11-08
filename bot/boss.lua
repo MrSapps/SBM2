@@ -286,6 +286,32 @@ return function(env)
       local sx = B.sunX(t)
       if sx then return sx, b.y end
     end
+    -- 3-8's body in CC:B549 steers at P1 (about 0.5 px/f on each axis,
+    -- the signs following P1 as it moves): straight-line prediction had
+    -- it pass P1 by, and run 32 dodged down column 2 into it 4 times.
+    if b.base == 0x1000 and b.state == 0xCCB549 and (r16(0x1A) & 0xFF) == 0x37 then
+      local px, py = r16(0x8010), r16(0x8018)
+      local function toward(a, goal)
+        local d = goal - a
+        local step = 0.55 * t
+        if math.abs(d) <= step then return goal end
+        return a + (d > 0 and step or -step)
+      end
+      return toward(b.x, px), toward(b.y, py)
+    end
+    -- 3-8's children (CC:BC5C) fly out radially at ~0.7 px/f and speed up
+    -- (~0.04 px/f per frame per axis, to ~1.5 and on): at the starting speed
+    -- a dodge crossed one's line just as it caught up (run 32's 3-8).
+    if b.state == 0xCCBC5C and (r16(0x1A) & 0xFF) == 0x37 then
+      local function go(v)
+        if v == 0 then return 0 end
+        local a, cap = (v > 0 and 0.04 or -0.04), 2.0
+        local tc = math.max(0, (cap - math.abs(v)) / 0.04)  -- frames to the cap
+        if t <= tc then return v * t + 0.5 * a * t * t end
+        return v * tc + 0.5 * a * tc * tc + (v > 0 and cap or -cap) * (t - tc)
+      end
+      return b.x + go(b.vx), b.y + go(b.vy)
+    end
     if b.state == SLAM then return b.x, b.y + slamDy(r16(b.base + 0x36), t) end
     -- 5-8 form 2 hurt (FinalBossForm2Hurt CC:D2E7, 63 frames): it stays put
     -- (the waypoint prediction had it fly on, and dodges walked into it)

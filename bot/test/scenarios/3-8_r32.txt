@@ -1,0 +1,8 @@
+# 3-8 from full run 32's own arrival: 4 deaths there, P1 dodging down column 2 into the sun's homing charge (CC:B549)
+start 37r32
+budget 20000
+pass STAGE 40
+fail DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+pads

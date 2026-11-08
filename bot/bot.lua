@@ -1594,6 +1594,19 @@ local function think()
           cause = string.format("contact:%02X", r16(base + 0x7E) & 0xFF)
         end
       end
+      -- A death on a gadget's cell (or to nothing seen, outside boss
+      -- stages and not a time-up) makes the cell one never walked onto
+      -- again this stage (3-2, run 35: explored onto the $E1 at (25,7)
+      -- and died there twice).
+      do
+        local gad = cause:match("^contact:(%x%x)")
+        if ((gad and tonumber(gad, 16) >= 0xC0) or (cause == "other" and timeLeft() > 1))
+            and (emu.read(0x1A, WRAM, false) & 0x0F) ~= 7 then
+          local dk = (pcell >> 7) * KEY_W + (pcell & 0x7F) // 2
+          badCell[dk] = true
+          log(string.format("%6d death on (%d,%d) by %s: never walked onto again this stage", frame, dk % KEY_W, dk // KEY_W, cause))
+        end
+      end
       local bs = {}
       for i = 0, BOMB_SLOTS - 1 do
         local base = BOMBS + i * BOMB_STRIDE

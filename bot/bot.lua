@@ -1790,6 +1790,19 @@ local function think()
       end
     end
   end
+  -- 5-7 also hides the remote (item kind 5 sets +$F3 bit 0): 5-8's form 1
+  -- plan needs it, and a death in world 5 takes it (run 43 met 5-8
+  -- without it and died there 24 times). Same hold as the glove.
+  if emu.read(0x1A, WRAM, false) == 0x56 and (emu.read(P1 + 0xF3, WRAM, false) & 1) == 0 then
+    for i = 0, 63 do
+      local cell = r16(ITEMLIST + 4 * i)
+      if cell >= 0x8000 then break end
+      local kind = r16(ITEMLIST + 4 * i + 2)
+      if (kind & 0x3FFF) == 5 and ((kind & 0x4000) == 0 or emu.read(MAP + cell, WRAM, false) == 0x44) then
+        gloveHidden = true
+      end
+    end
+  end
   if gloveHidden and gateOpen then gateOpen = false; g[gr][gc] = 0xC9 end
   -- At walking speed 1 (+$E0; a death takes the skate away), a skate (item
   -- kind 4) still in the stage comes before the exit, for up to 3000
@@ -1805,7 +1818,8 @@ local function think()
     local kd = kind & 0x3FFF
     local lying = (kind & 0x4000) ~= 0 and emu.read(MAP + cell, WRAM, false) == 0x44
     local k = (cell >> 7) * KEY_W + (cell & 0x7F) // 2
-    if lying and (kd == 4 or kd == 11 or kd == 7 or kd == 1 or kd == 0 or kd == 2) then usefulNow[k] = true end
+    if lying and (kd == 4 or kd == 11 or kd == 7 or kd == 1 or kd == 0 or kd == 2
+        or (kd == 5 and emu.read(0x1A, WRAM, false) == 0x56)) then usefulNow[k] = true end
     if lying and kd == 4 and emu.read(P1 + 0xE0, WRAM, false) < 2 then skateNow[k] = true end
     if kd == 4 and ((kind & 0x4000) == 0 or lying) then skateHere = true end
   end

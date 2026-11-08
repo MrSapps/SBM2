@@ -1,0 +1,7 @@
+# 5-7 from full run 33's arrival at walking speed 1: left without the skate hidden at (11,6), met 5-8 at speed 1 (22 deaths there)
+start 56r33
+budget 4500
+pass P1 \+E0..FF 0[2-9]
+fail DEATH
+env SBM2_NOREWIND=1
+pads

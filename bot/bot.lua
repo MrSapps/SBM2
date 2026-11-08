@@ -1758,7 +1758,11 @@ local function think()
   end
   if gateOpen and not ride.gateAt then ride.gateAt = frame elseif not gateOpen and not gloveHidden then ride.gateAt = nil end
   if skateHere and gateOpen and emu.read(P1 + 0xE0, WRAM, false) < 2 and frame - ride.gateAt < 3000 then
+    if not ride.skateHeld then log(string.format("%6d gate open, but a skate is still in the stage: getting it first", frame)) end
+    ride.skateHeld = true
     gateOpen = false; g[gr][gc] = 0xC9
+  elseif not skateHere or emu.read(P1 + 0xE0, WRAM, false) >= 2 then
+    ride.skateHeld = nil
   end
   if gateOpen then g[gr][gc] = GATE_OPEN end
   RANGE = emu.read(P1 + P_FIRE, WRAM, false) + 1

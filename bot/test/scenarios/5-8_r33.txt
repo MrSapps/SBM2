@@ -1,0 +1,7 @@
+# 5-8 from full run 33's first arrival: died at ~1370 frames, then 21 more times (each retry from 5-7 without the power-ups)
+start 57r33
+budget 36000
+pass THE END
+fail DEATH
+env SBM2_NOREWIND=1
+pads

@@ -1,0 +1,7 @@
+# 5-7 from full run 36's arrival at walking speed 1 (skate hidden at (6,5))
+start 56r36
+budget 4500
+pass P1 \+E0..FF 0[2-9]
+fail DEATH
+env SBM2_NOREWIND=1
+pads

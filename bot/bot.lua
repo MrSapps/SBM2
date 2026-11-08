@@ -178,6 +178,11 @@ end
 
 -- The grid g[r][c], plus (for this frame's scans, one pass instead of
 -- several) g.flames (cell keys), g.mapBombs and g.softs ({c, r} lists).
+-- (globals: the main chunk is near Lua's 200-local limit)
+DeadPad = {}  -- pad key -> frame it was found not launching (floor for a while)
+HasPad = false  -- the stage has spring pads ($4C)
+Riding = false  -- P1 on a $90/$98 mount (+$60 bit 15)
+AvoidCell = {}  -- cells never walked into (a mount P1 would board where pads matter)
 local function readMap()
   local g = {}
   local flames, mapBombs, softs = {}, {}, {}
@@ -189,6 +194,14 @@ local function readMap()
     for c = 0, MAP_W - 1 do
       local o = r * ROW + c * 2
       local t = bytes and bytes:byte(o + 1) or emu.read(MAP + o, WRAM, false)
+      -- A pad found not launching (DeadPad, for a while: 3-1 run 30, (12,8),
+      -- 30000 frames frozen on it under a $98 mount): plain floor.
+      -- Riding a $90/$98 mount (P1 +$60 bit 15) no pad launches P1 either.
+      if t == 0x4C then
+        g.hasPad, HasPad = true, true
+        -- (a pad under a mount to keep off: floor, so walkable says no)
+        if Riding or DeadPad[r * KEY_W + c] or AvoidCell[r * KEY_W + c] then t = 0x00 end  -- (SPRING is declared below)
+      end
       row[c] = t
       if t >= 0x01 and t <= 0x03 then flames[#flames + 1] = r * KEY_W + c
       elseif t >= 0x40 and t <= 0x43 then mapBombs[#mapBombs + 1] = { c, r }
@@ -219,6 +232,7 @@ local badCell = {}
 local function walkable(g, c, r)
   if r < 0 or r >= MAP_H or c < 0 or c >= MAP_W then return false end
   local t = g[r][c]
+  if AvoidCell[r * KEY_W + c] then return false end
   -- $04-$3F: floor variants; some ($0B $0C $17-$1A $23) run a handler when
   -- stood on (C1:58DE table): conveyors/warps, not hazards as far as known.
   -- $40-$7F are the same floor codes with flag bits (the tile handler only
@@ -1357,6 +1371,12 @@ local function think()
   -- few frames after a landing.
   local pc0, pr0 = playerTile()
   local onPad = emu.read(MAP + pr0 * ROW + pc0 * 2, WRAM, false) == SPRING
+  if onPad and (lockv & 1) ~= 0 then
+    if DeadPad[pr0 * KEY_W + pc0] then
+      log(string.format("%6d pad (%d,%d) locked P1 after all; a pad again", frame, pc0, pr0))
+      DeadPad[pr0 * KEY_W + pc0] = nil
+    end
+  end
   if (lockv & 0xF801) == 0x1801 then lastAir = frame end
   if os.getenv("SBM2_TRACE") and springFrom then log(string.format("%6d trace lock %04X px(%d,%d) tile (%d,%d) onPad %s", frame, lockv, r16(P1 + P_X), r16(P1 + P_Y), pc0, pr0, tostring(onPad))) end
   -- $0809: landed from a jump (on or next to a pad), not a death.
@@ -1410,6 +1430,15 @@ local function think()
               and ((ride.padAvoid or {})[(pr0 * KEY_W + pc0) .. d[3] .. v] or 0) <= frame then
             local _, n = bfs(g0, land[1], land[2], work)
             if next(rc) and walkable(g0, land[1], land[2]) then n = (n or 1000) - 10000 end
+            -- Bouncing pad to pad without touching floor: a pad just
+            -- landed on costs extra (3-6 run 30: (10,14) put off "up" for
+            -- a $8B by its landing, jumped down to (10,18), whose best way
+            -- was back up; 25000 frames to a time-up).
+            local hist = ride.padHist or {}
+            if n and #hist >= 4 then
+              local lk = land[2] * KEY_W + land[1]
+              for i = math.max(1, #hist - 5), #hist do if hist[i] == lk then n = n + 300 end end
+            end
             if n and (not bestN or n < bestN) then best, bestN = d[3] .. v, n end
           end
         end
@@ -1493,6 +1522,16 @@ local function think()
       progressAt = frame
     end
     springLand[springFrom] = { c1, r1 }
+    if emu.read(MAP + r1 * ROW + c1 * 2, WRAM, false) == SPRING then
+      ride.padHist = ride.padHist or {}
+      table.insert(ride.padHist, r1 * KEY_W + c1)
+      if #ride.padHist > 12 then table.remove(ride.padHist, 1) end
+      if #ride.padHist >= 4 and #ride.padHist % 4 == 0 then
+        log(string.format("%6d pad loop? %d pad landings in a row", frame, #ride.padHist))
+      end
+    else
+      ride.padHist = {}
+    end
   elseif springFrom then
     -- Only a death the jump caused (water): an enemy at the landing cell
     -- (3-6's left side) or a blast is bad luck, not the jump's fault.
@@ -1607,6 +1646,8 @@ local function think()
     end
     savedStage = stNow
     softSeen, softGone, springLand, springTry, ride.fail, ride.edges, ride.tried = {}, {}, {}, nil, {}, {}, {}
+    ride.padHist = {}
+    DeadPad, HasPad = {}, false
     softBlownAt = {}
     badCell, planSteps, planCo, noBombUntil = {}, nil, nil, {}
     stageTicks = ticks
@@ -1645,6 +1686,27 @@ local function think()
     local fh = io.open(OUT .. "/assists.txt", "a"); if fh then fh:write(msg .. "\n"); fh:close() end
   end
   lastWorld = (emu.read(0x1A, WRAM, false) >> 4) - 1  -- $1A = world<<4 | stage-1
+  -- A blasted $90/$98 is a mount: walking onto it boards it (C1:C983,
+  -- within 8 px in its cell). Riding, a hit costs the mount, not a life
+  -- (C1:553C, C0:A630), but no spring pad launches P1: 3-1 run 30 rode
+  -- one and could not reach the walled centre's last panel (2 time-ups).
+  -- In stages with pads, mounts are not walked onto.
+  do
+    local rd = (r16(P1 + 0x60) & 0x8000) ~= 0
+    if rd ~= Riding then log(string.format("%6d riding a mount: %s", frame, tostring(rd))) end
+    Riding = rd
+  end
+  AvoidCell = {}
+  if HasPad and not Riding then
+    for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
+      local t = r16(base + 0x7E) & 0xFF
+      local be = r16(base + 0xBE)
+      if (r16(base) & 0xF000) == 0x9000 and (t == 0x98 or t == 0x90) and (be & 0x8000) ~= 0 and (be & 0x4000) == 0 then
+        local mc, mr = toTile(r16(base + P_X), r16(base + P_Y))
+        AvoidCell[mr * KEY_W + mc] = true
+      end
+    end
+  end
   local g = readMap()
   -- Exit gate: map index at $7E5D72; open once $7E5D94 bit 15 (all gold
   -- panels blasted, or no panels: $FFFF) is set (checked at C1:41xx).
@@ -3835,6 +3897,7 @@ local function think()
   -- the pad never went, 600 frames, and again after each "rollback").
   -- (not while bouncing on purpose, "stay": 3-6, run 24, marked the pad
   -- "no way" while it waited out an $8B by the landing, then fled by it)
+  for k, at in pairs(DeadPad) do if frame - at > 900 or frame < at then DeadPad[k] = nil end end
   if g[r][c] == SPRING and frame - frozenAt[3] > 180 and springDir ~= "stay" and frame - (ride.lastStay or -1000) > 300 then
     for _, d in ipairs(DIRS) do
       if input[d[3]] then
@@ -3842,6 +3905,22 @@ local function think()
         -- (never one already made: a landing learnt means it launches;
         -- 3-6, run 27, banned (10,10) right and down after waits there and
         -- was shut in the upper right)
+        -- Any pad that holds P1 this long without a launch is floor for
+        -- a while (3-1 run 30: a $98 mount sat on (12,8), whose jumps were
+        -- all learnt, and P1 stood frozen on it 30000 frames).
+        if not DeadPad[r * KEY_W + c] then
+          local ms = ""
+          for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
+            local t = r16(base + 0x7E) & 0xFF
+            if (r16(base) & 0xF000) == 0x9000 and (t == 0x98 or t == 0x90) then
+              ms = ms .. string.format(" %02X@px(%d,%d) BE=%04X", t, r16(base + P_X), r16(base + P_Y), r16(base + 0xBE))
+            end
+          end
+          log(string.format("%6d pad (%d,%d): no launch; plain floor for 900 frames; P1 px(%d,%d) +52=%04X C6=%02X;%s", frame, c, r,
+            r16(P1 + P_X), r16(P1 + P_Y), r16(P1 + 0x52), emu.read(P1 + 0xC6, WRAM, false), ms))
+          DeadPad[r * KEY_W + c] = frame
+          step = nil  -- (its jump was the committed step: Left held into the wall)
+        end
         if springLand[key] == nil then
           log(string.format("%6d pad (%d,%d) %s: no launch in 180 frames; not a way", frame, c, r, d[3]))
           springLand[key], springLand[key .. "!"] = false, false

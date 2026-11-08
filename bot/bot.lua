@@ -183,6 +183,10 @@ DeadPad = {}  -- pad key -> frame it was found not launching (floor for a while)
 HasPad = false  -- the stage has spring pads ($4C)
 Blind = false  -- enemies not placed yet: no bombs
 Breaking = {}  -- soft block key -> frame seen next to flames (breaking)
+function bombAtKey(k)  -- a bomb tile ($40-$43) on cell key k
+  local t = emu.read(MAP + (k // KEY_W) * ROW + (k % KEY_W) * 2, WRAM, false)
+  return t >= 0x40 and t <= 0x43
+end
 StageStart = 0  -- frame the current stage was first seen
 Riding = false  -- P1 on a $90/$98 mount (+$60 bit 15)
 AvoidCell = {}  -- cells never walked into (a mount P1 would board where pads matter)
@@ -2157,7 +2161,14 @@ local function think()
         if math.abs(k % KEY_W - c) + math.abs(k // KEY_W - r) <= 2 then pulledIn = true end
       end
     end
-    if remoteWorth and not remoteCells[here] and not pulledIn and (not nearEnemy[here] or ride.f1Home) and frame >= nextDetonate
+    -- (an enemy by P1 is no reason to hold it when a killable one is in
+    -- the blast: 5-6, run 36, a $8A came at P1 past the remote bomb and
+    -- was let through)
+    local foeIn = false
+    for _, e in ipairs(elist) do
+      if e.killable and (remoteCells[e.r * KEY_W + e.c] or (e.moving and remoteCells[e.tr * KEY_W + e.tc])) then foeIn = true end
+    end
+    if remoteWorth and not remoteCells[here] and not pulledIn and (not nearEnemy[here] or ride.f1Home or foeIn) and frame >= nextDetonate
         and frame - throw.at > 40 and (r16(P1 + 0x52) & 6) == 0
         and g[r][c] ~= SPRING and (r16(P1 + P_LOCK) & 1) == 0 then
       input.b = true
@@ -2814,9 +2825,77 @@ local function think()
       end
     end
   end
+  -- Chaser stand: a harmful chaser faster than P1 (5-1, 5-6: 1.25 px/f
+  -- $8A) can't be outrun or dodged in a corridor, so make it come into a
+  -- blast: drop a bomb here and step (at most 2 cells) to a cell outside
+  -- the blast that it can only reach through the bomb, and wait there. It
+  -- stops by the bomb and is caught when it goes off (a 2-HP one is hurt
+  -- and comes again: the stand repeats). (5-6, run 36: P1 walked out of
+  -- its corner to meet one and died 8 times there.)
+  if ride.stand and (frame > ride.stand.untilF or (frame > ride.stand.at + 12 and not bombAtKey(ride.stand.bomb))) then
+    log(string.format("%6d stand over", frame)); ride.stand = nil
+  end
+  if not f1plan and not ride.stand and ride.chaserEta and emu.read(P1 + P_BOMBS_LEFT, WRAM, false) > 0
+      and not danger[here] and g[r][c] ~= SPRING and not isBomb(g[r][c]) and not (remoteOn and next(remoteCells)) then
+    local fastNear = false
+    for _, e in ipairs(elist) do if e.chaser and e.harmful and not e.shot and e.cpf < FPT then fastNear = true end end
+    local etaNow = fastNear and ride.chaserEta()
+    local eh = etaNow and etaNow[here]
+    if eh and eh < 150 then
+      local blast = {}
+      for _, cell in ipairs(blastCells(g, c, r, RANGE)) do blast[cell[2] * KEY_W + cell[1]] = true end
+      local etaB = ride.chaserEta(c, r, NEW_FUSE)
+      local seen, q, qi, pick = { [here] = 0 }, { { c, r, 0 } }, 1, nil
+      while q[qi] and not pick do
+        local cc, rr, n = q[qi][1], q[qi][2], q[qi][3]; qi = qi + 1
+        for _, d in ipairs(DIRS) do
+          local nc, nr = cc + d[1], rr + d[2]
+          local k = nr * KEY_W + nc
+          if not seen[k] and n < 2 and walkable(g, nc, nr) and not nearEnemy[k] and not danger[k] then
+            seen[k] = n + 1
+            local en, eb = etaNow[k], etaB[k]
+            if not blast[k] and (not en or en > (n + 1) * FPT + 10) and (not eb or eb > NEW_FUSE + FLAME_FRAMES)
+                and not hit(windows, k, 0, NEW_FUSE + FLAME_FRAMES) then
+              pick = { nc, nr }; break
+            end
+            q[#q + 1] = { nc, nr, n + 1 }
+          end
+        end
+      end
+      if pick then
+        ride.stand = { s = pick[2] * KEY_W + pick[1], bomb = here, at = frame, untilF = frame + (remoteOn and 400 or NEW_FUSE + FLAME_FRAMES + 10) }
+        log(string.format("%6d stand: bomb at (%d,%d) for a chaser %d frames off, wait at (%d,%d)", frame, c, r, eh, pick[1], pick[2]))
+      end
+    end
+  end
+  if ride.stand and ride.stand.bomb == here and frame - ride.stand.at < 8 and not bombAtKey(here) then input.a = frame % 2 == 0 end
+  -- (with the remote the bomb waits for B: set it off once P1 is at the
+  -- stand cell and a chaser is in the blast)
+  if ride.stand and remoteOn and here == ride.stand.s and bombAtKey(ride.stand.bomb) and frame >= nextDetonate then
+    local bk = ride.stand.bomb
+    local inBlast = {}
+    for _, cell in ipairs(blastCells(g, bk % KEY_W, bk // KEY_W, RANGE)) do inBlast[cell[2] * KEY_W + cell[1]] = true end
+    for _, e in ipairs(elist) do
+      if e.harmful and not e.gadget and (inBlast[e.r * KEY_W + e.c] or (e.moving and inBlast[e.tr * KEY_W + e.tc])) then
+        input.b = true; nextDetonate = frame + 20
+        log(string.format("%6d detonate (stand: chaser at (%d,%d) in the blast)", frame, e.c, e.r))
+        ride.stand.untilF = math.min(ride.stand.untilF, frame + FLAME_FRAMES + 10)
+        break
+      end
+    end
+  end
   if f1plan then
     -- (5-8 form 1, above)
+  elseif ride.stand and not danger[ride.stand.s] and (here == ride.stand.s
+      or bfs(g, c, r, function(cc, rr) return cc == ride.stand.s % KEY_W and rr == ride.stand.s // KEY_W end, mobNow, cw)) then
+    plan = "stand"
+    local sc, sr = ride.stand.s % KEY_W, ride.stand.s // KEY_W
+    if here ~= ride.stand.s then
+      dir = bfs(g, c, r, function(cc, rr) return cc == sc and rr == sr end, mobNow, cw)
+    end
   elseif danger[here] then
+    -- (a stand whose cell can't be reached any more: the usual flee)
+    if ride.stand and here ~= ride.stand.s then log(string.format("%6d stand cell unreachable: fleeing instead", frame)); ride.stand = nil end
     plan = "flee"
     -- (first a goal chasers reach 120+ frames after P1: P1 waits there for
     -- the blasts to pass. 1-3, runs 14-16: fled to (6,19) with a $8C

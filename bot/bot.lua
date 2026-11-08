@@ -1830,8 +1830,10 @@ local function think()
   function ride.dockedNear(cc, rr, maxParked)
     for _, e in ipairs(elist) do
       local dk = ride.dock[e.base]
+      -- (still 4+ frames: at 0.406 px/f a moving one keeps a pixel for up
+      -- to 3; 4-3, run 32, bombed counting on a platform that was leaving)
       if e.type == 0xDC and dk and math.abs(e.c - cc) + math.abs(e.r - rr) <= 2
-          and frame - dk[3] >= 2 and frame - dk[3] <= maxParked then return true end
+          and frame - dk[3] >= 4 and frame - dk[3] <= maxParked then return true end
     end
     return false
   end

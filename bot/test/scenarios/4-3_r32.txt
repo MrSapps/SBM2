@@ -1,0 +1,8 @@
+# 4-3 from full run 32's arrival: twice killed by its own bomb at (9,24), flipping ride/flee at (9,25) by a platform lane
+start 42r32
+budget 21600
+pass STAGE 43
+fail DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+pads

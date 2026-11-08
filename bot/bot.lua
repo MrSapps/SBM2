@@ -182,6 +182,7 @@ end
 DeadPad = {}  -- pad key -> frame it was found not launching (floor for a while)
 HasPad = false  -- the stage has spring pads ($4C)
 Blind = false  -- enemies not placed yet: no bombs
+PlanWork = 0  -- planner steps since its last yield
 RideBlock = {}  -- platform lane ends not to ride to (an enemy there)
 Breaking = {}  -- soft block key -> frame seen next to flames (breaking)
 function bombAtKey(k)  -- a bomb tile ($40-$43) on cell key k
@@ -1044,7 +1045,10 @@ local function stagePlan(g, c0, r0, ctx)
           if ctx.objGoal(c, r, grid) or (enemyOK and ctx.enemyGoal and ctx.enemyGoal(c, r)) then return out end
         end
       end
-      if yieldable and os.clock() - slice0 > ctx.slice then coroutine.yield(); slice0 = os.clock() end
+      -- (yields by work done, not wall time: the same plan however busy the
+      -- machine, so full runs replay alike)
+      PlanWork = PlanWork + 1
+      if yieldable and PlanWork >= 60 then coroutine.yield(); PlanWork = 0 end
     end
     return nil
   end
@@ -1089,9 +1093,10 @@ local function stagePlan(g, c0, r0, ctx)
     end
     exp = exp + 1
     if exp > ctx.maxExp then return nil, exp end
-    if yieldable and os.clock() - slice0 > ctx.slice then
+    PlanWork = PlanWork + 1
+    if yieldable and PlanWork >= 60 then
       coroutine.yield()
-      slice0 = os.clock()
+      PlanWork = 0
     end
     local kids = {}
     for bk in pairs(bombCells(s.grid, s.region)) do

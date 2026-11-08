@@ -1,0 +1,8 @@
+# 4-7 from full run 42's arrival: three blast deaths ($A8's early bombs)
+start 46r42
+budget 21600
+pass STAGE 47
+fail DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+pads

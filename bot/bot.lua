@@ -2885,7 +2885,11 @@ local function think()
             seen[k] = n + 1
             local en, eb = etaNow[k], etaB[k]
             if not blast[k] and (not en or en > (n + 1) * FPT + 10) and (not eb or eb > NEW_FUSE + FLAME_FRAMES)
-                and not hit(windows, k, 0, NEW_FUSE + FLAME_FRAMES) then
+                and not hit(windows, k, 0, NEW_FUSE + FLAME_FRAMES)
+                -- (reachable the way the stand will walk it: picked by
+                -- walkability alone it was often given up at once, 4-x,
+                -- run 38, five times)
+                and bfs(g, c, r, function(c2, r2) return c2 == nc and r2 == nr end, mobNow, cw) then
               pick = { nc, nr }; break
             end
             q[#q + 1] = { nc, nr, n + 1 }

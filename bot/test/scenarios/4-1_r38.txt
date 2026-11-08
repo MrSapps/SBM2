@@ -1,0 +1,8 @@
+# 4-1 from full run 38's arrival: two $93 contact deaths (it chases after seeing P1, faster after each hit)
+start 40r38
+budget 21600
+pass STAGE 41
+fail DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+pads

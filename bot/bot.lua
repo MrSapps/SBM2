@@ -2620,6 +2620,10 @@ local function think()
       -- 2-7): no place to stop up there; its sense grid reaches row 6, so
       -- bombs from row 8 down still hurt it (P1 was caught at (10,3)).
       if stageNow17 and rr <= 7 then return false end
+      -- 2-8: drops land in P1's row or column (range 10) and give ~y/2
+      -- frames of warning: 17 in row 2. No place to stop in rows 1-4
+      -- (run 39 fled its own bomb into row 2 and a drop's row cross came).
+      if emu.read(0x1A, WRAM, false) == 0x27 and rr <= 4 then return false end
       return not w[k] and not hit(eWin, k, t - FPT, t + 90)
     end
   end

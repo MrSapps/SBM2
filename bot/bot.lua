@@ -181,6 +181,8 @@ end
 -- (globals: the main chunk is near Lua's 200-local limit)
 DeadPad = {}  -- pad key -> frame it was found not launching (floor for a while)
 HasPad = false  -- the stage has spring pads ($4C)
+Blind = false  -- enemies not placed yet: no bombs
+StageStart = 0  -- frame the current stage was first seen
 Riding = false  -- P1 on a $90/$98 mount (+$60 bit 15)
 AvoidCell = {}  -- cells never walked into (a mount P1 would board where pads matter)
 local function readMap()
@@ -1651,6 +1653,7 @@ local function think()
     softBlownAt = {}
     badCell, planSteps, planCo, noBombUntil = {}, nil, nil, {}
     stageTicks = ticks
+    StageStart = frame
     log(string.format("%6d STAGE %02X hearts %02X flash %04X/%02X", frame, stNow, emu.read(P1 + 0xEF, WRAM, false),
       r16(P1 + 4), emu.read(P1 + 0xB9, WRAM, false)))
     local hs = {}
@@ -1794,6 +1797,32 @@ local function think()
   -- Enemies: predicted paths give contact windows (eWin) and kill chances.
   -- enemies/walkers (cells) still drive the exit and hunt plans.
   local elist = Enemies.read(g)
+  -- Stage start: enemies not placed yet (cell (0,0), +$A8 still 0): no
+  -- plans on blind information (3-2, runs 30 and 31: bombed at frame 0,
+  -- hid in a $90's row it could not see yet and was shot there).
+  -- (all of them: one waiting in a pipe reads (0,0) too, and a
+  -- freeze on that cost world 1 and 2 scenarios)
+  -- (+$A8 0 with a y set: one waiting in a pipe reads y 0; and only in
+  -- a stage's first frames: boss parts read so for good, and 1-8 and 5-8
+  -- never bombed)
+  if frame - StageStart > 60 then
+    if Blind then log(string.format("%6d enemies: placed (or never will be)", frame)) end
+    Blind = false
+  else
+    local placed, unplaced = 0, 0
+    for _, e in ipairs(elist) do
+      if not e.gadget then
+        if e.c == 0 and e.r == 0 and r16(e.base + P_Y) ~= 0 then unplaced = unplaced + 1 else placed = placed + 1 end
+      end
+    end
+    local b = unplaced > 0 and placed == 0
+    if b ~= Blind then
+      local t = {}
+      for _, e in ipairs(elist) do t[#t + 1] = string.format("%02X(%d,%d)y%d%s", e.type, e.c, e.r, r16(e.base + P_Y), e.gadget and "g" or "") end
+      log(string.format("%6d enemies %s: %s", frame, b and "not placed yet: no bombs" or "placed", table.concat(t, " ")))
+    end
+    Blind = b
+  end
   -- $DC platforms: since when each has been still (docked at a lane end).
   -- dockedNear(cc, rr, maxParked): one within 2 cells of (cc,rr), still for
   -- 2..maxParked frames (it waits 64 at each end: time left to board).
@@ -2439,15 +2468,17 @@ local function think()
   -- out a blast: it can't be walked out of (1-3, the full-run path: hid at
   -- (5,14) after bombing at (6,15); a $8C came up the column and pulled
   -- P1 into the bomb's row).
+  -- A $90's line of fire likewise (10 cells): 3-2, runs 30 and 31, hid
+  -- in a dead-end row the $90 walked into, and was shot there.
   local PullRisk = {}
   for _, e in ipairs(elist) do
-    if e.type == 0x8C and e.harmful then
+    if (e.type == 0x8C or e.type == 0x90) and e.harmful then
       local seen, q, qi = { [e.r * KEY_W + e.c] = 0 }, { { e.c, e.r } }, 1
       while q[qi] do
         local cc, rr = q[qi][1], q[qi][2]; qi = qi + 1
         local tt = seen[rr * KEY_W + cc]
         for _, d in ipairs({ { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }) do
-          for kk = 1, 4 do
+          for kk = 1, e.type == 0x90 and 10 or 4 do
             local lc, lr = cc + d[1] * kk, rr + d[2] * kk
             local lt = g[lr] and g[lr][lc]
             if not lt or (lt & 0x80) ~= 0 or lt == 0x43 then break end
@@ -3967,7 +3998,16 @@ end
 
 local loaded = LOAD == nil
 if loaded then inputlog.start(nil) end
-emu.addEventCallback(function() emu.setInput(input, 0) end, emu.eventType.inputPolled)
+emu.addEventCallback(function()
+  -- (no bomb while the stage's enemies are not placed yet: see Blind)
+  if Blind and input.a then
+    local i = {}
+    for k, v in pairs(input) do if k ~= "a" then i[k] = v end end
+    emu.setInput(i, 0)
+  else
+    emu.setInput(input, 0)
+  end
+end, emu.eventType.inputPolled)
 
 local LOGFILE = string.format("%s/bot_%06d.log", OUT, FRAME0)
 local function flushLog() writeFile(LOGFILE, table.concat(logLines, "\n") .. "\n") end

@@ -1,0 +1,8 @@
+# 3-2 start (runs 30 and 31): killed by a $90 shot ($B2) ~130 frames in, dodging right at (5,24)
+# start state from build/fullNR31 (stage 32 as reached there)
+start 32r31
+budget 3000
+pass END
+fail DEATH
+env SBM2_NOREWIND=1
+pads

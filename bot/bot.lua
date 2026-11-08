@@ -3246,6 +3246,15 @@ local function think()
     -- With the remote, one bomb at a time: a remote bomb is never danger, so
     -- a second one placed nearby can seal us in between them.
     local haveBomb = emu.read(P1 + P_BOMBS_LEFT, WRAM, false) > 0 and not (remoteOn and next(remoteCells))
+    -- The last bomb is kept for a stand while a chaser faster than P1 can
+    -- be here within 300 frames (5-6, run 41: after each death P1 spent its
+    -- one bomb at the spawn and had none when the $8A came; five deaths).
+    if haveBomb and emu.read(P1 + P_BOMBS_LEFT, WRAM, false) == 1 and ride.chaserEta then
+      local fast = false
+      for _, e in ipairs(elist) do if e.chaser and e.harmful and not e.shot and e.cpf < FPT then fast = true end end
+      local eh = fast and ride.chaserEta()[here]
+      if eh and eh < 300 then haveBomb = false end
+    end
     -- A cell worth reaching: the gate, an item, a panel, an enemy, a soft block.
     local function usefulAt(cc, rr, grid)
       local t = grid[rr][cc]

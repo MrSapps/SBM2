@@ -1604,7 +1604,15 @@ local function think()
       -- and died there twice).
       do
         local gad = cause:match("^contact:(%x%x)")
-        if ((gad and tonumber(gad, 16) >= 0xC0) or (cause == "other" and timeLeft() > 1))
+        -- ("other" only with no enemy close by: contact is same-cell, and a
+        -- $8A a cell off killed P1 in 5-1 as "other")
+        local foeBy = false
+        for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
+          local typ = r16(base + 0x7E) & 0xFF
+          if ((r16(base) & 0xF000) == 0x9000 or (r16(base) & 0xF000) == 0xA000) and typ >= 0x80 and typ < 0xC0
+              and math.abs(r16(base + P_X) - r16(P1 + P_X)) < 24 and math.abs(r16(base + P_Y) - r16(P1 + P_Y)) < 24 then foeBy = true end
+        end
+        if ((gad and tonumber(gad, 16) >= 0xC0) or (cause == "other" and timeLeft() > 1 and not foeBy))
             and (emu.read(0x1A, WRAM, false) & 0x0F) ~= 7 then
           local dk = (pcell >> 7) * KEY_W + (pcell & 0x7F) // 2
           badCell[dk] = true

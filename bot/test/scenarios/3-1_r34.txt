@@ -1,0 +1,8 @@
+# 3-1 from full run 34's arrival: two deaths there in runs 32-34 alike (an $8F, then a $98)
+start 30r34
+budget 21600
+pass STAGE 31
+fail DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+pads

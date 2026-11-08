@@ -1422,6 +1422,21 @@ local function think()
       for k, l in pairs(blastWindows(g0)) do
         for _, iv in ipairs(l) do if iv[1] <= 150 and iv[2] >= 0 then hotLand[k] = true end end
       end
+      -- Harmful enemies (not gadgets, not hidden) by the landing: a jump
+      -- there costs a lot (3-1, runs 32-34: fled its bomb onto (7,8), the
+      -- pad sent P1 down into the row-12 corridor between two $8F).
+      local foesNear = {}
+      for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
+        local typ = r16(base + 0x7E) & 0xFF
+        if ((r16(base) & 0xF000) == 0x9000 or (r16(base) & 0xF000) == 0xA000) and (r16(base + 4) & 0x8060) == 0
+            and typ >= 0x80 and typ < 0xC0 and r16(base + P_Y) ~= 0 then
+          local ec, er = toTile(r16(base + P_X), r16(base + P_Y))
+          -- (one a bomb can't kill, like 3-1's $8F, from 3 cells; others
+          -- only right by it: 3-1's last panel sits in the walled centre
+          -- with a $99 rider, and every jump in was put off)
+          foesNear[#foesNear + 1] = { ec, er, (emu.read(base + 0x43, WRAM, false) & 0x7F) == 0x7F and 3 or 1 }
+        end
+      end
       local best, bestN
       for _, d in ipairs(DIRS) do
         for _, v in ipairs({ "", "!" }) do
@@ -1436,6 +1451,11 @@ local function think()
             -- landed on costs extra (3-6 run 30: (10,14) put off "up" for
             -- a $8B by its landing, jumped down to (10,18), whose best way
             -- was back up; 25000 frames to a time-up).
+            if n then
+              for _, e in ipairs(foesNear) do
+                if math.abs(e[1] - land[1]) + math.abs(e[2] - land[2]) <= e[3] then n = n + 2000 end
+              end
+            end
             local hist = ride.padHist or {}
             if n and #hist >= 4 then
               local lk = land[2] * KEY_W + land[1]

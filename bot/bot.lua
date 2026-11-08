@@ -3403,15 +3403,6 @@ local function think()
       local _, n = bfs(g, c, r, function(cc, rr) return skateNow[rr * KEY_W + cc] end, nearEnemy, cw)
       if n and n <= 4 then why = nil end
     end
-    -- Nor a bomb whose blast takes a revealed useful item (5-7, run 36's
-    -- arrival: the skate came out at (13,10) and was gone before P1 got
-    -- to it; 5-8 at speed 1 then cost the run).
-    if why and (next(usefulNow) or next(skateNow)) then
-      for _, cell in ipairs(blastCells(g, c, r, RANGE)) do
-        local k = cell[2] * KEY_W + cell[1]
-        if usefulNow[k] or skateNow[k] then why = nil; break end
-      end
-    end
     if os.getenv("SBM2_DBG") and frame % 60 == 0 then
       log(string.format("%6d dbg here (%d,%d) haveBomb=%s why=%s esc=%s left=%d remote=%s", frame, c, r, tostring(haveBomb),
         tostring(why), tostring(why and canEscape(c, r, 0)), emu.read(P1 + P_BOMBS_LEFT, WRAM, false), tostring(next(remoteCells) ~= nil)))

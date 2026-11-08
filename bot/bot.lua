@@ -1649,6 +1649,7 @@ local function think()
     savedStage = stNow
     softSeen, softGone, springLand, springTry, ride.fail, ride.edges, ride.tried = {}, {}, {}, nil, {}, {}, {}
     ride.padHist = {}
+    ride.gateAt, ride.skateHeld = nil, nil  -- (a stale gateAt from the last stage would cut the skate hold short)
     DeadPad, HasPad = {}, false
     softBlownAt = {}
     badCell, planSteps, planCo, noBombUntil = {}, nil, nil, {}

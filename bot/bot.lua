@@ -4022,6 +4022,13 @@ local function think()
     local d2 = bfs(g, c, r, safeGoal(windows), nearEnemy, cw)
     if d2 then plan, dir, step = "offtrack", d2, nil end
   end
+  -- (a ride wait sticks while nothing threatens here: 4-3, unaided, P1
+  -- left the (3,18) lane end every few frames for nearer targets and the
+  -- planned bomb beyond the lane timed out with the stage)
+  if dir ~= "ride" and ride.wait and ride.wait[1] == here and frame - ride.wait[2] < 600
+      and not danger[here] and not nearEnemy[here] and plan ~= "flee" and plan ~= "dodge" and plan ~= "bomb" then
+    dir = "ride"
+  end
   -- A route over a platform lane starts here: wait on the $36 for the ride.
   if dir == "ride" then
     plan, dir, step = "ride", nil, nil

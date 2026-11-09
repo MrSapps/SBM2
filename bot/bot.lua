@@ -1755,7 +1755,13 @@ local function think()
       -- A library of stage starts (bot/bench.py collects them).
       local lib = string.format("%s/stage_%02X.mss", OUT, stNow)
       local fh = io.open(lib, "rb")
-      if fh then fh:close() else inputlog.saveState(lib, data) end
+      if fh then fh:close() else
+        inputlog.saveState(lib, data)
+        -- (the frame number too: decisions keyed on frame parity/period
+        -- then replay the same in a scenario, see scenario.py SBM2_FRAME0)
+        local ff = io.open(string.format("%s/stage_%02X.frame", OUT, stNow), "w")
+        if ff then ff:write(tostring(frame + 1)); ff:close() end  -- (the state is taken a frame on)
+      end
     end)
   end
   -- Lives assist (logged): a game over restarts the whole world, so keep

@@ -130,8 +130,16 @@ def run_one(sc, verbose):
     pre = os.path.join(out, 'prefix.bin')
     with open(pre, 'wb') as f:
         f.write(struct.pack(f'<{len(sc["pads"])}H', *sc['pads']))
+    # The stage start's frame number (stage_XX.frame beside the .mss, from a
+    # full run): the bot's frame-keyed choices then replay the run exactly.
+    extra = {}
+    fp = start_state(sc['start'])[:-4] + '.frame'
+    if os.path.exists(fp) and 'SBM2_FRAME0' not in sc['env']:
+        f0 = int(open(fp).read().strip() or 0)
+        extra = {'SBM2_FRAME0': str(f0), 'SBM2_FRAMES': str(f0 + int(sc['budget']))}
     env = dict(os.environ, SBM2_OUT=out, SBM2_FRAMES=sc['budget'], SBM2_LOAD=start_state(sc['start']),
                SBM2_PREFIX=pre, SBM2_NOASSIST='1', SBM2_SEED=sc['seed'], SBM2_CKPT='1000000', **sc['env'])
+    env.update(extra)
     t0 = time.time()
     subprocess.run([BOTRUN, os.path.join(ROOT, 'baserom.sfc'), os.path.join(ROOT, 'bot', 'bot.lua')],
                    env=env, stdout=subprocess.DEVNULL, stderr=open(os.path.join(out, 'stderr.txt'), 'w'))

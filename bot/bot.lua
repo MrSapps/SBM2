@@ -3234,6 +3234,29 @@ local function think()
       end
       if n8A + n97 > 0 then swWant = (n8A >= n97) and 1 or 0 end
     end
+    -- Soft blocks next to an unfinished panel, while no parity plan exists.
+    local walled = {}
+    if not panelPlan and next(panelTodo) then
+      for k in pairs(panelTodo) do
+        local pc, pr = k % KEY_W, k // KEY_W
+        -- (every soft block along its row and column up to a wall: 4-5's
+        -- (29,10) is reached only through (28,10) and (27,10))
+        for _, d in ipairs(DIRS) do
+          for i = 1, 10 do
+            local t2 = g[pr + d[2] * i] and g[pr + d[2] * i][pc + d[1] * i]
+            if not t2 or (HARD[t2] and not SOFT[t2]) then break end
+            if SOFT[t2] then walled[(pr + d[2] * i) * KEY_W + pc + d[1] * i] = true end
+          end
+        end
+      end
+    end
+    local function wallBlast(cc, rr)
+      if not next(walled) then return false end
+      for _, cell in ipairs(blastCells(g, cc, rr, rangeAt(g, cc, rr))) do
+        if walled[cell[2] * KEY_W + cell[1]] then return true end
+      end
+      return false
+    end
     local function targetsInReach(cc, rr, t)
       -- No bomb on a tile with bit 6 set ($40-$7F: stairs $66, panels $69,
       -- lit panels $70, $72...): BombButton C0:3082 returns when the tile
@@ -3257,7 +3280,14 @@ local function think()
         elseif panelPlan and (panelDone[k] or panelTodo[k]) then
           if not panelPlan[rr * KEY_W + cc] then return nil end
           why = "obj"
-        elseif panelDone[k] then return nil end
+        elseif panelDone[k] then
+          -- (no parity plan at all: a bomb that opens a soft block walling
+          -- in an unfinished panel may flip done ones, which the solver
+          -- then re-plans; 4-5, unaided, the last panel (28,10) sat inside
+          -- four soft blocks and the stage timed out)
+          if not wallBlast(cc, rr) then return nil end
+          why = "obj"
+        end
         -- $68: lighting it ($6F) is what kills 3-1's immune $8F enemies.
         if panelTodo[k] or (SOFT[tt] and not softGone[k]) or tt == BARREL or isSwitchOff(tt) or tt == 0x68 or tt == 0x6B or tt == 0x6A or tt == 0x4B or tt == 0x63 then why = "obj" end
         -- A blast pushes an $E2 block one cell on; into a $D3 hole it fills

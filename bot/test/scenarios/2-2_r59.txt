@@ -1,0 +1,8 @@
+# 2-2 from unaided run A3 s1 (89f6c3a): planner step bomb(7,7) blocked, waits at (5,6) in the start pocket 138 frames, an $86 dashes in; contact death at +396
+start 21r59
+budget 3000
+seed 1
+pass END 21|STAGE 22
+fail DEATH
+env SBM2_NOREWIND=1
+pads

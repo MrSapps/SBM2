@@ -1,0 +1,8 @@
+# 3-1 from unaided run A3 s1 (89f6c3a): a $98 meets P1 at (5,3) ~1827 frames in; the same on every continue (game-over loop)
+start 30r59
+budget 21600
+seed 1
+pass STAGE 31
+fail DEATH
+env SBM2_NOREWIND=1
+pads

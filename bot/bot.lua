@@ -1772,6 +1772,18 @@ local function think()
   -- Stage-start state (+ sidecar): after a game over, drive.py continues
   -- from it rather than the world's password state.
   local stNow = emu.read(0x1A, WRAM, false)
+  -- The stage-start state is taken a frame or two after the STAGE frame
+  -- (callback below); a scenario from it starts there with fresh memory.
+  -- So the full run starts the stage over at that frame too: detection,
+  -- reset and reseed again (same entry count), the plan and step dropped,
+  -- and the .frame written now. Then the scenario replays the run exactly.
+  local redetect = false
+  if ride.redetect == stNow and savedStage == stNow then
+    ride.redetect, savedStage, redetect = nil, nil, true
+    ride.entries[stNow] = ride.entries[stNow] - 1
+    step, planSteps, planIdx, planCo, trapCell, pushCell = nil, nil, 1, nil, nil, nil
+    pushNext, lastObjFrame, lastPending, settleNeed = 0, 0, 0, 130
+  end
   if stNow ~= savedStage then
     -- SBM2_STOPEARLY: so does the next stage.
     if STOPEARLY and savedStage then
@@ -1816,6 +1828,14 @@ local function think()
     local ab = {}
     for i = 0xE0, 0xFF do ab[#ab + 1] = string.format("%02X", emu.read(P1 + i, WRAM, false)) end
     log(string.format("%6d P1 +E0..FF %s", frame, table.concat(ab, " ")))
+    if redetect then
+      -- (the frame number too: decisions keyed on frame parity/period
+      -- then replay the same in a scenario, see scenario.py SBM2_FRAME0)
+      local ff = io.open(string.format("%s/stage_%02X.frame", OUT, stNow), "w")
+      if ff then ff:write(tostring(frame)); ff:close() end
+      log(string.format("%6d stage %02X restarted at its saved state", frame, stNow))
+    else
+    local first = frame <= FRAME0 + 1  -- (a scenario: its state is this one)
     onNextInstruction(function()
       local data = emu.createSavestate()
       inputlog.saveState(OUT .. "/stage.mss", data)
@@ -1824,12 +1844,10 @@ local function think()
       local fh = io.open(lib, "rb")
       if fh then fh:close() else
         inputlog.saveState(lib, data)
-        -- (the frame number too: decisions keyed on frame parity/period
-        -- then replay the same in a scenario, see scenario.py SBM2_FRAME0)
-        local ff = io.open(string.format("%s/stage_%02X.frame", OUT, stNow), "w")
-        if ff then ff:write(tostring(frame)); ff:close() end  -- (taken in the callback, a frame after the STAGE line)
+        if not first then ride.redetect = stNow end
       end
     end)
+    end
   end
   -- Lives assist (logged): a game over restarts the whole world, so keep
   -- lives ($1C6C) topped up; deaths are still retried by rollback first.
@@ -3398,7 +3416,13 @@ local function think()
         -- A blast pushes an $E2 block one cell on; into a $D3 hole it fills
         -- it and opens the way (docs/mechanics.md, push blocks).
         -- While a plan is on, only its own bombs move blocks.
-        if tt == 0xE2 and planSteps and pushCell ~= rr * KEY_W + cc then return nil end
+        -- (only if it would move: 2-2, unaided run A3 s1, every bomb down
+        -- column 5 opening the start pocket was refused for the $E2 at
+        -- (5,11), which a blast from above only presses into the wall)
+        if tt == 0xE2 and planSteps and pushCell ~= rr * KEY_W + cc then
+          local to = cell[3] and g[cell[2] + cell[3][2]] and g[cell[2] + cell[3][2]][cell[1] + cell[3][1]]
+          if to == 0x00 or to == 0xD3 then return nil end
+        end
         if tt == 0xE2 and cell[3] then
           -- Worth pushing toward a hole one or two cells on (a push moves
           -- it one cell; a block pushed into a $D3 fills it).

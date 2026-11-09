@@ -3840,7 +3840,10 @@ local function think()
         -- cell and direction once per stage, for up to 90 frames.
         ride.tried = ride.tried or {}
         local try = ride.try
-        if try and (frame - try[3] > 90 or ride.from) then ride.tried[try[1] .. try[2]] = true; ride.try, try = nil, nil end
+        -- (a tried cell may be tried again 1500 frames later: 3-5's subs come
+        -- and go, and unaided seed 1 spent its few tries while they were away,
+        -- then never boarded and the island's panels timed the stage out)
+        if try and (frame - try[3] > 90 or ride.from) then ride.tried[try[1] .. try[2]] = frame; ride.try, try = nil, nil end
         if try and try[1] == here then
           plan, dir, step = "board", nil, nil
           input[try[2]] = true
@@ -3852,7 +3855,8 @@ local function think()
               -- (pushing into $E1 or world 5's $C0 kills: 3-2, 2-8).
               if (e.type == 0xDA or e.type == 0xDB or e.type == 0xDC) and walkable(g, e.c, e.r) then
                 for _, d in ipairs(DIRS) do
-                  if cc + d[1] == e.c and rr + d[2] == e.r and not ride.tried[(rr * KEY_W + cc) .. d[3]] then
+                  local tk = ride.tried[(rr * KEY_W + cc) .. d[3]]
+                  if cc + d[1] == e.c and rr + d[2] == e.r and not (tk and (tk == true or frame - tk < 1500)) then
                     want = { rr * KEY_W + cc, d[3] }; return true
                   end
                 end

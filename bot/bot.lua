@@ -3780,6 +3780,23 @@ local function think()
       local _, n = bfs(g, c, r, function(cc, rr) return skateNow[rr * KEY_W + cc] end, nearEnemy, cw)
       if n and n <= 4 then why = nil end
     end
+    -- A shield: in a pocket with an enemy no bomb can hurt (3-2's $8F
+    -- before the last crystal) coming, a bomb here stops it (enemies turn
+    -- at bombs) while P1 waits out of the blast. (3-2, unaided: the
+    -- springs land P1 at (13,11), the closed east end of row 11, with an
+    -- $8F walking it; it waited at (13,10) and was cornered, 3 seeds of 4.)
+    -- (only hp-$7F immune ones, not a hurt one flashing, and not with the
+    -- remote: 3-1's shields then sat unset and the stage timed out)
+    if haveBomb and not why and not remoteOn and not danger[here] and ride.walkerEta and ride.pockets(g)[here] then
+      local immune = false
+      for _, e in ipairs(elist) do
+        if e.harmful and e.immune and not e.gadget and math.abs(e.c - c) + math.abs(e.r - r) <= 6 then immune = true end
+      end
+      local eh = immune and ride.walkerEta()[here]
+      -- (rarely: one at a time, 300 frames apart; 144 shields in 3-2 kept
+      -- P1 fleeing its own blasts until time-up)
+      if eh and eh > 30 and eh < 120 and #lastBombs == 0 and frame - (ride.shieldAt or -1000) > 300 then why = "shield" end
+    end
     if os.getenv("SBM2_DBG") and frame % 60 == 0 then
       log(string.format("%6d dbg here (%d,%d) haveBomb=%s why=%s esc=%s left=%d remote=%s", frame, c, r, tostring(haveBomb),
         tostring(why), tostring(why and canEscape(c, r, 0)), emu.read(P1 + P_BOMBS_LEFT, WRAM, false), tostring(next(remoteCells) ~= nil)))
@@ -3791,6 +3808,7 @@ local function think()
         log(string.format("%6d dbg bomb here (%d,%d) why=%s enemies %s", frame, c, r, why, table.concat(es, " ")))
       end
       plan, bombWhy = "bomb", why
+      if why == "shield" then ride.shieldAt = frame end
       if pushCell == here then
         ride.planBomb = here  -- the planner's bomb (remote: set it off soon)
         -- (a planned bomb is progress: no stall-explore right after it.
@@ -4066,6 +4084,17 @@ local function think()
         -- down in the pocket, again and again)
         local fast = false
         for _, e in ipairs(elist) do if e.chaser and e.harmful and e.cpf < FPT then fast = true end end
+        -- (not the $8F while a crystal is unlit: no bomb hurts them, and
+        -- 3-2, unaided, followed them through pads and springs into the
+        -- (13,11)/(17,11) pockets at the ends of row 11)
+        local immune8F = {}
+        -- (only one in a pocket: in 3-1 closing in on them pays)
+        if (ride.crystals or 0) > 0 then
+          local cut = ride.pockets(g)
+          for _, e in ipairs(elist) do
+            if e.type == 0x8F and cut[e.r * KEY_W + e.c] then immune8F[e.r * KEY_W + e.c] = true end
+          end
+        end
         for pass = 1, fast and 1 or 2 do
           local hn
           dir, hn = bfs(g, c, r, function(cc, rr)
@@ -4076,7 +4105,7 @@ local function think()
               if open < 3 then return false end
             end
             for _, e in ipairs(walkers) do
-              if math.abs(e[1] - cc) + math.abs(e[2] - rr) <= 3 then return true end
+              if math.abs(e[1] - cc) + math.abs(e[2] - rr) <= 3 and not immune8F[e[2] * KEY_W + e[1]] then return true end
             end
             return false
           end, nearEnemy, cw)

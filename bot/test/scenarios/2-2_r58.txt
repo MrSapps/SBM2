@@ -1,0 +1,8 @@
+# 2-2 from unaided run Z s1 (7940d1d): contact death by an $86 at +396
+start 21r58
+budget 3000
+seed 1
+pass END 21|STAGE 22
+fail DEATH
+env SBM2_NOREWIND=1
+pads

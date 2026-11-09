@@ -323,6 +323,24 @@ local function readBombs(g)
       byCell[r * KEY_W + c] = b
     end
   end
+  -- $B0 walking bombs (3-7's $A7 sends them; docs/enemies.md): harmless to
+  -- touch, they blow up where they stop. Seen as a bomb at the target cell
+  -- (+$4C) once it is about to stop there (walk + wait +$4E under 40).
+  for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
+    if (r16(base) & 0xF000) == 0x9000 and (r16(base + 0x7E) & 0xFF) == 0xB0 and (r16(base + 4) & 0x8000) == 0 then
+      local tcell = r16(base + 0x4C)
+      local tc, tr = (tcell & 0x7F) // 2, (tcell >> 7) & 0x1F
+      local cx, cy = tileCentre(tc, tr)
+      local dist = math.abs(r16(base + P_X) - cx) + math.abs(r16(base + P_Y) - cy)
+      local w = r16(base + 0x4E)
+      if w > 0x200 then w = 0 end
+      if dist + w < 40 then
+        local b = { tc, tr, math.max(4, dist + w), 5, false, false, false }
+        list[#list + 1] = b
+        byCell[tr * KEY_W + tc] = byCell[tr * KEY_W + tc] or b
+      end
+    end
+  end
   -- Magnets (docs/mechanics.md 8, list $7E5828: +2 cell, +8 dir 0/2/4/6 =
   -- up/right/down/left): each scans 4 cells ahead to the first tile with bit
   -- 6 or 7 set and pulls a ticking bomb there (or P1 on the line) up to the

@@ -1718,6 +1718,14 @@ local function think()
       log(string.format("%6d STAGE %02X", frame, stNow)); StopNow = true; return
     end
     savedStage = stNow
+    -- Random choices restart at each stage entry from (seed, stage, entry
+    -- count): a stage-start scenario then replays a full run's stage
+    -- exactly (before, the RNG state carried over from earlier stages, and
+    -- 2-2_r53 passed 4/4 where the full run died every time). The entry
+    -- count keeps a game-over continue from repeating the same choices.
+    ride.entries = ride.entries or {}
+    ride.entries[stNow] = (ride.entries[stNow] or 0) + 1
+    math.randomseed(SEED * 7919 + stNow * 104729 + ride.entries[stNow] * 1299709)
     softSeen, softGone, springLand, springTry, ride.fail, ride.edges, ride.tried = {}, {}, {}, nil, {}, {}, {}
     ride.padHist = {}
     ride.gateAt, ride.skateHeld = nil, nil  -- (a stale gateAt from the last stage would cut the skate hold short)

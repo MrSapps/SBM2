@@ -1,0 +1,8 @@
+# 2-2 first arrival from unaided seed-0 run U2 (b5e22c4): bombs (17,5), flees left on row 5, stops at (15,5) with no escape and dies to its own blast at +1620 (every version)
+start 21r53
+budget 21600
+pass STAGE 22
+fail DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+pads

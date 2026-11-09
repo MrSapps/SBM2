@@ -3768,7 +3768,10 @@ local function think()
                 end
               end
             end
-            local d2 = bfs(g2, c, r, function(cc, rr) return rr * KEY_W + cc == T end, nearEnemy, nil)
+            -- (enemies are not walls here: the step itself waits for a cell
+            -- an enemy is entering; with them as walls a roaming $93 made
+            -- the long ride back the only route, and P1 shuttled)
+            local d2 = bfs(g2, c, r, function(cc, rr) return rr * KEY_W + cc == T end, nil, nil)
             RideBlock, allowRide, AvoidCell = rb, ar, av
             if d2 then
               local dv = ({ up = { 0, -1 }, down = { 0, 1 }, left = { -1, 0 }, right = { 1, 0 } })[d2:match("^%a+") or ""]

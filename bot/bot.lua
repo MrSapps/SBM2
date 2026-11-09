@@ -2906,7 +2906,7 @@ local function think()
   -- stops by the bomb and is caught when it goes off (a 2-HP one is hurt
   -- and comes again: the stand repeats). (5-6, run 36: P1 walked out of
   -- its corner to meet one and died 8 times there.)
-  if ride.stand and (frame > ride.stand.untilF or (frame > ride.stand.at + 12 and not bombAtKey(ride.stand.bomb))) then
+  if ride.stand and (frame > ride.stand.untilF or (frame > ride.stand.at + 12 + (ride.stand.walk or 0) * FPT and not bombAtKey(ride.stand.bomb))) then
     log(string.format("%6d stand over", frame)); ride.stand = nil
   end
   if not f1plan and not ride.stand and ride.chaserEta and emu.read(P1 + P_BOMBS_LEFT, WRAM, false) > 0
@@ -2916,37 +2916,57 @@ local function think()
     local etaNow = fastNear and ride.chaserEta()
     local eh = etaNow and etaNow[here]
     if eh and eh < 150 then
-      local blast = {}
-      for _, cell in ipairs(blastCells(g, c, r, RANGE)) do blast[cell[2] * KEY_W + cell[1]] = true end
-      local etaB = ride.chaserEta(c, r, NEW_FUSE)
-      local seen, q, qi, pick = { [here] = 0 }, { { c, r, 0 } }, 1, nil
-      while q[qi] and not pick do
-        local cc, rr, n = q[qi][1], q[qi][2], q[qi][3]; qi = qi + 1
-        for _, d in ipairs(DIRS) do
-          local nc, nr = cc + d[1], rr + d[2]
-          local k = nr * KEY_W + nc
-          if not seen[k] and n < 2 and walkable(g, nc, nr) and not nearEnemy[k] and not danger[k] then
-            seen[k] = n + 1
-            local en, eb = etaNow[k], etaB[k]
-            if not blast[k] and (not en or en > (n + 1) * FPT + 10) and (not eb or eb > NEW_FUSE + FLAME_FRAMES)
-                and not hit(windows, k, 0, NEW_FUSE + FLAME_FRAMES)
-                -- (reachable the way the stand will walk it: picked by
-                -- walkability alone it was often given up at once, 4-x,
-                -- run 38, five times)
-                and bfs(g, c, r, function(c2, r2) return c2 == nc and r2 == nr end, mobNow, cw) then
-              pick = { nc, nr }; break
+      -- Bomb cells: here, or up to 2 steps on, reached well before the
+      -- chaser (5-6, run 46: from the (2,27) corner no cell worked for a
+      -- bomb at the corner itself; one at (3,26) with P1 back in the corner
+      -- does).
+      local bq, bqi, bseen, pick = { { c, r, 0 } }, 1, { [here] = true }, nil
+      while bq[bqi] and not pick do
+        local bc, br, bn = bq[bqi][1], bq[bqi][2], bq[bqi][3]; bqi = bqi + 1
+        local bk = br * KEY_W + bc
+        local okB = bn == 0 or (not etaNow[bk] or etaNow[bk] > bn * FPT + 40)
+        if okB and (bn == 0 or (not isBomb(g[br][bc]) and g[br][bc] ~= SPRING)) then
+          local blast = {}
+          for _, cell in ipairs(blastCells(g, bc, br, RANGE)) do blast[cell[2] * KEY_W + cell[1]] = true end
+          local etaB = ride.chaserEta(bc, br, NEW_FUSE + bn * FPT)
+          local seen, q, qi = { [bk] = 0 }, { { bc, br, 0 } }, 1
+          while q[qi] and not pick do
+            local cc, rr, n = q[qi][1], q[qi][2], q[qi][3]; qi = qi + 1
+            for _, d in ipairs(DIRS) do
+              local nc, nr = cc + d[1], rr + d[2]
+              local k = nr * KEY_W + nc
+              if not seen[k] and n < 2 and walkable(g, nc, nr) and not nearEnemy[k] and not danger[k] then
+                seen[k] = n + 1
+                local en, eb = etaNow[k], etaB[k]
+                local tArr = (bn + n + 1) * FPT
+                if not blast[k] and (not en or en > tArr + 10) and (not eb or eb > NEW_FUSE + bn * FPT + FLAME_FRAMES)
+                    and not hit(windows, k, 0, NEW_FUSE + bn * FPT + FLAME_FRAMES) then
+                  pick = { nc, nr, bc, br, bn }; break
+                end
+                q[#q + 1] = { nc, nr, n + 1 }
+              end
             end
-            q[#q + 1] = { nc, nr, n + 1 }
+          end
+        end
+        if not pick and bn < 2 then
+          for _, d in ipairs(DIRS) do
+            local nc, nr = bc + d[1], br + d[2]
+            local k = nr * KEY_W + nc
+            if not bseen[k] and walkable(g, nc, nr) and not nearEnemy[k] and not danger[k] then
+              bseen[k] = true; bq[#bq + 1] = { nc, nr, bn + 1 }
+            end
           end
         end
       end
       if pick then
-        ride.stand = { s = pick[2] * KEY_W + pick[1], bomb = here, at = frame, untilF = frame + (remoteOn and 400 or NEW_FUSE + FLAME_FRAMES + 10) }
-        log(string.format("%6d stand: bomb at (%d,%d) for a chaser %d frames off, wait at (%d,%d)", frame, c, r, eh, pick[1], pick[2]))
+        ride.stand = { s = pick[2] * KEY_W + pick[1], bomb = pick[4] * KEY_W + pick[3], at = frame, walk = pick[5],
+          untilF = frame + pick[5] * FPT + (remoteOn and 400 or NEW_FUSE + FLAME_FRAMES + 10) }
+        log(string.format("%6d stand: bomb at (%d,%d) for a chaser %.0f frames off, wait at (%d,%d)", frame, pick[3], pick[4], eh, pick[1], pick[2]))
       end
     end
   end
-  if ride.stand and ride.stand.bomb == here and frame - ride.stand.at < 8 and not bombAtKey(here) then input.a = frame % 2 == 0 end
+  if ride.stand and ride.stand.bomb == here and not ride.stand.placed and not bombAtKey(here) then input.a = frame % 2 == 0 end
+  if ride.stand and bombAtKey(ride.stand.bomb) then ride.stand.placed = true end
   -- (with the remote the bomb waits for B: set it off once P1 is at the
   -- stand cell and a chaser is in the blast)
   if ride.stand and remoteOn and here == ride.stand.s and bombAtKey(ride.stand.bomb) and frame >= nextDetonate then
@@ -2968,7 +2988,12 @@ local function think()
       or bfs(g, c, r, function(cc, rr) return cc == ride.stand.s % KEY_W and rr == ride.stand.s // KEY_W end, mobNow, cw)) then
     plan = "stand"
     local sc, sr = ride.stand.s % KEY_W, ride.stand.s // KEY_W
-    if here ~= ride.stand.s then
+    if not ride.stand.placed and here ~= ride.stand.bomb then
+      local bc, br = ride.stand.bomb % KEY_W, ride.stand.bomb // KEY_W
+      dir = bfs(g, c, r, function(cc, rr) return cc == bc and rr == br end, mobNow, cw)
+    elseif not ride.stand.placed then
+      dir = nil
+    elseif here ~= ride.stand.s then
       dir = bfs(g, c, r, function(cc, rr) return cc == sc and rr == sr end, mobNow, cw)
     end
   elseif danger[here] then

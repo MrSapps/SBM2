@@ -1,0 +1,8 @@
+# 3-7 first arrival from unaided seed-2 run R (3e5e0ce, full kit): first death +1395 (an $A7 bomb with P1 boxed in by its own), then the 19-death loop
+start 36r51
+budget 21600
+pass STAGE 37
+fail DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+pads

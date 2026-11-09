@@ -611,3 +611,14 @@ give the bot all it needs without knowing a boss's states:
 Form 2 (CC:D139) heads for waypoint `+$28 & 15` (table CC:D272) and picks
 a new random one when it gets within box CC:D262 of it. The bot predicts
 it straight to the waypoint.
+
+
+### $A7 bomber (3-7) **[port probe]**
+
+Harmless on contact (C5:D850 lists type $27 as never killing). Its bombs
+are separate objects of type `$B0` that roll (1 px/f along a row) or bounce
+in place (y swinging by about 13 px) and go off where they are. The
+bounce lasted 70+ frames in 3-7_r51. A `$B0` is not in the bomb slots
+until it explodes, and the blast reaches at least 4 cells. Treating every
+`$B0` as a bomb due in 24 frames with blast 5 did not help (3-7_r51: 4/8
+seeds vs 5/8), so its real fuse should be found first.

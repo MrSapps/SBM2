@@ -615,10 +615,13 @@ it straight to the waypoint.
 
 ### $A7 bomber (3-7) **[port probe]**
 
-Harmless on contact (C5:D850 lists type $27 as never killing). Its bombs
-are separate objects of type `$B0` that roll (1 px/f along a row) or bounce
-in place (y swinging by about 13 px) and go off where they are. The
-bounce lasted 70+ frames in 3-7_r51. A `$B0` is not in the bomb slots
-until it explodes, and the blast reaches at least 4 cells. Treating every
-`$B0` as a bomb due in 24 frames with blast 5 did not help (3-7_r51: 4/8
-seeds vs 5/8), so its real fuse should be found first.
+Harmless on contact (C5:D850 lists type $27 as never killing). It sends out
+`$B0` **walking bombs**. These are enemy objects with the generic walker
+fields: step `+$4A` (1 px/f), target cell `+$4C`, wait `+$4E`. They are also
+harmless on contact (type $30 is in the same table) but blow up where they
+stop. In 3-7_r51 one walked right to its target (11,12) and went off there.
+Another shuttled between (6,11) and (6,12), its wait ran to 0, and it went
+off: a blast of 4+ cells along row 12. The bot skips them (SAFE_TYPES), so
+their blasts come unseen. Treating every `$B0` as a bomb due in 24 frames
+with blast 5 did not help (4/8 seeds vs 5/8). The trigger (target reached?
+wait expired?) needs pinning down before modelling.

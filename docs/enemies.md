@@ -599,6 +599,12 @@ give the bot all it needs without knowing a boss's states:
   cell is in the blast.
 * Within ±32 px of P1 (sight box CC:C498) it drops a bomb of its own
   (child CC:C554) and waits `$80` frames.
+  **[port probe]** (4-8_r44) The bomb is a boss child (`$1100`+, state
+  CC:C596, x/y at `+$11`/`+$14`). It is **not on the map** while `+$34`
+  counts down from `$80`. At 0 it writes `$43` at its cell and goes off the
+  next frame. The flames cover the whole row (7+ cells). Modelling it as a
+  bomb due in `+$34` frames made the bot flee more and die to the robot
+  itself (3 of 4 scenarios worse), so the bot does not do this yet.
 
 ### 8.3 5-8 form 2 path
 

@@ -1,0 +1,8 @@
+# 2-1 from seed-1 run U arrival: twice dodged up into an $86 at (5,8) ~394 frames in
+start 21r47
+budget 2000
+pass STAGE 22
+fail DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+pads

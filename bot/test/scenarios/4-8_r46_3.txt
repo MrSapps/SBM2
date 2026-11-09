@@ -1,0 +1,8 @@
+# 4-8 arrival (r46_3): deaths to the robot's own bomb (an object until it goes off)
+start 47r46_3
+budget 21600
+pass STAGE 50
+fail DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+pads

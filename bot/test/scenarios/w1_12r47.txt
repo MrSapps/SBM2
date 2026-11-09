@@ -1,0 +1,8 @@
+# 1-2 from seed-2 run U arrival: stuck at x 197/198 over the (12,8) stairs until its own blast
+start 12r47
+budget 12000
+pass STAGE 13
+fail DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+pads

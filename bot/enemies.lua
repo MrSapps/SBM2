@@ -59,7 +59,7 @@ return function(env)
           -- as its flash ended, every life of a game over)
           -- ($94 too: 1-2, every full run, P1 waited a cell from one
           -- flashing out of its pipe, which then walked into P1)
-          local flashHarm = typ == 0x93 or typ == 0x8A or typ == 0x97 or typ == 0x85 or typ == 0x81 or typ == 0x94
+          local flashHarm = typ == 0x93 or typ == 0x8A or typ == 0x97 or typ == 0x85 or typ == 0x81 or typ == 0x94 or typ == 0x87 or typ == 0x89
           local hidden = (f4 & (flashHarm and 0x40 or 0x60)) ~= 0 or (rd8(base + 0x41) & 0x80) ~= 0
             or (r16(base + 0x68) & 2) ~= 0
             or ((typ == 0x98 or typ == 0x90) and (r16(base + 0xBE) & 0x8000) ~= 0)

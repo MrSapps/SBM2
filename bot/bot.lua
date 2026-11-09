@@ -1764,6 +1764,26 @@ local function think()
       end
     end
   end
+  -- A $DD track block crushes P1 ahead of it: track cells ($4D/$CD) within
+  -- 5 cells of one are not walked onto (4-5, runs 44-45: explored back onto
+  -- the row-8 track after stepping off it and was crushed).
+  for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
+    if (r16(base) & 0xF000) == 0x9000 and (r16(base + 0x7E) & 0xFF) == 0xDD then
+      local dc, dr = toTile(r16(base + P_X), r16(base + P_Y))
+      for rr = dr - 5, dr + 5 do
+        for cc = dc - 5, dc + 5 do
+          if math.abs(rr - dr) + math.abs(cc - dc) <= 5 and rr >= 0 and cc >= 0 then
+            local t = emu.read(MAP + rr * ROW + cc * 2, WRAM, false)
+            if t == 0x4D or t == 0xCD then AvoidCell[rr * KEY_W + cc] = true end
+          end
+        end
+      end
+    end
+  end
+  do
+    local pc, pr = toTile(r16(P1 + P_X), r16(P1 + P_Y))
+    AvoidCell[pr * KEY_W + pc] = nil  -- (never P1's own cell: it must be able to leave)
+  end
   local g = readMap()
   -- Exit gate: map index at $7E5D72; open once $7E5D94 bit 15 (all gold
   -- panels blasted, or no panels: $FFFF) is set (checked at C1:41xx).

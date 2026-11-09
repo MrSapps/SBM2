@@ -312,6 +312,29 @@ return function(env)
       end
       return b.x + go(b.vx), b.y + go(b.vy)
     end
+    -- 4-8's robot (CC:C050): every $2A frames it turns toward P1 on one
+    -- axis and walks at 0.75 px/f (docs/enemies.md 8.2); a straight line
+    -- had it pass P1 by, and dodges walked into it (runs 48-B: 3 deaths in
+    -- most runs). Keep its heading ~20 frames, then head for P1 on the
+    -- longer axis, re-aimed every 42.
+    if b.base == 0x10C0 and b.state == 0xCCC050 and (r16(0x1A) & 0xFF) == 0x47 then
+      local px, py = r16(0x8010), r16(0x8018)
+      local x, y = b.x, b.y
+      local t1 = math.min(t, 20)
+      x, y = x + b.vx * t1, y + b.vy * t1
+      local left = t - t1
+      while left > 0 do
+        local seg = math.min(left, 42)
+        local dx, dy = px - x, py - y
+        if math.abs(dx) >= math.abs(dy) then
+          local step = math.min(math.abs(dx), 0.75 * seg); x = x + (dx >= 0 and step or -step)
+        else
+          local step = math.min(math.abs(dy), 0.75 * seg); y = y + (dy >= 0 and step or -step)
+        end
+        left = left - seg
+      end
+      return x, y
+    end
     if b.state == SLAM then return b.x, b.y + slamDy(r16(b.base + 0x36), t) end
     -- 5-8 form 2 hurt (FinalBossForm2Hurt CC:D2E7, 63 frames): it stays put
     -- (the waypoint prediction had it fly on, and dodges walked into it)

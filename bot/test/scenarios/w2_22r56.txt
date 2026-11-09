@@ -1,0 +1,9 @@
+# 2-2 from unaided seed-2 run X2 (ea5500a): stuck at x 123/125 going left at (17,5) to the open exit until a time-up
+start 21r56
+budget 17000
+pass STAGE 22
+fail DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+seed 2
+pads

@@ -1582,6 +1582,13 @@ local function think()
       end
     else
       ride.padHist = {}
+    -- (per-stage memory that used to carry over: cell visit counts and
+    -- failed bomb tiles from the last stage skewed exploring here, and a
+    -- stage-start scenario, which starts with them empty, then played the
+    -- stage differently from the full run)
+    for k in pairs(visits) do visits[k] = nil end
+    for k in pairs(noBombTile) do noBombTile[k] = nil end
+    ride.stand, ride.standMiss, ride.wait, ride.try, ride.dodgeGoal, ride.planCell = nil, nil, nil, nil, nil, nil
     end
   elseif springFrom then
     -- Only a death the jump caused (water): an enemy at the landing cell
@@ -1728,6 +1735,13 @@ local function think()
     math.randomseed(SEED * 7919 + stNow * 104729 + ride.entries[stNow] * 1299709)
     softSeen, softGone, springLand, springTry, ride.fail, ride.edges, ride.tried = {}, {}, {}, nil, {}, {}, {}
     ride.padHist = {}
+    -- (per-stage memory that used to carry over: cell visit counts and
+    -- failed bomb tiles from the last stage skewed exploring here, and a
+    -- stage-start scenario, which starts with them empty, then played the
+    -- stage differently from the full run)
+    for k in pairs(visits) do visits[k] = nil end
+    for k in pairs(noBombTile) do noBombTile[k] = nil end
+    ride.stand, ride.standMiss, ride.wait, ride.try, ride.dodgeGoal, ride.planCell = nil, nil, nil, nil, nil, nil
     ride.gateAt, ride.skateHeld = nil, nil  -- (a stale gateAt from the last stage would cut the skate hold short)
     DeadPad, HasPad = {}, false
     softBlownAt = {}
@@ -1760,7 +1774,7 @@ local function think()
         -- (the frame number too: decisions keyed on frame parity/period
         -- then replay the same in a scenario, see scenario.py SBM2_FRAME0)
         local ff = io.open(string.format("%s/stage_%02X.frame", OUT, stNow), "w")
-        if ff then ff:write(tostring(frame + 1)); ff:close() end  -- (the state is taken a frame on)
+        if ff then ff:write(tostring(frame)); ff:close() end  -- (taken in the callback, a frame after the STAGE line)
       end
     end)
   end

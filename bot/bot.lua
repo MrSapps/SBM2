@@ -4151,7 +4151,14 @@ local function think()
         input.a = frame % 2 == 0
       end
     else
-      input[steer(step.dir, x, y, step.c, step.r)] = true
+      -- (P1 frozen 8 frames on a step: press the way itself. 2-8, unaided
+      -- seed 2: a step right from (2,4) at y 69 kept pressing Down to line
+      -- up, into its own bomb at (2,5), for 140 frames until it went off)
+      local sd = steer(step.dir, x, y, step.c, step.r)
+      local fz = ride.stepFreeze
+      if not fz or fz[1] ~= x or fz[2] ~= y or fz[3] ~= step.tc or fz[4] ~= step.tr then ride.stepFreeze = { x, y, step.tc, step.tr, frame }
+      elseif frame - fz[5] >= 8 and sd ~= step.dir then sd = step.dir end
+      input[sd] = true
       -- Once on the target tile, keep moving toward its centre.
       if c == step.tc and r == step.tr then
         -- (one axis at a time, y to within 2: P1 rests a row at +7, and

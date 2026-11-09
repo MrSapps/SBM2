@@ -2939,6 +2939,19 @@ local function think()
   -- and comes again: the stand repeats). (5-6, run 36: P1 walked out of
   -- its corner to meet one and died 8 times there.)
   if ride.stand and (frame > ride.stand.untilF or (frame > ride.stand.at + 12 + (ride.stand.walk or 0) * FPT and not bombAtKey(ride.stand.bomb))) then
+    -- (a stand that hurt nobody is a miss: after 3 at one bomb cell, not
+    -- there again for 1500 frames. 2-3, seed 0: the same stand, bomb
+    -- (4,4) and wait (3,3), every ~195 frames for 6000 frames; the $82
+    -- never came in)
+    local hp = 0
+    for _, e in ipairs(elist) do if e.harmful and not e.gadget then hp = hp + (e.hp or 1) end end
+    ride.standMiss = ride.standMiss or {}
+    local bk = ride.stand.bomb
+    if hp >= (ride.stand.hp0 or 0) then
+      local m = ride.standMiss[bk] or { 0, 0 }
+      m[1] = m[1] + 1; if m[1] >= 3 then m[2] = frame + 1500; m[1] = 0 end
+      ride.standMiss[bk] = m
+    else ride.standMiss[bk] = nil end
     log(string.format("%6d stand over", frame)); ride.stand = nil
   end
   if not f1plan and not ride.stand and ride.chaserEta and emu.read(P1 + P_BOMBS_LEFT, WRAM, false) > 0
@@ -2960,6 +2973,8 @@ local function think()
         local bc, br, bn = bq[bqi][1], bq[bqi][2], bq[bqi][3]; bqi = bqi + 1
         local bk = br * KEY_W + bc
         local okB = bn == 0 or (not etaNow[bk] or etaNow[bk] > bn * FPT + 40)
+        local sm = ride.standMiss and ride.standMiss[bk]
+        if sm and frame < sm[2] then okB = false end
         if okB and (bn == 0 or (not isBomb(g[br][bc]) and g[br][bc] ~= SPRING)) then
           local blast = {}
           for _, cell in ipairs(blastCells(g, bc, br, RANGE)) do blast[cell[2] * KEY_W + cell[1]] = true end
@@ -2994,7 +3009,9 @@ local function think()
         end
       end
       if pick then
-        ride.stand = { s = pick[2] * KEY_W + pick[1], bomb = pick[4] * KEY_W + pick[3], at = frame, walk = pick[5],
+        local hp0 = 0
+        for _, e in ipairs(elist) do if e.harmful and not e.gadget then hp0 = hp0 + (e.hp or 1) end end
+        ride.stand = { s = pick[2] * KEY_W + pick[1], bomb = pick[4] * KEY_W + pick[3], at = frame, walk = pick[5], hp0 = hp0,
           untilF = frame + pick[5] * FPT + (remoteOn and 400 or NEW_FUSE + FLAME_FRAMES + 10) }
         log(string.format("%6d stand: bomb at (%d,%d) for a chaser %.0f frames off, wait at (%d,%d)", frame, pick[3], pick[4], eh, pick[1], pick[2]))
       end
@@ -3033,7 +3050,16 @@ local function think()
     end
   elseif danger[here] then
     -- (a stand whose cell can't be reached any more: the usual flee)
-    if ride.stand and here ~= ride.stand.s then log(string.format("%6d stand cell unreachable: fleeing instead", frame)); ride.stand = nil end
+    if ride.stand and here ~= ride.stand.s then
+      log(string.format("%6d stand cell unreachable: fleeing instead", frame))
+      -- (a miss too: 2-3, unaided, the same stand at (13,5) and its
+      -- unreachable cell alternated 100+ times until the stage timed out)
+      ride.standMiss = ride.standMiss or {}
+      local m = ride.standMiss[ride.stand.bomb] or { 0, 0 }
+      m[1] = m[1] + 1; if m[1] >= 3 then m[2] = frame + 1500; m[1] = 0 end
+      ride.standMiss[ride.stand.bomb] = m
+      ride.stand = nil
+    end
     plan = "flee"
     -- (first a goal chasers reach 120+ frames after P1: P1 waits there for
     -- the blasts to pass. 1-3, runs 14-16: fled to (6,19) with a $8C

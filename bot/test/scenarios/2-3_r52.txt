@@ -1,0 +1,8 @@
+# 2-3 first arrival from unaided seed-0 run T2 (799ca0a): stalled to a time-up at +23853, then $82 deaths and a game over
+start 23r52
+budget 23000
+pass STAGE 24
+fail DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+pads

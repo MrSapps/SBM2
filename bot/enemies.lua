@@ -74,7 +74,11 @@ return function(env)
           -- rider spawns): no target any more (3-1, run 22: hunted the mount
           -- by the open gate until time ran out, three game overs).
           e.mount = (typ == 0x98 or typ == 0x90) and (r16(base + 0xBE) & 0x8000) ~= 0
+          -- (not while immune after a hit, +$68 bit 0: a remote bomb set off
+          -- then only wastes the hit; 2-3, unaided: the hurt $82 came back
+          -- at 1.0 px/f and caught speed-1 P1)
           e.killable = not e.gadget and typ ~= 0xDD and (hp & 0x7F) ~= 0x7F and (f4 & 0x40) == 0 and not e.mount
+            and (r16(base + 0x68) & 1) == 0
           e.immune = (hp & 0x7F) == 0x7F
           e.chaser = CHASERS[typ] and ((rd8(base + 0xD0) & 0x80) ~= 0 or typ == 0x89)
           -- (the "magnet caught P1" in 1-3 was the $8C's own pull: see
@@ -99,6 +103,10 @@ return function(env)
             speed = e.dr ~= 0 and 2.0 or 1.5
           end
           if speed <= 0.05 then speed = 0.5 end
+          -- ($86 dashes at 2.5 px/f whatever its fields read at rest: ETAs
+          -- at 0.5 had 2-1's P1 escape its bomb down a dead-end column the
+          -- $86 then dashed down, every seed)
+          if typ == 0x86 then speed = 2.5 end
           e.cpf = 16 / speed
           if e.moving then
             local cx, cy = env.tileCentre(e.tc, e.tr)

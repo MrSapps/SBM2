@@ -1,0 +1,8 @@
+# 2-3 from seed-0 run U arrival: stand stalemate at (4,4)/(3,3) for 6000 frames
+start 23r47
+budget 18000
+pass STAGE 24
+fail DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+pads

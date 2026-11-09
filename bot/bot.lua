@@ -2924,7 +2924,10 @@ local function think()
     log(string.format("%6d stand over", frame)); ride.stand = nil
   end
   if not f1plan and not ride.stand and ride.chaserEta and emu.read(P1 + P_BOMBS_LEFT, WRAM, false) > 0
-      and not danger[here] and g[r][c] ~= SPRING and not isBomb(g[r][c]) and not (remoteOn and next(remoteCells)) then
+      and not danger[here] and g[r][c] ~= SPRING and not isBomb(g[r][c]) then
+    -- (also with remote bombs out: the ambush nearly always has one out,
+    -- so a hurt 2-HP $82 chasing at 1.0 px/f met no stand and caught
+    -- speed-1 P1; 2-3, unaided, 2 of 3 seeds)
     local fastNear = false
     for _, e in ipairs(elist) do if e.chaser and e.harmful and not e.shot and e.cpf < FPT then fastNear = true end end
     local etaNow = fastNear and ride.chaserEta()
@@ -3077,6 +3080,20 @@ local function think()
     if dg and frame < dg[3] and dg[1] * 1 == dg[1] and sg(dg[1], dg[2], 0) and not (dg[1] == c and dg[2] == r) then
       dir = bfs(g, c, r, function(cc, rr) return cc == dg[1] and rr == dg[2] end, mobNow, cw)
     end
+    -- (first a goal that is no dead end, 2+ open sides, within 6 steps:
+    -- 2-1, every seed, dodged down column 5 into the (5,10) dead end and an
+    -- $86 dashed down after; 4-3 likewise with a $93)
+    if not dir then
+      local gk
+      dir = bfs(g, c, r, function(cc, rr, n)
+        if n > 6 or not sg(cc, rr, n) then return false end
+        local open = 0
+        for _, d in ipairs(DIRS) do if walkable(g, cc + d[1], rr + d[2]) then open = open + 1 end end
+        if open >= 2 then gk = { cc, rr, frame + 40 }; return true end
+        return false
+      end, mobNow, cw)
+      ride.dodgeGoal = dir and gk or nil
+    end
     if not dir then
       local gk
       dir = bfs(g, c, r, function(cc, rr, n)
@@ -3088,7 +3105,7 @@ local function think()
     end
     if dir and os.getenv("SBM2_DBG2") then
       local d = ({ up = { 0, -1 }, down = { 0, 1 }, left = { -1, 0 }, right = { 1, 0 } })[dir:match("^%a+")]
-      local function ws(k) local t = {} for _, iv in ipairs(eWin[k] or {}) do t[#t + 1] = string.format("%d-%d", iv[1], iv[2]) end return table.concat(t, ",") end
+      local function ws(k) local t = {} for _, iv in ipairs(eWin[k] or {}) do t[#t + 1] = string.format("%.0f-%.0f", iv[1], iv[2]) end return table.concat(t, ",") end
       local nk = (r + d[2]) * KEY_W + c + d[1]
       local nk2 = (r + 2 * d[2]) * KEY_W + c + 2 * d[1]
       log(string.format("%6d dbg2 dodge %s here[%s] next[%s] next2[%s] goal %s", frame, dir, ws(here), ws(nk), ws(nk2),
@@ -3168,6 +3185,8 @@ local function think()
       local ht = g[rr][cc]
       if ht < 0x100 and ht & 0x40 ~= 0 and ht ~= ITEM then return nil end  -- (an item is picked up first)
       if (noBombUntil[rr * KEY_W + cc] or 0) > frame then return nil end
+      -- (the 5-1 opening, below, goes first: no other bombs meanwhile)
+      if ride.sw51 and rr * KEY_W + cc ~= ride.sw51 then return nil end
       local why, cells, near = nil, {}, false
       if pushCell == rr * KEY_W + cc then why = "obj" end
       for _, cell in ipairs(blastCells(g, cc, rr, rangeAt(g, cc, rr))) do
@@ -3290,7 +3309,14 @@ local function think()
       -- walker reaches before the blast is over is a trap, the blast on one
       -- side and the walker on the other (2-4, run 18: bombed a $82 and
       -- waited in the row-12 corridor at (8,12); the other $82 came in).
-      if ride.walkerEta then
+      -- (not for a bomb that lights a gold panel still to do: the walker
+      -- rule kept 1-2's panel bomb at (24,7) from ever being laid while its
+      -- endless $94s roamed, and the stage timed out, unaided)
+      local panelBomb = false
+      for _, cell in ipairs(blastCells(g, cc, rr, rangeAt(g, cc, rr))) do
+        if panelTodo[cell[2] * KEY_W + cell[1]] then panelBomb = true; break end
+      end
+      if ride.walkerEta and not panelBomb then
         local weta, safe1 = ride.walkerEta(cc, rr, NEW_FUSE + t), safe
         safe = function(c2, r2, n)
           if not safe1(c2, r2, n) then return false end
@@ -3376,6 +3402,9 @@ local function think()
       end
     end
     pushCell, trapCell = nil, nil
+    -- (the current bomb step's cell, settled or not: walked to first, see
+    -- "planstep"; it is bombed once the map has settled as before)
+    ride.planCell = planSteps and planSteps[planIdx] and planSteps[planIdx].kind == "bomb" and planSteps[planIdx].k or nil
     while planSteps and settled do
       local st = planSteps[planIdx]
       if not st then planSteps = nil; lastObjFrame = frame; break end
@@ -3448,6 +3477,23 @@ local function think()
         hearts = (hearts >= 0x80 or FAKE_HEARTS) and 99 or hearts, flashing = flashing,
       }
       planCo = { coroutine.create(function() return stagePlan(gc0, c, r, ctx) end), sigNow, 0 }
+    end
+    -- 5-1 opening: its three $8A are 1.25 px/f x-ray chasers while the
+    -- light switch at (6,7) reads even, and P1 at speed 1-3 can't outrun
+    -- them (4 deaths a seed). Flipping it makes them 0.5 px/f wanderers.
+    -- The way: bomb (4,4)/(5,4) open from row 4, bomb from (8,5) to push
+    -- the $E2 at (8,6) into the $D3 hole at (8,7), then down column 8 and
+    -- bomb from (6,8): the flame goes up column 6 onto the switch.
+    ride.sw51 = nil
+    if r16(0x5AAC) ~= ride.swLast then log(string.format("%6d light switch %04X -> %04X", frame, ride.swLast or 0, r16(0x5AAC))); ride.swLast = r16(0x5AAC) end
+    if emu.read(0x1A, WRAM, false) == 0x50 and r16(0x5AAC) ~= 0xFFFF and (r16(0x5AAC) & 1) == 0 then
+      local T
+      -- (a blasted block reads soft a while before it breaks: Breaking)
+      if SOFT[g[4][4]] and not Breaking[4 * KEY_W + 4] then T = 4 * KEY_W + 3
+      elseif SOFT[g[4][5]] and not Breaking[4 * KEY_W + 5] then T = 4 * KEY_W + 4
+      elseif g[6][8] == 0xE2 and g[7][8] == 0xD3 then T = 5 * KEY_W + 8
+      elseif g[7][6] == 0x64 then T = 8 * KEY_W + 6 end
+      if T and (noBombUntil[T] or 0) <= frame then pushCell = T; ride.sw51 = T end
     end
     local why = haveBomb and targetsInReach(c, r, 0)
     if why == "enemy" and frame < ambushHold then why = nil end
@@ -3607,7 +3653,27 @@ local function think()
             if g[ir] and SOFT[g[ir][ic]] then itemBlk[ir * KEY_W + ic] = true end
           end
         end
+        -- The stage planner's bomb step goes first: as one "obj" among the
+        -- rest it waited behind every nearer block and enemy until it timed
+        -- out (1-2, unaided: the panel bomb at (24,7), planned twice, never
+        -- laid; a time-up in 2 of 3 seeds).
+        if not ride.sw51 and ride.planCell and ride.planCell ~= here and planSteps then
+          local T = ride.planCell
+          dir = bfs(g, c, r, function(cc, rr, n)
+            return rr * KEY_W + cc == T and canEscape(cc, rr, n * FPT)
+          end, nearEnemy, cw)
+          if dir then plan = "planstep" end
+        end
+        if not dir and ride.sw51 and ride.sw51 ~= here then
+          local T = ride.sw51
+          dir = bfs(g, c, r, function(cc, rr, n)
+            return rr * KEY_W + cc == T and canEscape(cc, rr, n * FPT)
+          end, nearEnemy, cw)
+          if dir then plan = "switch51" end
+        end
+        if plan == "planstep" and dir then wants = {} end
         local wants = next(itemBlk) and { "item", "obj", "enemy" } or { "obj", "enemy" }
+        if dir then wants = {} end
         for _, want in ipairs(wants) do
           local goalK
           dir = bfs(g, c, r, function(cc, rr, n)

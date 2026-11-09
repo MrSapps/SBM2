@@ -1,0 +1,8 @@
+# 1-1 from the world-1 start: every seed of runs W/XN died at +1739 dodging left at (7,4) into a $94
+start 10r48
+budget 6000
+pass STAGE 11
+fail DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+pads

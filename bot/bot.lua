@@ -3476,7 +3476,38 @@ local function think()
         local ok
         if st.kind == "bomb" then
           local changes = bombEffect(g, sc, sr)
-          ok = reachNow[st.k] and #changes > 0 and keyChanges(changes, g) == st.key
+          -- (reachable over a platform lane counts too: the planner routes
+          -- over rides, regionOf does not; 4-2, unaided, every plan beyond
+          -- the $DC lanes was dropped two frames after it was made, then
+          -- time-ups)
+          -- (RideBlock, enemies near a lane end, is a matter of when, not
+          -- whether: the ride waits at the lane end; ignored here)
+          local reach = reachNow[st.k] or st.k == here
+          if not reach then
+            -- (nor AvoidCell, track cells by a $DD: the block moves on; 4-2's
+            -- only crossing of the column-8 track is (8,10), barred while
+            -- the block passes, and the plan was dropped every time)
+            local rb, ar, av = RideBlock, allowRide, AvoidCell
+            RideBlock, allowRide, AvoidCell = {}, true, {}
+            -- (and the block's own cell, $CD, as track: it moves off)
+            local g2 = g
+            for rr2 = 0, MAP_H - 1 do
+              for cc2 = 0, MAP_W - 1 do
+                if g[rr2][cc2] == 0xCD then
+                  if g2 == g then g2 = {}; for r3 = 0, MAP_H - 1 do g2[r3] = g[r3] end end
+                  if g2[rr2] == g[rr2] then local row = {}; for c3 = 0, MAP_W - 1 do row[c3] = g[rr2][c3] end; g2[rr2] = row end
+                  g2[rr2][cc2] = 0x4D
+                end
+              end
+            end
+            local bcl = {}
+            for k, v in pairs(badCell) do bcl[k] = v; badCell[k] = nil end
+            reach = bfs(g2, c, r, function(cc, rr) return rr * KEY_W + cc == st.k end, nil, nil) ~= nil
+            for k, v in pairs(bcl) do badCell[k] = v end
+            if not reach and next(bcl) then log(string.format("%6d plan step reach: badCell %d cells", frame, (function() local n = 0; for _ in pairs(bcl) do n = n + 1 end; return n end)())) end
+            RideBlock, allowRide, AvoidCell = rb, ar, av
+          end
+          ok = reach and #changes > 0 and keyChanges(changes, g) == st.key
         elseif g[sr][sc] ~= 0x63 then
           break  -- sprung, still breaking: wait for the $00
         else
@@ -3721,8 +3752,31 @@ local function think()
             return rr * KEY_W + cc == T and canEscape(cc, rr, n * FPT)
           end, nearEnemy, cw)
           if dir then plan = "planstep" end
-        end
-        if not dir and ride.sw51 and ride.sw51 ~= here then
+          -- (no way now, but one past a $DD's cell / the track rule: follow
+          -- that one while its next cell is open, else wait for the block to
+          -- move on; 4-2, unaided, P1 left the column-8 crossing every time)
+          if not dir and canEscape(T % KEY_W, T // KEY_W, 0) then
+            local rb, ar, av = RideBlock, allowRide, AvoidCell
+            RideBlock, allowRide, AvoidCell = {}, true, {}
+            local g2 = g
+            for rr2 = 0, MAP_H - 1 do
+              for cc2 = 0, MAP_W - 1 do
+                if g[rr2][cc2] == 0xCD then
+                  if g2 == g then g2 = {}; for r3 = 0, MAP_H - 1 do g2[r3] = g[r3] end end
+                  if g2[rr2] == g[rr2] then local row = {}; for c3 = 0, MAP_W - 1 do row[c3] = g[rr2][c3] end; g2[rr2] = row end
+                  g2[rr2][cc2] = 0x4D
+                end
+              end
+            end
+            local d2 = bfs(g2, c, r, function(cc, rr) return rr * KEY_W + cc == T end, nearEnemy, nil)
+            RideBlock, allowRide, AvoidCell = rb, ar, av
+            if d2 then
+              local dv = ({ up = { 0, -1 }, down = { 0, 1 }, left = { -1, 0 }, right = { 1, 0 } })[d2:match("^%a+") or ""]
+              if d2 == "ride" or (dv and walkable(g, c + dv[1], r + dv[2]) and not danger[(r + dv[2]) * KEY_W + c + dv[1]]) then dir = d2
+              else dir = nil end
+              plan = "planstep"
+            end
+          end
           local T = ride.sw51
           dir = bfs(g, c, r, function(cc, rr, n)
             return rr * KEY_W + cc == T and canEscape(cc, rr, n * FPT)

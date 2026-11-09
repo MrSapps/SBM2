@@ -1,0 +1,9 @@
+# 4-2 first arrival from unaided seed-1 run V2 (bd82281): stalls with 8 panels left, time-ups (14 deaths, 2 game overs)
+start 41r54
+budget 17000
+pass STAGE 42
+fail DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+seed 1
+pads

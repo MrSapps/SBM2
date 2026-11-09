@@ -1,0 +1,7 @@
+# 5-8 from seed-3 run S (speed 1, no remote): loops dying at px(224,94) ~950 frames in, dodging down column 14 into a ball
+start 57r45
+budget 36000
+pass THE END
+fail DEATH
+env SBM2_NOREWIND=1
+pads

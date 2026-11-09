@@ -1,0 +1,8 @@
+# 4-4 from seed-0 run S: five own bombs in the middle room at speed 1, fled into an $87 at ~2800
+start 43r45a
+budget 21600
+pass STAGE 44
+fail DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+pads

@@ -1,0 +1,8 @@
+# 4-3 from seed-0 run S: time-up (whole track barred by the $DD avoid rule)
+start 42r45b
+budget 17000
+pass STAGE 43
+fail DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+pads

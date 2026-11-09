@@ -1766,7 +1766,20 @@ local function think()
   end
   -- A $DD track block crushes P1 ahead of it: track cells ($4D/$CD) within
   -- 5 cells of one are not walked onto (4-5, runs 44-45: explored back onto
-  -- the row-8 track after stepping off it and was crushed).
+  -- the row-8 track after stepping off it and was crushed). A crossing (open
+  -- floor on both sides across the track) 2+ cells from the block is still
+  -- passable: it moves a cell per 32 frames, P1 crosses in ~16 (4-3, 3 of
+  -- 4 seeds: the whole row-14 track barred the way to the last enemy's
+  -- block, time-up).
+  local function trackCrossing(cc, rr)
+    local function tt(c2, r2) return emu.read(MAP + r2 * ROW + c2 * 2, WRAM, false) end
+    local function isTrack(t) return t == 0x4D or t == 0xCD end
+    local function open(t) return (t & 0xC0) == 0 end
+    if rr < 1 or cc < 1 then return false end
+    if isTrack(tt(cc - 1, rr)) or isTrack(tt(cc + 1, rr)) then return open(tt(cc, rr - 1)) and open(tt(cc, rr + 1)) end
+    if isTrack(tt(cc, rr - 1)) or isTrack(tt(cc, rr + 1)) then return open(tt(cc - 1, rr)) and open(tt(cc + 1, rr)) end
+    return false
+  end
   for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
     if (r16(base) & 0xF000) == 0x9000 and (r16(base + 0x7E) & 0xFF) == 0xDD then
       local dc, dr = toTile(r16(base + P_X), r16(base + P_Y))
@@ -1774,7 +1787,8 @@ local function think()
         for cc = dc - 5, dc + 5 do
           if math.abs(rr - dr) + math.abs(cc - dc) <= 5 and rr >= 0 and cc >= 0 then
             local t = emu.read(MAP + rr * ROW + cc * 2, WRAM, false)
-            if t == 0x4D or t == 0xCD then AvoidCell[rr * KEY_W + cc] = true end
+            local d = math.abs(rr - dr) + math.abs(cc - dc)
+            if (t == 0x4D or t == 0xCD) and (d <= 1 or not trackCrossing(cc, rr)) then AvoidCell[rr * KEY_W + cc] = true end
           end
         end
       end

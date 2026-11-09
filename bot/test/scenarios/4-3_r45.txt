@@ -1,0 +1,8 @@
+# 4-3 from seed-2 run S: time-up at ~15800 frames, idle at (11,16) with $93/$89 left (seeds 0 and 3 alike)
+start 42r45
+budget 17000
+pass STAGE 43
+fail DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+pads

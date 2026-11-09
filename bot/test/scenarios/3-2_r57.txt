@@ -1,0 +1,8 @@
+# 3-2 from unaided run Y2 s2 (5ac8e73): explores up the stairs at (25,8) onto the $E1 at (25,7) and dies at +11305, the same after each continue (X2 s1 too)
+start 31r57
+budget 21600
+seed 2
+pass STAGE 32
+fail DEATH
+env SBM2_NOREWIND=1
+pads

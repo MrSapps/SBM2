@@ -1,0 +1,8 @@
+# 2-4 from unaided run Y2 s0 (5ac8e73): stall-explores the dead end (9,5)-(9,6) under the closed gate; an $82 comes up the column, contact death at +17962
+start 23r57
+budget 21600
+seed 0
+pass STAGE 24
+fail DEATH
+env SBM2_NOREWIND=1
+pads

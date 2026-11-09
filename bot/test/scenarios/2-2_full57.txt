@@ -1,0 +1,7 @@
+# 2-2 whole stage from run X2 s0 arrival (ea5500a): start pocket opener vs $86s
+start 21r57b
+budget 21600
+pass STAGE 22
+fail DEATH
+env SBM2_NOREWIND=1
+pads

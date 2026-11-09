@@ -640,6 +640,38 @@ local BOARD = 0x36
 -- at (c, r) after `frames`, boarded while holding `press` (nil = standing).
 -- Routes use them as jumps (jumpObj); kept for the stage.
 local ride = { fail = {}, edges = {} }
+-- Pocket cells of grid g: off every loop, what is left after peeling cells
+-- with one open side again and again (a corridor to a dead end, a cul-de-
+-- sac room). Cached per grid table.
+function ride.pockets(g)
+  if ride.pocketG == g then return ride.pocketCut end
+  local deg, q = {}, {}
+  for rr = 0, MAP_H - 1 do for cc = 0, MAP_W - 1 do
+    if walkable(g, cc, rr) then
+      local n = 0
+      for _, d in ipairs(DIRS) do if walkable(g, cc + d[1], rr + d[2]) then n = n + 1 end end
+      deg[rr * KEY_W + cc] = n
+      if n <= 1 then q[#q + 1] = rr * KEY_W + cc end
+    end
+  end end
+  local cut, i = {}, 1
+  while i <= #q do
+    local k = q[i]; i = i + 1
+    if not cut[k] then
+      cut[k] = true
+      local cc, rr = k % KEY_W, k // KEY_W
+      for _, d in ipairs(DIRS) do
+        local k2 = (rr + d[2]) * KEY_W + cc + d[1]
+        if deg[k2] and not cut[k2] then
+          deg[k2] = deg[k2] - 1
+          if deg[k2] <= 1 then q[#q + 1] = k2 end
+        end
+      end
+    end
+  end
+  ride.pocketG, ride.pocketCut = g, cut
+  return cut
+end
 -- Rides come when the platform does: never count on one to escape a blast.
 local allowRide = true
 local pushCell, pushNext, lastObjFrame = nil, 0, 0  -- stage planner state (think)
@@ -1181,6 +1213,27 @@ end
 local function steer(dir, x, y, c, r)
   local STEER_SLACK = 2  -- (not a chunk local: the main chunk is at Lua's 200-local limit)
   local cx, cy = tileCentre(c, r)
+  -- Two-frame see-saw (2-2, by the exit in the top wall at (16,4): Left
+  -- from (17,5) slid P1 to (123,85), the centring Down put it back at
+  -- (125,88), every other frame until time-up): after a few A/B/A/B
+  -- frames press the plain direction for a while.
+  local h = ride.steerH
+  if not h then h = { n = 0, raw = 0 }; ride.steerH = h end
+  h.n = h.n + 1
+  -- (across the way of travel only: 1-px jitter along it is normal, 1-4
+  -- pressed on at (161,103)/(162,103) and a plain Right walked into a blast)
+  local across = (dir == "left" or dir == "right") and y ~= (h[2] or y) or (dir == "up" or dir == "down") and x ~= (h[1] or x)
+  if h[1] and across and x == h[3] and y == h[4] and h[1] == h[5] and h[2] == h[6] then
+    h.alt = (h.alt or 0) + 1
+    if h.alt >= 6 then
+      h.raw = h.n + 40; h.alt = 0
+      log(string.format("steer see-saw at px(%d,%d)/(%d,%d) going %s: plain %s for 40", x, y, h[1], h[2], dir, dir))
+    end
+  else
+    h.alt = 0
+  end
+  h[5], h[6], h[3], h[4], h[1], h[2] = h[3], h[4], h[1], h[2], x, y
+  if h.n < h.raw then return dir end
   if dir == "up" or dir == "down" then
     if x < cx - STEER_SLACK then return "right" elseif x > cx + STEER_SLACK then return "left" end
   else
@@ -1845,6 +1898,9 @@ local function think()
     AvoidCell[pr * KEY_W + pc] = nil  -- (never P1's own cell: it must be able to leave)
   end
   local g = readMap()
+  ride.pocketG, ride.openers = nil, nil  -- (pockets afresh each frame)
+  ride.crystals = 0
+  for rr = 0, MAP_H - 1 do for cc = 0, MAP_W - 1 do if g[rr][cc] == 0x68 then ride.crystals = ride.crystals + 1 end end end
   -- Exit gate: map index at $7E5D72; open once $7E5D94 bit 15 (all gold
   -- panels blasted, or no panels: $FFFF) is set (checked at C1:41xx).
   local gate = r16(0x5D72)
@@ -1999,7 +2055,10 @@ local function think()
   end
   jumpObj = {}
   for _, e in ipairs(elist) do
-    if e.type == 0xE0 or e.type == 0xA0 then
+    -- ($E1: 3-2's pad at (25,7), launching left like $A0; walked over as
+    -- a floor cell it killed P1 in runs X2 s1 and Y2 s2, routed as a jump
+    -- it carries P1 back to the left half, the last crystal's side)
+    if e.type == 0xE0 or e.type == 0xA0 or e.type == 0xE1 then
       jumpObj[e.r * KEY_W + e.c] = { e.c + (e.type == 0xE0 and 8 or -8), e.r }
     end
   end
@@ -3137,6 +3196,26 @@ local function think()
       or bfs(g, c, r, safeGoal(windows), enemyNow, windows)
       or bfs(g, c, r, function(cc, rr) return not windows[rr * KEY_W + cc] end, enemyNow)
     end
+    -- A flee flipping between two ways out (different goals winning on
+    -- alternate frames) goes nowhere: after a few flips keep the last way
+    -- for 20 frames while its next cell stays open and clear of enemies.
+    -- (3-8, unaided run Y2 s0: bombed the boss from (2,8), then up/right
+    -- by turns for 35 frames on the bomb's cell; boxed in, the body came.)
+    local DIRV = { up = { 0, -1 }, down = { 0, 1 }, left = { -1, 0 }, right = { 1, 0 } }
+    if plan == "flee" and dir and DIRV[dir] then
+      local fh = ride.fleeH
+      if fh and fh.k == here and fh.lock and frame < fh.lock[2] then
+        local v = DIRV[fh.lock[1]]
+        local nk = (r + v[2]) * KEY_W + c + v[1]
+        if walkable(g, c + v[1], r + v[2]) and not nearEnemy[nk] then dir = fh.lock[1] end
+      elseif fh and fh.k == here and frame - fh.at <= 3 then
+        if dir ~= fh.d then fh.flips = fh.flips + 1 end
+        fh.d, fh.at = dir, frame
+        if fh.flips >= 4 then fh.lock = { dir, frame + 20 } end
+      else
+        ride.fleeH = { k = here, d = dir, at = frame, flips = 0 }
+      end
+    end
   elseif nearEnemy[here] or (frame - throw.dodgeAt < 12 and hit(eWin, here, 0, 90)) then
     -- Keep at a dodge for a few frames: nearEnemy flickers as predictions
     -- shift, and turning back each other frame is how the 5-8 body corners us.
@@ -3155,6 +3234,18 @@ local function think()
     -- (first a goal that is no dead end, 2+ open sides, within 6 steps:
     -- 2-1, every seed, dodged down column 5 into the (5,10) dead end and an
     -- $86 dashed down after; 4-3 likewise with a $93)
+    -- (and before that one off every loop: 2-2, run X2 s0, dodged an $86
+    -- coming along row 5 into column 5, two sides all the way down to the
+    -- push block at (5,11), and it dashed in after)
+    if not dir then
+      local gk, cut = nil, ride.pockets(g)
+      dir = bfs(g, c, r, function(cc, rr, n)
+        if n > 6 or cut[rr * KEY_W + cc] or not sg(cc, rr, n) then return false end
+        gk = { cc, rr, frame + 40 }
+        return true
+      end, mobNow, cw)
+      ride.dodgeGoal = dir and gk or nil
+    end
     if not dir then
       local gk
       dir = bfs(g, c, r, function(cc, rr, n)
@@ -3382,12 +3473,30 @@ local function think()
       -- With the remote, the end cell must also be clear of the remote
       -- bombs' blasts, or setting them off later would mean dying.
       local safe0 = safeGoal(w, t)
+      -- (a bomb opening P1's pocket, ride.openers, skips the chaser and
+      -- walker rules below: they kept 2-2's start-pocket opener at (5,7)
+      -- from ever being laid, and the $86 came in anyway)
+      local opener = false
+      if ride.openers then
+        for _, cell in ipairs(blastCells(g, cc, rr, rangeAt(g, cc, rr))) do
+          if ride.openers[cell[2] * KEY_W + cell[1]] then opener = true; break end
+        end
+      end
+      -- (so does one that lights the last crystal $68: every $8F dies with
+      -- it, docs/mechanics.md 6. 3-2, unaided run Y2 s2: the last one at
+      -- (3,10) is bombed from row 11, where the two immune $8F walk; the
+      -- walker rule turned down every bomb there until time-up)
+      if not opener and ride.crystals == 1 then
+        for _, cell in ipairs(blastCells(g, cc, rr, rangeAt(g, cc, rr))) do
+          if g[cell[2]][cell[1]] == 0x68 then opener = true; break end
+        end
+      end
       -- Chasers follow P1 wherever it goes (the rollouts aim them at where
       -- P1 is now): the end cell must be one P1 holds well before any
       -- chaser can walk there, the new bomb in its way (5-1: P1 bombed and
       -- backed into a column a 1.25 px/f chaser was coming up).
       local safe = safe0
-      if ride.chaserEta then
+      if ride.chaserEta and not opener then
         local eta = ride.chaserEta(cc, rr, NEW_FUSE + t)
         safe = function(c2, r2, n)
           if not safe0(c2, r2, n) then return false end
@@ -3414,7 +3523,8 @@ local function think()
       -- (not for a bomb that lights a gold panel still to do: the walker
       -- rule kept 1-2's panel bomb at (24,7) from ever being laid while its
       -- endless $94s roamed, and the stage timed out, unaided)
-      local panelBomb = false
+      -- (nor for one that opens P1's pocket: see ride.openers)
+      local panelBomb = opener
       for _, cell in ipairs(blastCells(g, cc, rr, rangeAt(g, cc, rr))) do
         if panelTodo[cell[2] * KEY_W + cell[1]] then panelBomb = true; break end
       end
@@ -3628,6 +3738,35 @@ local function think()
       elseif g[7][6] == 0x64 then T = 8 * KEY_W + 6 end
       if T and (noBombUntil[T] or 0) <= frame then pushCell = T; ride.sw51 = T end
     end
+    -- In a pocket (ride.pockets) with walkers about, first a soft block
+    -- whose blast puts P1's cell on a loop. (2-2, runs X2 s0 and U s1:
+    -- the start pocket, row 5 west of (6,5) and column 5 down to the
+    -- push block at (5,11), opens at (6,7) or (6,9); P1 sought targets
+    -- out along row 5, met an $86 there, backed into column 5 and the
+    -- $86 dashed in after.)
+    if ride.walkerEta and haveBomb then
+      local cut = ride.pockets(g)
+      if cut[here] then
+        local op = {}
+        for rr = math.max(0, r - 8), math.min(MAP_H - 1, r + 8) do
+          for cc = math.max(0, c - 8), math.min(MAP_W - 1, c + 8) do
+            local t, k = g[rr][cc], rr * KEY_W + cc
+            if SOFT[t] and not Breaking[k] then
+              local near = false
+              for _, d in ipairs(DIRS) do if cut[(rr + d[2]) * KEY_W + cc + d[1]] then near = true end end
+              if near then
+                g[rr][cc] = 0; ride.pocketG = nil
+                if not ride.pockets(g)[here] then op[k] = true end
+                g[rr][cc] = t
+              end
+            end
+          end
+        end
+        ride.pocketG = nil
+        if os.getenv("SBM2_DBG") then local t = {}; for k in pairs(op) do t[#t + 1] = string.format("(%d,%d)", k % KEY_W, k // KEY_W) end; log(string.format("%6d dbg openers %s", frame, table.concat(t, " "))) end
+        if next(op) then ride.openers = op end
+      end
+    end
     local why = haveBomb and targetsInReach(c, r, 0)
     if why == "enemy" and frame < ambushHold then why = nil end
     -- (not on a $8C's pull line: fleeing its blast, the pull holds P1 back
@@ -3685,6 +3824,15 @@ local function think()
       if why == "enemy" and not ambush then ambushStart = true end
       -- Bomb placement is edge-triggered: press on alternate frames.
       input.a = frame % 2 == 0
+    elseif why == "obj" and not danger[here] and not nearEnemy[here]
+        and (not ride.hold or ride.hold[1] ~= here or frame - ride.hold[2] < 90)
+        and (canEscape(c, r, 15) or canEscape(c, r, 30) or canEscape(c, r, 60)) then
+      -- The bomb here is out a little later (an older blast still in the
+      -- way): stand by. (2-2, every seed: the seek, timed for arrival,
+      -- sent P1 to (5,9) for the start-pocket opener; there it was too
+      -- early, the seek sent it on to (5,7), and back, until an $86 came.)
+      if not ride.hold or ride.hold[1] ~= here then ride.hold = { here, frame } end
+      plan, dir = "hold", nil
     elseif remoteCells[here] and (remoteWorth or not haveBomb)
         and not (finalForm2() and (r16(P1 + 0x52) & 6) ~= 0) then
       -- (holding a bomb, B sets nothing off: the remote one waits; walking
@@ -3832,20 +3980,22 @@ local function think()
         end
         if plan == "planstep" and dir then wants = {} end
         local wants = next(itemBlk) and { "item", "obj", "enemy" } or { "obj", "enemy" }
+        if ride.openers then table.insert(wants, 1, "open") end
         if dir then wants = {} end
         for _, want in ipairs(wants) do
           local goalK
           dir = bfs(g, c, r, function(cc, rr, n)
             if (cc == c and rr == r) or danger[rr * KEY_W + cc] or (want == "enemy" and not sealOK(cc, rr)) then return false end
             local why = targetsInReach(cc, rr, n * FPT)
-            if want == "item" then
+            if want == "item" or want == "open" then
               if why ~= "obj" then return false end
+              local set = want == "item" and itemBlk or ride.openers
               local hits = false
               for _, cell in ipairs(blastCells(g, cc, rr, rangeAt(g, cc, rr))) do
-                if itemBlk[cell[2] * KEY_W + cell[1]] then hits = true; break end
+                if set[cell[2] * KEY_W + cell[1]] then hits = true; break end
               end
               if not hits then return false end
-              why = "item"
+              why = want
             end
             local ok = why == want and (want ~= "enemy" or frame >= ambushHold)
               and canEscape(cc, rr, n * FPT)
@@ -3856,7 +4006,7 @@ local function think()
             if os.getenv("SBM2_DBG") and goalK then log(string.format("%6d dbg seek %s at (%d,%d)", frame, want, goalK % KEY_W, goalK // KEY_W)) end
             -- A planned step is not a target of its own: the planner keeps
             -- going after it.
-            if want == "obj" and goalK ~= pushCell then lastObjFrame = frame end
+            if (want == "obj" or want == "open") and goalK ~= pushCell then lastObjFrame = frame end
             break
           end
           -- The planned trap comes before bombing for enemies.
@@ -4610,6 +4760,15 @@ local function onFrame()
     return
   end
   if not loaded then
+    -- botrun has loaded the state and played SBM2_PREFIX (scenario.py's
+    -- pads) after it; loading it again would throw the pads away (every
+    -- scenario with pads ran from its stage start until this check).
+    local prefix = os.getenv("SBM2_PREFIX")
+    if prefix and prefix ~= "" then
+      inputlog.start(LOAD, prefix)
+      loaded = true
+      return
+    end
     local fh = assert(io.open(LOAD, "rb")); local data = fh:read("a"); fh:close()
     onNextInstruction(function()
       emu.loadSavestate(data)

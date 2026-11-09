@@ -135,7 +135,8 @@ def run_one(sc, verbose):
     extra = {}
     fp = start_state(sc['start'])[:-4] + '.frame'
     if os.path.exists(fp) and 'SBM2_FRAME0' not in sc['env']:
-        f0 = int(open(fp).read().strip() or 0)
+        # (plus the frames the pads play: the bot takes over after them)
+        f0 = int(open(fp).read().strip() or 0) + sc['pads'].count(1)
         extra = {'SBM2_FRAME0': str(f0), 'SBM2_FRAMES': str(f0 + int(sc['budget']))}
     env = dict(os.environ, SBM2_OUT=out, SBM2_FRAMES=sc['budget'], SBM2_LOAD=start_state(sc['start']),
                SBM2_PREFIX=pre, SBM2_NOASSIST='1', SBM2_SEED=sc['seed'], SBM2_CKPT='1000000', **sc['env'])

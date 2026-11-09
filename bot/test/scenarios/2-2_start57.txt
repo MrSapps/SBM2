@@ -1,0 +1,7 @@
+# 2-2 first 3000 frames from run X2 s0's arrival (ea5500a): the start pocket (row 5 west of (6,5), column 5 down to the push block at (5,11)) with $86s about; X2 s0 and U s1 died to an $86 dashing into column 5
+start 21r57b
+budget 3000
+pass END 21|STAGE 22
+fail DEATH
+env SBM2_NOREWIND=1
+pads

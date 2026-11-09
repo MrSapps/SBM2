@@ -140,13 +140,16 @@ local function readLog(path)
   return t
 end
 
-function M.start(statePath)
+function M.start(statePath, prefixPath)
   if not loops then scan() end
   log, valid, extras = {}, true, 0
   if statePath then
     local t = readLog(M.sidecar(statePath))
     if t then log = t else valid = false end
   end
+  -- (botrun's SBM2_PREFIX: pads already played after the state)
+  local pre = prefixPath and readLog(prefixPath)
+  if pre then for _, v in ipairs(pre) do log[#log + 1] = v end end
   countFrames()
   hasPokes = false
   for _, v in ipairs(log) do if v & 0xF == 3 then hasPokes = true; break end end

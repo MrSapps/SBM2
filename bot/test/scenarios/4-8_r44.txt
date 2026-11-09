@@ -1,0 +1,8 @@
+# 4-8 from full run 44's arrival: three deaths to the robot
+start 47r44
+budget 21600
+pass STAGE 50
+fail DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+pads

@@ -1,0 +1,8 @@
+# 3-7 entry from unaided seed-2 run Q (a1e3ba5): 10+ deaths, a loop of "other" deaths ~160 frames apart
+start 36r50
+budget 21600
+pass STAGE 37
+fail DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+pads

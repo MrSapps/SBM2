@@ -1,0 +1,8 @@
+# 3-5 last entry from unaided seed-0 run Q (a1e3ba5)
+start 34r50
+budget 21600
+pass STAGE 35
+fail DEATH
+env SBM2_NOREWIND=1
+env SBM2_STOPEARLY=1
+pads

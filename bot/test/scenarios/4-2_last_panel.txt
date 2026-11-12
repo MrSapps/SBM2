@@ -3,6 +3,7 @@
 start 41
 budget 8000
 pass STAGE 42
+fail DEATH
 pads
 1 0001,0000
 10 0001,0400

@@ -1,0 +1,7 @@
+# 2-3 from 2-2_full57 under the lookahead shield (seed 0): boxed in by three bombs at (7,8)/(7,10)/(7,12) near frame 21069; two-direction escapes all die
+start 23r61
+budget 9000
+seed 0
+pass STAGE 24
+fail DEATH
+env SBM2_NOREWIND=1

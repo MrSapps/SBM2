@@ -1,0 +1,11 @@
+# 3-6 from run fullJA s0, from the stage start (4 hearts). Cleared, but only
+# after ~15900 frames: the last 8B hung around (5,8), the landing of the pad
+# at (5,13), and the bot bounced on that pad (and on (7,6), (10,10)) waiting
+# for it to move, ~40 bounces over 7000 frames. Earlier runs took 2500-10000.
+start 35r76
+budget 9000
+seed 0
+pass STAGE 36
+fail DEATH|GAME OVER
+env SBM2_NOREWIND=1
+pads

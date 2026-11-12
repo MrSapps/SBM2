@@ -1,0 +1,11 @@
+# 2-4 from run fullHZ s0, from the stage start (2 hearts): the bot cleared most
+# of the map, then wedged at (5,8)/(3,11) with "bomb search: none" next to
+# the panel at (3,12) and spent both hearts in stall-breaker tries
+# (fails on any flame heart loss)
+start 23r72
+budget 9000
+seed 0
+pass STAGE 24
+fail DEATH|hearts 0[1-9] -> 0[0-9] at px\([1-9][0-9]*,[0-9]+\) flame
+env SBM2_NOREWIND=1
+pads

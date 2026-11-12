@@ -1,0 +1,10 @@
+# 2-1 from run fullKA s0, from the stage start (1 heart). At 40662 the heart
+# went to an $8D: P1 stood ("dodge -") at (12,4) for 34 frames, then dodged
+# left into it as it came along row 4.
+start 20r78
+budget 8000
+seed 0
+pass STAGE 21
+fail DEATH|GAME OVER|hearts 0[1-9] -> 00 at px\([1-9]
+env SBM2_NOREWIND=1
+pads

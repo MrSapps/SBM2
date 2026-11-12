@@ -1,0 +1,10 @@
+# 3-6 from run fullKA s0, from the stage start (3 hearts). Time-up death at
+# 134137 after 26400 frames: stalled from ~113000 with 8B, two 8E and a
+# dormant one left, "exploring", ambushes given up, mostly "seek".
+start 35r79
+budget 12000
+seed 0
+pass STAGE 36
+fail DEATH|GAME OVER
+env SBM2_NOREWIND=1
+pads

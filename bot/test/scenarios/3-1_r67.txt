@@ -1,0 +1,11 @@
+# 3-1 from run fullBQ s0, from the stage start, with the remote bomb and
+# 3 hearts: 7 mode-1 panels left at (15,12) (1,8) (9,9) (1,10) (15,10)
+# (1,12) (15,8), no parity plan ("plan: none"); wedged at (15,10) and
+# "stalled; exploring" for 30k frames
+start 30r67
+budget 12000
+seed 0
+env SBM2_NOREWIND=1
+pass STAGE 31
+fail DEATH
+pads

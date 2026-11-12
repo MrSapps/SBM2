@@ -1,0 +1,8 @@
+# 1-6 from unaided run B4 s0 (a99f6fe): wait/dodge flip at (11,21)/(11,22) between two $8C in the column, contact death at 33721
+start 15r60
+budget 21600
+seed 0
+pass STAGE 16
+fail DEATH
+env SBM2_NOREWIND=1
+pads

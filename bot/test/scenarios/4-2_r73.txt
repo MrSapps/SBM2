@@ -1,0 +1,11 @@
+# 4-2 from run fullHZ s0, from the stage start (3 hearts): at (12,5) the
+# dodge stepped down into an $87 coming up column 12 (px 97,95) at frame
+# 136387; replays then sealed P1 in at (11,10) (an $87 soft block). Fails on
+# a death (a stall breaker heart is allowed)
+start 41r73
+budget 18000
+seed 0
+pass STAGE 42
+fail DEATH|GAME OVER
+env SBM2_NOREWIND=1
+pads

@@ -1,0 +1,10 @@
+# 4-2 from run fullJA s0, from the stage start (5 hearts). Time-up death at
+# 153880: from 141479 the bot stood at (18,10) for 12000 frames, "panel
+# plan: none", plan none, bomb search none.
+start 41r77
+budget 15000
+seed 0
+pass STAGE 42
+fail DEATH|GAME OVER
+env SBM2_NOREWIND=1
+pads

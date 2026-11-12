@@ -14,7 +14,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MESEN = os.path.join(ROOT, 'tools', 'mesen2')
 # SBM2_PORT=1: run the bot on the port (build/port/botrun, frame-step, no
 # lag frames) instead of Mesen; several times faster, same files out.
-BOTRUN = os.path.join(ROOT, 'build', 'port', 'botrun')
+BOTRUN = os.environ.get('SBM2_BOTRUN') or os.path.join(ROOT, 'build', 'port', 'botrun')
 PORT = os.environ.get('SBM2_PORT', '') not in ('', '0')
 
 

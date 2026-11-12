@@ -1,0 +1,10 @@
+# 2-1 from run fullLA s0, from the stage start (1 heart). Time-up death at
+# 60216: 18 ambush hits by 49037, then "ambush gave up" every ~385 frames
+# for 11000 frames along row 4 with one $8D left at about (11,4).
+start 20r80
+budget 9000
+seed 0
+pass STAGE 21
+fail DEATH|GAME OVER|hearts 0[1-9] -> 00 at px\([1-9]
+env SBM2_NOREWIND=1
+pads

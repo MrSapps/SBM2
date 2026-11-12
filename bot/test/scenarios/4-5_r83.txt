@@ -1,0 +1,8 @@
+# 4-5 from its start (state from run fullX s0). Run half45 s0: two $93 by the (9,6) lane end, P1 on
+# the (20,6) side; RideBlock kept the ride shut and the bot stalled from ~8700 to time-up.
+start 44r83
+budget 17100
+pass STAGE 45
+fail DEATH|GAME OVER|hearts 0[1-9] -> 00 at px\([1-9]
+env SBM2_NOREWIND=1
+pads

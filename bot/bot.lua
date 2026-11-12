@@ -120,6 +120,27 @@ local function isFlame(t) return t >= 0x01 and t <= 0x03 end
 
 local logLines, seenUnknown = {}, {}
 local function log(s) logLines[#logLines + 1] = s end
+-- SBM2_SIMPROF=1: simulateMany calls and time by calling line, logged every
+-- 100 calls (to find what makes a stage slow).
+if os.getenv("SBM2_SIMPROF") and emu.simulateMany then
+  local orig, prof, n = emu.simulateMany, {}, 0
+  emu.simulateMany = function(list, H, ...)
+    local ln = debug.getinfo(2, "l").currentline
+    local t0 = os.clock()
+    local a, b, c2, d, e = orig(list, H, ...)
+    local p = prof[ln] or { 0, 0, 0 }
+    p[1], p[2], p[3] = p[1] + 1, p[2] + os.clock() - t0, p[3] + #list
+    prof[ln] = p
+    n = n + 1
+    if n % 100 == 0 then
+      local t = {}
+      for k, v in pairs(prof) do t[#t + 1] = string.format("L%d x%d %.1fs n%d", k, v[1], v[2], v[3]) end
+      table.sort(t)
+      log("simprof " .. table.concat(t, " | "))
+    end
+    return a, b, c2, d, e
+  end
+end
 
 local function writeFile(path, data)
   local fh = assert(io.open(path, "wb")); fh:write(data); fh:close()
@@ -1232,16 +1253,40 @@ local function steer(dir, x, y, c, r)
   else
     h.alt = 0
   end
+  -- A centring press that does not move P1 across at all (3-5, in the
+  -- raised box after the stairs: P1 walks row 9 at y 149, Down from (13,9)
+  -- over the wall only slid it back left, Right/Down alternated for 10k
+  -- frames): after two such presses go plain.
+  -- (map position, not screen: 1-6 scrolls, and P1's y stays put while
+  -- the origin moves under it)
+  local sox, soy = origin()
+  if h.corrN == h.n - 1 then
+    local v = (h.corr == "up" or h.corr == "down") and y + soy or x + sox
+    if v == h.corrV then
+      h.futile = (h.futile or 0) + 1
+      if h.futile >= 2 then
+        h.raw = h.n + 40; h.futile = 0
+        log(string.format("steer: %s does not move P1 at px(%d,%d): plain %s for 40", h.corr, x, y, dir))
+      end
+    else
+      h.futile = 0
+    end
+  end
+  h.corrN = nil
   h[5], h[6], h[3], h[4], h[1], h[2] = h[3], h[4], h[1], h[2], x, y
   if h.n < h.raw then return dir end
+  local function corr(d)
+    h.corr, h.corrN, h.corrV = d, h.n, (d == "up" or d == "down") and y + soy or x + sox
+    return d
+  end
   if dir == "up" or dir == "down" then
-    if x < cx - STEER_SLACK then return "right" elseif x > cx + STEER_SLACK then return "left" end
+    if x < cx - STEER_SLACK then return corr("right") elseif x > cx + STEER_SLACK then return corr("left") end
   else
     -- (a pixel more above when the cell below is stairs $66: 3-5, run 23,
     -- off the sub at (12,9), Left slid P1 to y 149, Down put it back at
     -- 152 by the docked sub, every 3 frames, until its own bomb went off)
     local below66 = emu.read(MAP + ((r + 1) << 7) + c * 2, WRAM, false) == 0x66
-    if y < cy - STEER_SLACK - (below66 and 1 or 0) then return "down" elseif y > cy + STEER_SLACK then return "up" end
+    if y < cy - STEER_SLACK - (below66 and 1 or 0) then return corr("down") elseif y > cy + STEER_SLACK then return corr("up") end
   end
   return dir
 end
@@ -1410,7 +1455,17 @@ local function think()
   local lockv = r16(P1 + P_LOCK)
   local heartsNow = emu.read(P1 + 0xEF, WRAM, false)
   if heartsNow ~= lastHearts then
-    log(string.format("%6d hearts %02X -> %02X", frame, lastHearts or 0, heartsNow)); lastHearts = heartsNow
+    -- What took the heart: flame under P1, enemies within 32 px.
+    local why = {}
+    if isFlame(emu.read(MAP + r16(P1 + 0xA8), WRAM, false)) then why[#why + 1] = "flame" end
+    for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
+      if ((r16(base) & 0xF000) == 0x9000 or (r16(base) & 0xF000) == 0xA000)
+          and math.abs(r16(base + P_X) - r16(P1 + P_X)) < 32 and math.abs(r16(base + P_Y) - r16(P1 + P_Y)) < 32 then
+        why[#why + 1] = string.format("%04X:%02X(%d,%d)", base, r16(base + 0x7E) & 0xFF, r16(base + P_X), r16(base + P_Y))
+      end
+    end
+    log(string.format("%6d hearts %02X -> %02X at px(%d,%d) %s", frame, lastHearts or 0, heartsNow,
+      r16(P1 + P_X), r16(P1 + P_Y), table.concat(why, " "))); lastHearts = heartsNow
   end
   if os.getenv("SBM2_DUMP") and frame % 600 == 50 then
     local t = {}
@@ -1431,12 +1486,29 @@ local function think()
       ride.from = { rc, rr, frame, press }
       log(string.format("%6d ride from (%d,%d)", frame, rc, rr))
     end
-    -- Step off onto the far end's $36 when the platform stops beside it.
+    -- Step off onto the far end's $36 when the platform stops beside it
+    -- (or an item lying there, $44 over the $36: 4-2, an item dropped on
+    -- (16,9) and P1 shuttled on the platform until time ran out).
+    -- A simulated ride (board search) goes on as simulated: the sim held
+    -- its pads through the ride, and with "then none" it stays on and rides
+    -- back. (4-2, run HZ s0: the board search's "left 60 then none" lived
+    -- by riding back; the bot stepped off at (12,9) instead, where an $87
+    -- came down column 12, and lost a heart.)
+    local b = ride.brk
+    if b and b.seq and frame - b.start <= b.H then
+      local w = b.seq[frame - b.start + 1]
+      if w then
+        input = {}
+        for nm, bit in pairs({ up = 0x0800, down = 0x0400, left = 0x0200, right = 0x0100 }) do if w & bit ~= 0 then input[nm] = true end end
+        step = nil
+        return
+      end
+    end
     local rc, rr = playerTile()
     for _, d in ipairs(DIRS) do
       local cc, r2 = rc + d[1], rr + d[2]
-      if (cc ~= ride.from[1] or r2 ~= ride.from[2]) and r2 >= 0 and cc >= 0
-          and emu.read(MAP + r2 * ROW + cc * 2, WRAM, false) == BOARD then
+      local t2 = (r2 >= 0 and cc >= 0) and emu.read(MAP + r2 * ROW + cc * 2, WRAM, false)
+      if (cc ~= ride.from[1] or r2 ~= ride.from[2]) and (t2 == BOARD or t2 == ITEM) then
         input[d[3]] = true
       end
     end
@@ -1476,6 +1548,7 @@ local function think()
     elseif onPad and not springFrom and lastBfs then
       springDir = bfs(lastBfs[1], pc0, pr0, lastBfs[2], lastBfs[3]) or springDir
     end
+    local planDir = springDir
     if onPad and not springFrom then
       -- Pick the jump by what it leads to: the landing with the shortest
       -- route (jumps included) to work - a panel to do, a soft block that
@@ -1547,7 +1620,22 @@ local function think()
           end
         end
       end
-      if best then springDir = best
+      if best then
+        springDir = best
+        -- The walk's route wanted another jump, and this one has been taken
+        -- 3 times lately (3-6, scenario r79: the seek walked onto (5,8) to
+        -- jump down toward the $8E at the bottom, the pick here sent P1
+        -- "up" to (5,5) for a soft block, and round again for 10000
+        -- frames): go the route's way.
+        local pk = pr0 * KEY_W + pc0
+        if planDir and planDir ~= best and planDir ~= "stay" then
+          local n, hist = 0, (ride.jumpRecent or {})[pk .. best] or {}
+          for _, f in ipairs(hist) do if frame - f < 4000 then n = n + 1 end end
+          if n >= 3 then
+            springDir = planDir
+            log(string.format("%6d pad (%d,%d): %s taken %d times lately; the route's %s instead", frame, pc0, pr0, best, n, planDir))
+          end
+        end
       else
         -- every jump lands in a blast: bounce in place unless the pad is hit
         local cur = springDir and springLand[(pr0 * KEY_W + pc0) .. springDir]
@@ -1561,6 +1649,12 @@ local function think()
     if onPad and not springFrom and springDir and springDir ~= "stay" then
       local d = ({ up = { 0, -1 }, down = { 0, 1 }, left = { -1, 0 }, right = { 1, 0 } })[springDir:match("^%a+")]
       local land = springLand[(pr0 * KEY_W + pc0) .. springDir]
+      -- (a landing learnt on this pad itself is a jump that never went: a
+      -- bounce taken for one. 3-6, scenario r76: "(5,8) lands on (5,8)"
+      -- with an $8B by it, bounced in place 5000 frames)
+      if land and land[1] == pc0 and land[2] == pr0 then
+        springLand[(pr0 * KEY_W + pc0) .. springDir] = nil; land = nil
+      end
       if land == nil and d then land = ride.springGuess(readMap(), pc0, pr0, d, springDir:sub(-1) == "!") end
       ride.stays = ride.stays or 0
       -- ...unless a bomb is about to blast the pad itself (fleeing our own
@@ -1591,7 +1685,40 @@ local function think()
             local pk0 = pr0 * KEY_W + pc0
             ride.lastStay = frame
             local we = ride.walkerEta and ride.walkerEta()[pk0]
-            if we and we < 150 then
+            -- Ask the simulator first (3-6, run JA s0: the last $8B kept
+            -- around (5,8), the landing of the (5,13) pad, and P1 bounced
+            -- ~40 times over 7000 frames waiting for it to go): a jump
+            -- that lives 300 frames with room at the end is taken, and its
+            -- pads are played as simulated, the flight included.
+            local simSeq
+            -- (not a jump that lands back on this pad: it lives by going
+            -- nowhere; 3-6, scenario r76, "left" from (5,8) back onto (5,8)
+            -- by an $8B, jumped every 60 frames for 3000)
+            if emu.simulateMany and frame >= (ride.padSimNext or 0) and (land[1] ~= pc0 or land[2] ~= pr0) then
+              ride.padSimNext = frame + 50
+              local held = springDir:sub(-1) == "!"  -- (held through the flight: a cell further)
+              local pj = emu.padBits({ [springDir:match("^%a+")] = true })
+              local list = {}
+              for _, K in ipairs(held and { 40, 60, 80 } or { 6, 14, 30 }) do
+                for _, d2 in ipairs({ "none", "up", "down", "left", "right" }) do
+                  local p2 = emu.padBits(d2 == "none" and {} or { [d2] = true })
+                  local p0 = emu.padBits({})
+                  local seq = {}
+                  for f = 1, 300 do seq[f] = f <= K and pj or (f <= 90 and p0 or (f <= 130 and p2 or p0)) end
+                  list[#list + 1] = seq
+                end
+              end
+              local res, _, _, _, rch = emu.simulateMany(list, 300, false, 0)
+              for i = 1, #list do
+                if res[i] == -1 and (not rch or (rch[i] or 99) >= 4) then simSeq = list[i]; break end
+              end
+              log(string.format("%6d pad (%d,%d) %s with the enemy by (%d,%d): %s", frame, pc0, pr0, springDir,
+                land[1], land[2], simSeq and "the simulator lives it; jumping" or "every simulated jump dies"))
+            end
+            if simSeq then
+              ride.brk = { seq = simSeq, start = frame, H = #simSeq, pad = true }
+              springFrom = pk0 .. springDir
+            elseif we and we < 150 then
               ride.padAvoid = ride.padAvoid or {}
               ride.padAvoid[pk0 .. springDir] = frame + 300
               springDir = nil
@@ -1605,6 +1732,14 @@ local function think()
       if springDir ~= "stay" then ride.stays = 0 end
     end
     if onPad and not springFrom and springDir then
+      if springDir ~= "stay" then
+        ride.jumpRecent = ride.jumpRecent or {}
+        local jk = (pr0 * KEY_W + pc0) .. springDir
+        local h = ride.jumpRecent[jk] or {}
+        h[#h + 1] = frame
+        if #h > 8 then table.remove(h, 1) end
+        ride.jumpRecent[jk] = h
+      end
       if os.getenv("SBM2_DBG") then log(string.format("%6d dbg pad (%d,%d) jump %s (last plan %s)", frame, pc0, pr0, springDir, tostring(ride.lastPlan))) end
       springFrom = (pr0 * KEY_W + pc0) .. springDir
     end
@@ -1613,6 +1748,12 @@ local function think()
     -- A "!" jump keeps it held in the air too (it flies a cell further).
     if springDir and springDir ~= "stay" and ((lockv ~= 0x1801 and lockv ~= 0x0809) or springDir:sub(-1) == "!") then
       input[springDir:match("^%a+")] = true
+    end
+    local pb = ride.brk
+    if pb and pb.pad and frame - pb.start < #pb.seq then
+      local w = pb.seq[frame - pb.start + 1]
+      input = {}
+      for nm, bit in pairs({ up = 0x0800, down = 0x0400, left = 0x0200, right = 0x0100 }) do if w & bit ~= 0 then input[nm] = true end end
     end
     step = false
     return
@@ -1626,6 +1767,10 @@ local function think()
       progressAt = frame
     end
     springLand[springFrom] = { c1, r1 }
+    -- (a simulated pad jump ends on landing: its seq held nothing after,
+    -- and on the next pad P1 bounced in place; 3-6, run OA s0, learnt
+    -- (5,8) left/right/down! as landing on (5,8), the way to the last $8B)
+    if ride.brk and ride.brk.pad and emu.read(MAP + r1 * ROW + c1 * 2, WRAM, false) == SPRING then ride.brk = nil end
     if emu.read(MAP + r1 * ROW + c1 * 2, WRAM, false) == SPRING then
       ride.padHist = ride.padHist or {}
       table.insert(ride.padHist, r1 * KEY_W + c1)
@@ -1799,6 +1944,10 @@ local function think()
     ride.entries[stNow] = (ride.entries[stNow] or 0) + 1
     math.randomseed(SEED * 7919 + stNow * 104729 + ride.entries[stNow] * 1299709)
     softSeen, softGone, springLand, springTry, ride.fail, ride.edges, ride.tried = {}, {}, {}, nil, {}, {}, {}
+    ride.panelSol = nil
+    ride.yLine, ride.cfix, ride.jumpRecent, ride.badLift = {}, nil, {}, nil
+    ride.newSigAt, ride.memResetAt = frame, nil
+    ride.nDC = nil
     ride.padHist = {}
     -- (per-stage memory that used to carry over: cell visit counts and
     -- failed bomb tiles from the last stage skewed exploring here, and a
@@ -1909,6 +2058,13 @@ local function think()
           end
         end
       end
+    end
+  end
+  -- cells the lookahead shield kept P1 from stepping into (for a while:
+  -- the bot plans around them instead of pushing into them again)
+  if ride.laBlock then
+    for k, untilF in pairs(ride.laBlock) do
+      if frame < untilF then AvoidCell[k] = true else ride.laBlock[k] = nil end
     end
   end
   do
@@ -2023,6 +2179,20 @@ local function think()
   -- Enemies: predicted paths give contact windows (eWin) and kill chances.
   -- enemies/walkers (cells) still drive the exit and hunt plans.
   local elist = Enemies.read(g)
+  -- A new $DC platform (bombing a $6A spawns one: C1:4A16) may serve a
+  -- lane written off as "no ride came": all lanes are tried again. (4-2,
+  -- run SH3 s0: waited at (17,8) before the column-17 platform existed,
+  -- wrote the lane off, then bombed (28,8)'s $6A and never went back to
+  -- the open gate at (17,3); time-up.)
+  do
+    local nDC = 0
+    for _, e in ipairs(elist) do if e.type == 0xDC then nDC = nDC + 1 end end
+    if nDC > (ride.nDC or 0) and ride.nDC and next(ride.fail) then
+      log(string.format("%6d a new $DC platform: written-off lanes tried again", frame))
+      ride.fail = {}
+    end
+    ride.nDC = nDC
+  end
   -- Stage start: enemies not placed yet (cell (0,0), +$A8 still 0): no
   -- plans on blind information (3-2, runs 30 and 31: bombed at frame 0,
   -- hid in a $90's row it could not see yet and was shot there).
@@ -2156,6 +2326,17 @@ local function think()
   -- Lane ends with a harmful enemy on or by them: no ride there (4-4, run
   -- 37: rode to (2,10), where an $89 sat, three deaths alike).
   RideBlock = {}
+  -- (not after 3000 frames with nothing new: the enemies left may be the
+  -- ones by the lane end, and the ride the only way to them; boarding still
+  -- waits for a board search that lives. 4-5, run half45 s0: two $93 by the
+  -- (9,6) lane end, P1 on the far side, stalled until time-up)
+  local relax = frame - (ride.newSigAt or frame) > 3000
+  ride.relax = relax
+  if relax and not ride.relaxLogged then
+    ride.relaxLogged = true
+    log(string.format("%6d no progress for 3000 frames: lane ends by enemies are rides again (board search decides)", frame))
+  elseif not relax then ride.relaxLogged = nil end
+  if not relax then
   -- (and lane ends a walker or chaser reaches within 250 frames, last
   -- frame's estimate: a ride and a wait for the way back)
   do
@@ -2173,6 +2354,7 @@ local function think()
         if math.abs(dr) + math.abs(dc) <= 3 then RideBlock[(e.r + dr) * KEY_W + e.c + dc] = true end
       end end
     end
+  end
   end
   local enemies, walkers = {}, {}
   for _, cell in ipairs(Boss.centres(bosses)) do
@@ -2255,52 +2437,142 @@ local function think()
     local idx, np, target = {}, 0, 0
     for k in pairs(panelTodo) do idx[k] = np; target = target | (1 << np); np = np + 1 end
     for k in pairs(panelDone) do idx[k] = np; np = np + 1 end
-    local reach, list, head = { [r * KEY_W + c] = true }, { { c, r } }, 1
-    while list[head] do
-      local cc, rr = list[head][1], list[head][2]; head = head + 1
-      for _, d in ipairs(DIRS) do
-        local c2, r2 = cc + d[1], rr + d[2]
-        local k = r2 * KEY_W + c2
-        if not reach[k] and walkable(g, c2, r2) then reach[k] = true; list[#list + 1] = { c2, r2 } end
-      end
-    end
-    local basis = {}  -- pivot bit -> {mask, set of spot keys}
     local function xorSet(a, b)
       local o = {}
       for k in pairs(a) do o[k] = true end
       for k in pairs(b) do o[k] = not o[k] or nil end
       return o
     end
-    for _, cell in ipairs(list) do
-      -- Only cells a bomb can be put on (not stairs, not tiles where one
-      -- failed to appear, e.g. the $74 panels themselves).
-      local ct = g[cell[2]][cell[1]]
-      local ck = cell[2] * KEY_W + cell[1]
-      if (ct < 0x100 and ct & 0x40 ~= 0 and ct ~= ITEM) or (noBombTile[ct] or 0) >= 1 or (noBombUntil[ck] or 0) > frame then goto nextCell end
-      do
-      local m = 0
-      for _, bc in ipairs(blastCells(g, cell[1], cell[2], rangeAt(g, cell[1], cell[2]))) do
+    -- (bombs down now flip their panels when they go off: the plan is for
+    -- what is left after them; 4-3, a plan bomb laid at (4,18) made the plan
+    -- not add up until it blew, and a new one replaced it)
+    for _, b in ipairs(lastBombs) do
+      for _, bc in ipairs(blastCells(g, b[1], b[2], b[4], b[6])) do
         local i = idx[bc[2] * KEY_W + bc[1]]
-        if i then m = m | (1 << i) end
+        if i then target = target ~ (1 << i) end
       end
-      local set = { [cell[2] * KEY_W + cell[1]] = true }
-      for bit = np - 1, 0, -1 do
-        if m & (1 << bit) ~= 0 then
-          if basis[bit] then m, set = m ~ basis[bit][1], xorSet(set, basis[bit][2])
-          else basis[bit] = { m, set }; break end
+    end
+    -- (on foot first; rides only when walking finds no solution: with the
+    -- lanes always in, world 4 plans waited on rides and 4-2..4-5 timed out)
+    local basis, maskOf, nulls, sol
+    for pass = 1, 2 do
+      local reach, list, head = { [r * KEY_W + c] = true }, { { c, r } }, 1
+      while list[head] do
+        local cc, rr = list[head][1], list[head][2]; head = head + 1
+        for _, d in ipairs(DIRS) do
+          local c2, r2 = cc + d[1], rr + d[2]
+          local k = r2 * KEY_W + c2
+          if not reach[k] and walkable(g, c2, r2) then reach[k] = true; list[#list + 1] = { c2, r2 } end
+        end
+        -- (rides and jumps learned this stage count: 4-3, run IA s0, the last
+        -- two panels were in the lower left pocket the rides reach; up top
+        -- the walk-only reach had no solution, "plan: none" until time-up)
+        -- (and platform lanes not ridden yet, unless one never came: from
+        -- (9,25) the lane back to the pocket at (4,25) was not learned)
+        local hops = {}
+        if pass == 2 then
+        local jo = jumpObj[rr * KEY_W + cc]
+        if jo then hops[1] = jo end
+        if g[rr][cc] == BOARD then
+          for _, ln in ipairs(laneEnds(g, cc, rr)) do
+            if not ride.fail[(rr * KEY_W + cc) .. ">" .. (ln[2] * KEY_W + ln[1])] then hops[#hops + 1] = ln end
+          end
+        end
+        end
+        for _, h in ipairs(hops) do
+          if not reach[h[2] * KEY_W + h[1]] and walkable(g, h[1], h[2]) then
+            reach[h[2] * KEY_W + h[1]] = true; list[#list + 1] = { h[1], h[2] }
+          end
         end
       end
+      basis, maskOf, nulls = {}, {}, {}
+      for _, cell in ipairs(list) do
+        -- Only cells a bomb can be put on (not stairs, not tiles where one
+        -- failed to appear, e.g. the $74 panels themselves).
+        local ct = g[cell[2]][cell[1]]
+        local ck = cell[2] * KEY_W + cell[1]
+        if (ct < 0x100 and ct & 0x40 ~= 0 and ct ~= ITEM) or (noBombTile[ct] or 0) >= 1 or (noBombUntil[ck] or 0) > frame then goto nextCell end
+        do
+        local m = 0
+        for _, bc in ipairs(blastCells(g, cell[1], cell[2], rangeAt(g, cell[1], cell[2]))) do
+          local i = idx[bc[2] * KEY_W + bc[1]]
+          if i then m = m | (1 << i) end
+        end
+        maskOf[ck] = m
+        local set = { [ck] = true }
+        for bit = np - 1, 0, -1 do
+          if m & (1 << bit) ~= 0 then
+            if basis[bit] then m, set = m ~ basis[bit][1], xorSet(set, basis[bit][2])
+            else basis[bit] = { m, set }; break end
+          end
+        end
+        if m == 0 then nulls[#nulls + 1] = set end
+        end
+        ::nextCell::
       end
-      ::nextCell::
+      local t
+      t, sol = target, {}
+      for bit = np - 1, 0, -1 do
+        if t & (1 << bit) ~= 0 then
+          if not basis[bit] then sol = nil; break end
+          t, sol = t ~ basis[bit][1], xorSet(sol, basis[bit][2])
+        end
+      end
+      if sol then break end
     end
-    local t, sol = target, {}
-    for bit = np - 1, 0, -1 do
-      if t & (1 << bit) ~= 0 then
-        if not basis[bit] then sol = nil; break end
-        t, sol = t ~ basis[bit][1], xorSet(sol, basis[bit][2])
+    -- One plan, kept while it still adds up: a new solution every think
+    -- (any of many) made each bomb part of a different plan, and the panels
+    -- flipped back and forth (4-3, run IA s0: (4,24) (2,20) (4,18) (2,22)
+    -- (4,18) ... in the lower left pocket, two bombs would have done it).
+    -- After one of its bombs goes off the rest of the plan adds up.
+    local function adds(set)
+      local m = 0
+      for k in pairs(set) do
+        if not maskOf[k] then return false end
+        m = m ~ maskOf[k]
+      end
+      return m == target
+    end
+    local old = ride.panelSol
+    if not sol and old and frame - (ride.panelSolAt or 0) < 300 then
+      -- (no solution for now: flames on the way in, a bomb on a plan spot;
+      -- the last plan holds for a while)
+      panelPlan = old
+    elseif old and next(old) then
+      if adds(old) then sol = old
+      else
+        for x in pairs(old) do
+          local rest = {}
+          for k in pairs(old) do if k ~= x then rest[k] = true end end
+          if next(rest) and adds(rest) then sol = rest; break end
+        end
       end
     end
-    if sol and next(sol) then panelPlan = sol end
+    if sol and sol ~= old then
+      -- (fewest bombs: fold in sets that flip nothing while that shrinks it)
+      local function size(t) local n = 0 for _ in pairs(t) do n = n + 1 end return n end
+      local better = true
+      while better do
+        better = false
+        for _, v in ipairs(nulls) do
+          local t2 = xorSet(sol, v)
+          if size(t2) < size(sol) then sol, better = t2, true end
+        end
+      end
+    end
+    if sol then ride.panelSolAt = frame end
+    if not panelPlan and sol ~= old then
+      local t = {}
+      for k in pairs(sol or {}) do t[#t + 1] = string.format("(%d,%d)", k % KEY_W, k // KEY_W) end
+      table.sort(t)
+      local str = sol and (next(sol) and table.concat(t, " ") or "done once its bombs go off") or "none"
+      if str ~= ride.panelSolStr then log(string.format("%6d panel plan: %s", frame, str)) end
+      ride.panelSolStr = str
+    end
+    if not panelPlan then
+      ride.panelSol = sol
+      if sol and next(sol) then panelPlan = sol end
+    end
   end
   local here = r * KEY_W + c
   -- P1's own cell field (+$A8, row*$80 + col*2) can be the next cell over
@@ -2375,7 +2647,10 @@ local function think()
     for _, e in ipairs(elist) do
       if e.killable and (remoteCells[e.r * KEY_W + e.c] or (e.moving and remoteCells[e.tr * KEY_W + e.tc])) then foeIn = true end
     end
-    if remoteWorth and not remoteCells[here] and not pulledIn and (not nearEnemy[here] or ride.f1Home or foeIn) and frame >= nextDetonate
+    -- (not while a stall breaker plan times its own B: 4-5, run half45 s0
+    -- replayed, set off 5 frames after the press, its 40-frame wait unspent)
+    local brkTimed = ride.brk and ride.brk.detEnd and (ride.brk.detWait or 0) > 0
+    if remoteWorth and not brkTimed and not remoteCells[here] and not pulledIn and (not nearEnemy[here] or ride.f1Home or foeIn) and frame >= nextDetonate
         and frame - throw.at > 40 and (r16(P1 + 0x52) & 6) == 0
         and g[r][c] ~= SPRING and (r16(P1 + P_LOCK) & 1) == 0 then
       input.b = true
@@ -2442,7 +2717,28 @@ local function think()
   -- sets it) after ASSIST frames without progress or when time is short.
   -- Progress for the assists = a state not seen before (a rollback brings
   -- back an older score, which isn't progress).
-  if not seenSigs[sig] then seenSigs[sig] = true; lastProgress, deathsAtProgress = ticks, deaths end
+  if not seenSigs[sig] then seenSigs[sig] = true; lastProgress, deathsAtProgress = ticks, deaths; ride.newSigAt = frame end
+  -- No state not seen before for 4500 frames (blocks blown and grown back
+  -- are no progress): forget this stage's working memory, as at a stage
+  -- entry. (2-1, run LA s0: 11000 frames of the same ambush along row 4 to
+  -- a time-up, never "stalled" as its blasts kept changing the soft count;
+  -- a scenario cut from the run's own pads at 49400, the same game with
+  -- fresh memory, cleared it in 3000.)
+  if frame - (ride.newSigAt or frame) > 4500 and frame - (ride.memResetAt or -1e9) > 4500 then
+    ride.memResetAt = frame
+    for k in pairs(visits) do visits[k] = nil end
+    for k in pairs(noBombTile) do noBombTile[k] = nil end
+    ride.stand, ride.standMiss, ride.wait, ride.try, ride.dodgeGoal, ride.planCell = nil, nil, nil, nil, nil, nil
+    ride.fail, ride.tried, ride.jumpRecent, ride.padHist, ride.panelSol, ride.badLift = {}, {}, {}, {}, nil, nil
+    badCell, planSteps, planCo, noBombUntil, springTry = {}, nil, nil, {}, nil
+    -- (and the blocks seen to grow back, skipped as targets: run MA s0
+    -- forgot the rest at 53487 and still timed out at 60216 bombing for the
+    -- $8D along row 4; the cut at 49400, with them targets, blew blocks and
+    -- cleared 2-1 by 52411)
+    softGone = {}
+    math.randomseed(SEED * 7919 + frame * 31)
+    log(string.format("%6d no new progress for 4500 frames: this stage's memory forgotten", frame))
+  end
   -- Heart assist (logged): after HEART_DEATHS deaths without progress, keep
   -- P1 at one heart (+$EF; C0:A5C9 spends it on a hit for brief
   -- invincibility) for the rest of the stage, rollbacks included.
@@ -2586,7 +2882,13 @@ local function think()
     -- again: written off for good, they had 3-6's right side unreachable
     -- with its last two enemies there, until time ran out.
     if not gateOpen then
-      for k, v in pairs(springLand) do if v == false then springLand[k] = nil end end
+      for k, v in pairs(springLand) do
+        -- (and jumps learnt to land back on their own pad, blocked that
+        -- once: 3-6, run OA s0, (5,8) left "landed (5,8)" and the route to
+        -- the last $8B by (3,8) was gone for good)
+        local pk = tonumber(k:match("^(%d+)"))
+        if v == false or (v and pk and v[2] * KEY_W + v[1] == pk) then springLand[k] = nil end
+      end
     end
     local es = {}
     for k in pairs(panelTodo) do es[#es + 1] = string.format("panel@(%d,%d)", k % KEY_W, k // KEY_W) end
@@ -2597,6 +2899,7 @@ local function think()
     end
     log(string.format("%6d stalled (%s); exploring; gate $%04X (%d,%d)%s; enemies %s", frame, sig, gate, gc, gr,
       gateOpen and " open" or "", table.concat(es, " ")))
+    ride.brkWant, ride.lastStall = frame, frame  -- the stall breaker (think) searches
     -- Two stalls in a row with no progress between: wedged (own remote
     -- bombs, a dead end). Go back as after a death and try something else.
     if stallSig == sig and timeLeft() > 1 then
@@ -3126,7 +3429,11 @@ local function think()
   if ride.stand and bombAtKey(ride.stand.bomb) then ride.stand.placed = true end
   -- (with the remote the bomb waits for B: set it off once P1 is at the
   -- stand cell and a chaser is in the blast)
-  if ride.stand and remoteOn and here == ride.stand.s and bombAtKey(ride.stand.bomb) and frame >= nextDetonate then
+  -- (and never with P1 in any remote bomb's blast: B sets off the oldest
+  -- one first; 2-4, run BH s0, an older bomb at (5,6) went off instead of
+  -- the stand's (6,4) and its column-5 blast took a heart at (5,5))
+  if ride.stand and remoteOn and here == ride.stand.s and bombAtKey(ride.stand.bomb) and frame >= nextDetonate
+      and not remoteCells[here] then
     local bk = ride.stand.bomb
     local inBlast = {}
     for _, cell in ipairs(blastCells(g, bk % KEY_W, bk // KEY_W, RANGE)) do inBlast[cell[2] * KEY_W + cell[1]] = true end
@@ -3141,7 +3448,10 @@ local function think()
   end
   if f1plan then
     -- (5-8 form 1, above)
-  elseif ride.stand and not danger[ride.stand.s] and (here == ride.stand.s
+  -- (not with an enemy about to reach P1: the dodge comes first; 2-6, run
+  -- BH s0, waited at (5,8) for a chaser to walk into (6,9)'s blast; it came
+  -- down column 5 instead and walked into P1)
+  elseif ride.stand and not danger[ride.stand.s] and not nearEnemy[here] and (here == ride.stand.s
       or bfs(g, c, r, function(cc, rr) return cc == ride.stand.s % KEY_W and rr == ride.stand.s // KEY_W end, mobNow, cw)) then
     plan = "stand"
     local sc, sr = ride.stand.s % KEY_W, ride.stand.s // KEY_W
@@ -3313,9 +3623,12 @@ local function think()
     end
     -- (no fully safe goal: any cell clear of blasts and enemies now; a
     -- "least bad step" by first contact helped 5-3 a little and lost 3-8)
+    -- (never through an enemy's cell: 3-2, run WS s0, in the (9,10) pocket
+    -- with its way out (9,11) still burning, this walked up column 9 into
+    -- the $8F coming down it; holding still, the flame ends first)
     dir = dir or bfs(g, c, r, function(cc, rr)
         return not nearEnemy[rr * KEY_W + cc] and not danger[rr * KEY_W + cc]
-      end, nil, windows)
+      end, mobNow, windows)
   elseif finalForm2() and emu.read(P1 + 0xFE, WRAM, false) > 0 and (function()
       -- Form 2 with the glove: walk to a throw spot (Boss.aimGoal).
       local body
@@ -3478,7 +3791,16 @@ local function think()
     -- leave by: 2-4's plan bombs inside (3,8) and leaves through (4,8)). (2-2, run 20: bombed at (17,5) with the way out through
     -- (14,5), blown earlier; it grew back and P1 sat between it and the
     -- bomb.)
-    local escGrid
+    -- A blown cell P1 stands on or next to does not grow back meanwhile,
+    -- and only some 60 frames after P1 has moved off (2-4, run HZ s0:
+    -- (4,8) stayed open 650 frames while P1 waited at (5,8), and was back
+    -- 65 frames after P1 went down column 3). So one next to P1 now and to
+    -- the bomb's cell stays open for that bomb (P1 walks by it to the bomb
+    -- and back out by it); for bombs elsewhere it is counted as back.
+    -- (there P1 waited 600 frames, refusing the panel bomb at (3,8) since
+    -- (4,8) was its only way out, then walked into the column, which (4,8)
+    -- then sealed, and spent both hearts on stall breaker bombs.)
+    local escGrid, escGridAll, keptOpen
     local stgE = emu.read(0x1A, WRAM, false)
     if (stgE & 0xF0) == 0x20 or stgE == 0x54 then
       escGrid = {}
@@ -3487,8 +3809,23 @@ local function think()
         local r2, c2 = k // KEY_W, k % KEY_W
         if not SOFT[g[r2][c2]] and g[r2][c2] < 0x40 and not (c2 == c and r2 == r)
             and frame - (softBlownAt[k] or frame) > 150 then
-          if escGrid[r2] == g[r2] then local row = {}; for c3 = 0, MAP_W - 1 do row[c3] = g[r2][c3] end; escGrid[r2] = row end
-          escGrid[r2][c2] = 0xC2
+          if math.abs(c2 - c) + math.abs(r2 - r) <= 1 then
+            keptOpen = keptOpen or {}
+            keptOpen[#keptOpen + 1] = { c2, r2 }
+          else
+            if escGrid[r2] == g[r2] then local row = {}; for c3 = 0, MAP_W - 1 do row[c3] = g[r2][c3] end; escGrid[r2] = row end
+            escGrid[r2][c2] = 0xC2
+          end
+        end
+      end
+      if keptOpen then
+        escGridAll = {}
+        for r2 = 0, MAP_H - 1 do escGridAll[r2] = escGrid[r2] end
+        for _, kc in ipairs(keptOpen) do
+          local row = {}
+          for c3 = 0, MAP_W - 1 do row[c3] = escGridAll[kc[2]][c3] end
+          row[kc[1]] = 0xC2
+          escGridAll[kc[2]] = row
         end
       end
     end
@@ -3574,7 +3911,14 @@ local function think()
       -- the only way out up a one-wide column a $90 was coming down, the
       -- route timed past it on its predicted walk; shot, every time)
       local eg = g
-      if escGrid and not SOFT[escGrid[rr][cc]] then eg = escGrid end
+      if escGrid and not SOFT[escGrid[rr][cc]] then
+        eg = escGrid
+        if keptOpen then
+          for _, kc in ipairs(keptOpen) do
+            if math.abs(kc[1] - cc) + math.abs(kc[2] - rr) > 1 then eg = escGridAll; break end
+          end
+        end
+      end
       local gotC
       local ok = bfs(eg, cc, rr, function(c2, r2, n) local v = goal(c2, r2, n); if v then gotC = { c2, r2, n } end; return v end, mobNow, combine(w, eWin), t) ~= nil
       if os.getenv("SBM2_DBG2") and ok and gotC then
@@ -3634,6 +3978,24 @@ local function think()
             enemyOnly and " (enemy)" or "", exp or 0, planCo[3]))
           planSteps, planIdx, planCo, stepIdx = steps, 1, nil, 0
           if not steps then pushNext = frame + 600 end
+          -- The same plan again and again with nothing left to do fewer: a
+          -- loop (2-4, run BRK s0: bomb(13,8) 60 times in 22000 frames,
+          -- the blast undone each time, until time ran out). Its first bomb
+          -- cell is off for a while, so the search finds another way.
+          if steps and steps[1] then
+            local desc = table.concat(descs, " ")
+            local nTodo = 0
+            for _ in pairs(panelTodo) do nTodo = nTodo + 1 end
+            local rp = ride.planRep
+            if rp and rp.desc == desc and rp.todo == nTodo and rp.en == #elist then rp.n = rp.n + 1
+            else rp = { desc = desc, todo = nTodo, en = #elist, n = 1 }; ride.planRep = rp end
+            if rp.n >= 3 and steps[1].kind == "bomb" then
+              log(string.format("%6d plan %s again (%d times, no progress): its first bomb cell off for 3000 frames", frame, desc, rp.n))
+              noBombUntil[steps[1].k] = frame + 3000
+              ride.planRep = nil
+              planSteps, pushNext = nil, frame + 30
+            end
+          end
         end
       end
     end
@@ -4214,7 +4576,11 @@ local function think()
           end
         end
       end
-      if frame < stallUntil and plan ~= "bomb" and plan ~= "spring" and plan ~= "trap" and plan ~= "board" then dir = nil end
+      -- (a hunt or seek, every other 1500 frames, once lane ends by
+      -- enemies are rides again, is no local wandering: 4-5's $93s were across the (9,6) ride
+      -- and exploring held P1 on the far side)
+      if frame < stallUntil and plan ~= "bomb" and plan ~= "spring" and plan ~= "trap" and plan ~= "board"
+          and not (ride.relax and (plan == "hunt" or plan == "seek") and (dir == "ride" or (frame // 1500) % 2 == 0)) then dir = nil end
       if not dir and frame < exploreUntil and plan ~= "board" and plan ~= "slam" then
         -- After a death or a long stall: walk toward the least visited
         -- neighbour (random tie-break) and sometimes drop a bomb.
@@ -4391,15 +4757,123 @@ local function think()
   -- (a ride wait sticks while nothing threatens here: 4-3, unaided, P1
   -- left the (3,18) lane end every few frames for nearer targets and the
   -- planned bomb beyond the lane timed out with the stage)
-  if dir ~= "ride" and ride.wait and ride.wait[1] == here and frame - ride.wait[2] < 600
+  if dir ~= "ride" and ride.wait and ride.wait[1] == here and frame - ride.wait[2] < (ride.waitMax or 600)
       and not danger[here] and not nearEnemy[here] and plan ~= "flee" and plan ~= "dodge" and plan ~= "bomb" then
     dir = "ride"
+  end
+  -- A ride simulated: board (held 60/120/200 frames), then each way or
+  -- none on landing; the first that lives (heart losses count) and ends
+  -- nearer the far end than here. Returns that pad sequence and its name.
+  local function boardSim(bc, br, ln, bd)
+    local list, desc = {}, {}
+    local pb = emu.padBits({ [bd] = true })
+    -- (640 frames: 4-5's row-6 ride takes ~380 after a pause)
+    for _, T in ipairs({ 60, 120, 240, 480 }) do
+      -- (walking on off the far end first: "then none" rides back and
+      -- forth, which lives but gets nowhere; 4-2 took 8000+ frames)
+      -- (and not "none" at all: still aboard when the check ends, the
+      -- ride went on; 4-4, run QA s0, "left 60 then none" lived 640
+      -- frames, then the platform brought P1 to (2,10) onto an $89)
+      local d2s = { bd }
+      for _, nm in ipairs({ "up", "down", "left", "right" }) do if nm ~= bd then d2s[#d2s + 1] = nm end end
+      for _, d2 in ipairs(d2s) do
+        local p2 = emu.padBits(d2 == "none" and {} or { [d2] = true })
+        local seq = {}
+        for f = 1, 640 do seq[f] = f <= T and pb or p2 end
+        list[#list + 1] = seq; desc[#desc + 1] = string.format("%s %d then %s", bd, T, d2)
+      end
+    end
+    local res, _, _, ps, rch = emu.simulateMany(list, 640, false, 0)
+    local ex, ey = ln[1] * 16 + 8, ln[2] * 16 + 8
+    local hx, hy = bc * 16 + 8, br * 16 + 8
+    -- (one that leaves by the open gate first: the sim ends it as -2, not
+    -- -1; 4-2, run PA s0, "ride to (17,4); board search: none" with the
+    -- gate (17,3) open above that lane end, until the memory reset)
+    for i = 1, #list do if res[i] == -2 then return list[i], desc[i] .. " (exit)" end end
+    for i = 1, #list do
+      local fx, fy = tostring(ps[i]):match(":(%-?%d+),(%-?%d+)")
+      fx, fy = tonumber(fx), tonumber(fy)
+      -- (and not walled in at the end: 4-2, run HZ s0 replayed, "left 60
+      -- then left" lived, but an $87's soft blocks shut P1 in at (11,10),
+      -- a one-cell pocket, until a stall breaker bomb took a heart)
+      if res[i] == -1 and fx and math.abs(fx - ex) + math.abs(fy - ey) < math.abs(fx - hx) + math.abs(fy - hy)
+          and (not rch or (rch[i] or 99) >= 4) then return list[i], desc[i] end
+    end
+    return nil, "none"
+  end
+  -- A step into a waiting $DC from its lane end is a ride too (4-4, run HY
+  -- s0: "seek left" from (5,10) walked onto the platform; it carried P1 to
+  -- (2,10) as an $89 came there): not unless the simulator finds one that
+  -- lives, or a blast is coming.
+  if g[r][c] == BOARD and emu.simulateMany and not ride.brk and not danger[here] and not hit(windows, here, 0, 600) then
+    for _, ln in ipairs(laneEnds(g, c, r)) do
+      local dc, dr = (ln[1] - c) // ln[3], (ln[2] - r) // ln[3]
+      local bd = (dc == 1 and "right") or (dc == -1 and "left") or (dr == 1 and "down") or "up"
+      if input[bd] or dir == bd or (step and step.tc == c + dc and step.tr == r + dr) then
+        for _, e in ipairs(elist) do
+          if e.type == 0xDC and e.c == c + dc and e.r == r + dr then
+            if frame >= (ride.boardSimNext or 0) then
+              ride.boardSimNext = frame + 120
+              local seq, why = boardSim(c, r, ln, bd)
+              log(string.format("%6d step onto the ride to (%d,%d); board search: %s", frame, ln[1], ln[2], why))
+              if seq then ride.brk = { seq = seq, start = frame, H = 640 } end
+            end
+            if not ride.brk then
+              input[bd] = nil
+              if dir == bd then dir = nil end
+              if step and step.tc == c + dc and step.tr == r + dr then step = nil end
+            end
+          end
+        end
+      end
+    end
+  end
+  -- Stepping from the floor onto a lane end where the $DC waits is a ride
+  -- too (4-4, scenario r45b: "seek left" from (6,10) onto (5,10), the
+  -- platform carried P1 to (2,10) into an $89): simulated first as well.
+  -- (not with the gate open: the warp out reads as no life in the sim, and
+  -- 4-2_panels never rode (17,8) up to the open gate at (17,3))
+  if g[r][c] ~= BOARD and emu.simulateMany and not ride.brk and not danger[here] and not hit(windows, here, 0, 600)
+      and not gateOpen then
+    for _, d in ipairs(DIRS) do
+      local nc, nr, bd = c + d[1], r + d[2], d[3]
+      if g[nr] and g[nr][nc] == BOARD and (input[bd] or dir == bd or (step and step.tc == nc and step.tr == nr)) then
+        local dc
+        for _, e in ipairs(elist) do if e.type == 0xDC and math.abs(e.c - nc) + math.abs(e.r - nr) <= 1 then dc = e end end  -- (at or coming in: a tile off by its x)
+        if dc then
+          local ln
+          for _, l in ipairs(laneEnds(g, nc, nr)) do ln = ln or l end
+          if ln and frame >= (ride.boardSimNext or 0) then
+            ride.boardSimNext = frame + 60
+            local seq, why = boardSim(c, r, ln, bd)
+            log(string.format("%6d step onto the waiting ride at (%d,%d) to (%d,%d); board search: %s", frame, nc, nr, ln[1], ln[2], why))
+            if seq then ride.brk = { seq = seq, start = frame, H = 640 } end
+          end
+          if ln and not ride.brk then
+            input[bd] = nil
+            if dir == bd then dir = nil end
+            if step and step.tc == nc and step.tr == nr then step = nil end
+          end
+        end
+      end
+    end
   end
   -- A route over a platform lane starts here: wait on the $36 for the ride.
   if dir == "ride" then
     plan, dir, step = "ride", nil, nil
     if not ride.wait or ride.wait[1] ~= here then ride.wait = { here, frame } end
-    if frame - ride.wait[2] > 600 then
+    -- (a $DC on the lane comes back on its own, if slowly: 4-5, run HY s0,
+    -- the row-6 platform went home to (19,6) between rides and took longer
+    -- than 600 frames to come back for P1 at (9,6); written off, time-up)
+    local waitMax = 600
+    for _, ln in ipairs(laneEnds(g, c, r)) do
+      for _, e in ipairs(elist) do
+        if e.type == 0xDC and ((ln[2] == r and e.r == r and (e.c - c) * (ln[1] - e.c) >= 0)
+            or (ln[1] == c and e.c == c and (e.r - r) * (ln[2] - e.r) >= 0)) then waitMax = 1500 end
+      end
+    end
+    ride.waitMax = waitMax
+    if frame - ride.wait[2] > waitMax then
       for _, e in ipairs(laneEnds(g, c, r)) do ride.fail[here .. ">" .. (e[2] * KEY_W + e[1])] = true end
       ride.edges[here] = nil
       log(string.format("%6d no ride came at (%d,%d); not again", frame, c, r))
@@ -4412,8 +4886,31 @@ local function think()
     for _, ln in ipairs(laneEnds(g, c, r)) do
       local dc, dr = (ln[1] - c) // ln[3], (ln[2] - r) // ln[3]
       for _, e in ipairs(elist) do
-        if e.type == 0xDC and e.c == c + dc and e.r == r + dr and not RideBlock[ln[2] * KEY_W + ln[1]] then
-          input = { [(dc == 1 and "right") or (dc == -1 and "left") or (dr == 1 and "down") or "up"] = true }
+        local bd = (dc == 1 and "right") or (dc == -1 and "left") or (dr == 1 and "down") or "up"
+        -- (with a blast coming here, board whatever waits at the far end:
+        -- 4-2, run BH s0, fled its own bomb at (12,8) to the (12,9) lane
+        -- end, the $DC came, RideBlock held it back, and the blast came)
+        if e.type == 0xDC and e.c == c + dc and e.r == r + dr
+            and (danger[here] or hit(windows, here, 0, 600) or (not emu.simulateMany and not RideBlock[ln[2] * KEY_W + ln[1]])) then
+          input = { [bd] = true }
+        -- (every other ride is simulated first, enemy at the far end or not:
+        -- 4-4, run HY s0, rode (5,10) to (2,10) with the far end clear at
+        -- boarding; an $89 walked onto it during the ride and took a heart)
+        elseif e.type == 0xDC and e.c == c + dc and e.r == r + dr and emu.simulateMany and not ride.brk
+            and frame >= (ride.boardSimNext or 0) then
+          -- An enemy by the far end (RideBlock) is a matter of when: the
+          -- simulator tries the ride (board held 60/120/200 frames) and a
+          -- walk off on landing; one that lives and lands is followed.
+          -- (4-2, run WS s0: a $93 roams the small middle area by (16,9)
+          -- the whole stage; P1 waited beside the parked $DC at (13,9),
+          -- "no ride came", and never crossed until time-up.)
+          -- (again in 30 frames while it waits beside P1: on arrival it
+          -- pauses before going back, past the sim's horizon)
+          ride.boardSimNext = frame + 30
+          local seq, why = boardSim(c, r, ln, bd)
+          log(string.format("%6d ride to (%d,%d)%s; board search: %s", frame, ln[1], ln[2],
+            RideBlock[ln[2] * KEY_W + ln[1]] and " blocked by an enemy" or "", why))
+          if seq then ride.brk = { seq = seq, start = frame, H = 640 } end
         end
       end
     end
@@ -4441,7 +4938,27 @@ local function think()
   end
   if step then
     local tx, ty = tileCentre(step.tc, step.tr)
-    if math.abs(x - tx) <= 1 and math.abs(y - ty) <= 2 then
+    -- (a row P1 cannot be centred on: 3-5, the raised box after the stairs
+    -- is walked at y 149, 3 px up; Down from (13,9) over the wall only slid
+    -- P1 left, Right put it back, for 10k frames. Two up/down presses that
+    -- left y as it was make that y the row's line.)
+    local yk = step.tr * KEY_W + step.tc
+    ride.yLine = ride.yLine or {}
+    local cf = ride.cfix
+    local _, myOy = origin()
+    local my = y + myOy  -- (map y: 1-6 scrolls under a P1 whose y stays put)
+    if cf and cf[1] == yk and frame - cf[3] <= 3 then
+      if cf[2] == my and not cf[5] then
+        cf[5] = true; cf[4] = cf[4] + 1
+        if cf[4] >= 2 and ride.yLine[yk] ~= my then
+          ride.yLine[yk] = my
+          log(string.format("%6d (%d,%d) is walked at y %d (centre %d): taken as centred", frame, step.tc, step.tr, y, ty))
+        end
+      elseif cf[2] ~= my then
+        cf[4] = 0
+      end
+    end
+    if math.abs(x - tx) <= 1 and (math.abs(y - ty) <= 2 or ride.yLine[yk] == my) then
       step = nil
     elseif plan ~= "flee" and (danger[step.tr * KEY_W + step.tc]
         or (plan ~= "dodge" and nearEnemy[step.tr * KEY_W + step.tc])) then
@@ -4473,9 +4990,11 @@ local function think()
         -- the wall, Down again, every frame for 600 frames)
         input = { a = input.a, b = input.b }
         local vert = step.dir == "up" or step.dir == "down"
-        if vert and y < ty - 2 then input.down = true elseif vert and y > ty + 2 then input.up = true
+        local yOk = ride.yLine[yk] == my
+        if vert and not yOk and y < ty - 2 then input.down = true elseif vert and not yOk and y > ty + 2 then input.up = true
         elseif x < tx - 1 then input.right = true elseif x > tx + 1 then input.left = true
-        elseif y < ty - 2 then input.down = true elseif y > ty + 2 then input.up = true end
+        elseif not yOk and y < ty - 2 then input.down = true elseif not yOk and y > ty + 2 then input.up = true end
+        if input.down or input.up then ride.cfix = { yk, my, frame, cf and cf[1] == yk and cf[2] == my and frame - cf[3] <= 3 and cf[4] or 0 } end
       end
     end
   end
@@ -4711,19 +5230,759 @@ local function think()
       end
     end
   end
+  if ride.badLift then
+    for k, t in pairs(ride.badLift) do
+      if frame >= t or frame < t - 1500 then badCell[k] = nil; ride.badLift[k] = nil end
+    end
+  end
   if frame - frozenAt[3] > 600 and timeLeft() > 1 then
     log(string.format("%6d frozen at (%d,%d) since %d; rolling back", frame, c, r, frozenAt[3]))
     rollback, rollbackBefore = true, frozenAt[3] - 100
     if lastRide and frozenAt[3] - lastRide[3] < 120 then
-      badCell[lastRide[2] * KEY_W + lastRide[1]] = true
+      local bk = lastRide[2] * KEY_W + lastRide[1]
+      badCell[bk] = true
       rollbackBefore = lastRide[3] - 300
-      log(string.format("%6d froze after the ride from (%d,%d): not again", frame, lastRide[1], lastRide[2]))
+      -- (no rewinds: P1 plays on from past the ride, and that ride may be
+      -- the only way back; a ban for good shut 4-3's exit route, run half4
+      -- s0, (3,12) banned at 23986, gate open at 32271, exit only after the
+      -- memory reset at 35271; so the ban lifts after 1500 frames)
+      if NOREWIND then ride.badLift = ride.badLift or {}; ride.badLift[bk] = frame + 1500 end
+      log(string.format("%6d froze after the ride from (%d,%d): not again%s", frame, lastRide[1], lastRide[2],
+        NOREWIND and " for 1500 frames" or ""))
     end
     frozenAt = { x, y, frame }
   end
   if os.getenv("SBM2_DBG") and input.a and plan ~= "bomb" then log(string.format("%6d dbg A pressed in plan %s", frame, tostring(plan))) end
   if plan == "board" and ride.boardDir then input = { [ride.boardDir] = true } end
+  -- Lookahead (port only; SBM2_LOOKAHEAD=0 turns it off): a safety shield on emu.simulate, scratch
+  -- copies of the machine run ahead (the real game is never rolled back).
+  -- Near a threat, every 8 frames (or when the bot's move changes) the
+  -- bot's move held K frames and then some continuation (one direction for
+  -- A frames, then another) must keep P1 alive for the horizon (long enough
+  -- for a fresh fuse and its flames). If none does, a bomb press is dropped
+  -- if that is enough; else the last verified sequence is followed while it
+  -- still lives, or a new one is searched for (the longest-living).
+  if ride.LA == nil then ride.LA = os.getenv("SBM2_LOOKAHEAD") ~= "0" and emu.simulateMany ~= nil end
+  -- The simulator counts a heart lost as a death (port/botrun.c), except
+  -- while a trap is crossed on purpose (plan "trap": a heart is spent).
+  if emu.simHearts then emu.simHearts(plan ~= "trap" and not (ride.brk and ride.brk.heart) and frame >= (ride.heartUntil or 0)) end
+  -- (P1's cell and since when: a long stay is a wedge, see below)
+  if ride.stillAt ~= r * KEY_W + c then ride.stillAt, ride.stillSince = r * KEY_W + c, frame end
+  local wedged = frame - ride.stillSince > 300
+  -- Exit search: the gate open, P1 wedged or stalled: the simulator tries
+  -- holding one direction (20 or 60 frames) then another, for one that
+  -- leaves by the gate. (4-2, run SH3 s0: all panels done, the gate at
+  -- (17,3) open, reached only by the column-17 platform; waited at the
+  -- lane end (17,8) beside it, "no ride came", explored until time-up.)
+  if gateOpen and (wedged or frame - (ride.lastStall or -1e9) < 600) and not ride.brk and emu.simulateMany
+      and frame >= (ride.exitNext or 0) and next(danger) == nil then
+    ride.exitNext = frame + 300
+    local NM = { "up", "down", "left", "right" }
+    local list, desc = {}, {}
+    for _, A in ipairs({ 20, 60 }) do
+      for _, d1 in ipairs(NM) do
+        for _, d2 in ipairs({ "up", "down", "left", "right", "none" }) do
+          if d1 ~= d2 then
+            local p1, p2 = emu.padBits({ [d1] = true }), emu.padBits(d2 == "none" and {} or { [d2] = true })
+            local seq = {}
+            for f = 1, 400 do seq[f] = f <= A and p1 or p2 end
+            list[#list + 1] = seq; desc[#desc + 1] = string.format("%s %d then %s", d1, A, d2)
+          end
+        end
+      end
+    end
+    local res = emu.simulateMany(list, 400, false, 0)
+    local hit
+    for i = 1, #list do if res[i] == -2 then hit = i; break end end
+    log(string.format("%6d exit search at (%d,%d): %s", frame, c, r, hit and desc[hit] or "none"))
+    if hit then ride.brk = { seq = list[hit], start = frame, H = 400 } end
+  end
+  -- Stall breaker: stalled (nothing changed for a while), the simulator
+  -- tries "walk to a cell near, bomb, walk to cover" for the cells whose
+  -- blast reaches an enemy or a soft block, and the bot carries out the one
+  -- that lives and kills the most enemies (else breaks the most blocks).
+  -- (3-3, run SH3 s0: the last $99 in a corridor behind a parked mount;
+  -- no plan found, explored until time ran out.)
+  local function brkPad(wp, st, key)
+    local ox, oy = origin()
+    local x0, y0 = (r16(P1 + P_X) + ox) & 0xFFFF, (r16(P1 + P_Y) + oy) & 0xFFFF
+    local n = #wp // 2
+    while st[key] < n and math.abs(wp[2 * st[key] + 1] - x0) <= 1 and math.abs(wp[2 * st[key] + 2] - y0) <= 1 do st[key] = st[key] + 1 end
+    if st[key] >= n then return {} end
+    local dx, dy = wp[2 * st[key] + 1] - x0, wp[2 * st[key] + 2] - y0
+    if math.abs(dx) > math.abs(dy) then return { [dx > 0 and "right" or "left"] = true } end
+    return { [dy > 0 and "down" or "up"] = true }
+  end
+  if ride.brkWant and not ride.brk and emu.simulateMany and frame - ride.brkWant < 600
+      and emu.read(P1 + P_BOMBS_LEFT, WRAM, false) > 0 and next(danger) == nil
+      and not (remoteOn and next(remoteCells)) then
+    ride.brkWant = nil
+    local prev, order, q, qi = { [r * KEY_W + c] = -1 }, {}, { { c, r, 0 } }, 1
+    while qi <= #q do
+      local cc, rr, dd = q[qi][1], q[qi][2], q[qi][3]; qi = qi + 1
+      order[#order + 1] = { cc, rr, dd }
+      if dd < 60 then
+        for _, d in ipairs(DIRS) do
+          local nc, nr = cc + d[1], rr + d[2]
+          local k = nr * KEY_W + nc
+          if prev[k] == nil and walkable(g, nc, nr) then prev[k] = rr * KEY_W + cc; q[#q + 1] = { nc, nr, dd + 1 } end
+        end
+      end
+    end
+    local near = {}
+    for _, e in ipairs(elist) do
+      if e.killable or e.harmful then
+        for dr = -2, 2 do for dc = -2, 2 do near[(e.r + dr) * KEY_W + e.c + dc] = true end end
+      end
+    end
+    local function wpOf(k)
+      local cells = {}
+      while k ~= -1 do table.insert(cells, 1, k); k = prev[k] end
+      return cells
+    end
+    local cand = {}
+    for _, o in ipairs(order) do
+      local val = 0
+      local bc = blastCells(g, o[1], o[2], rangeAt(g, o[1], o[2]))
+      for _, cell in ipairs(bc) do
+        local t = g[cell[2]] and g[cell[2]][cell[1]]
+        if near[cell[2] * KEY_W + cell[1]] then val = val + 10 elseif t and SOFT[t] then val = val + 1 end
+        if panelTodo[cell[2] * KEY_W + cell[1]] then val = val + 50 end
+      end
+      if val > 0 then cand[#cand + 1] = { o[1], o[2], o[3], val, bc } end
+    end
+    table.sort(cand, function(u, v) if u[4] ~= v[4] then return u[4] > v[4] end return u[3] < v[3] end)
+    local A2 = emu.padBits({ a = true })
+    local list, meta, maxLen = { { emu.padBits({}) } }, { false }, 0
+    -- With hearts in hand and no cover anywhere (2-4, run HX s0: sealed by
+    -- regrown blocks in the 5-cell column pocket at (3,8)-(3,12) with the
+    -- last panel at its end; every bomb's blast covered the whole pocket),
+    -- a try may spend a heart: bomb, then stand at the far end; simulated
+    -- with heart losses allowed.
+    local hearts = emu.read(P1 + 0xEF, WRAM, false)
+    local hlist, hmeta = { { emu.padBits({}) } }, { false }
+    for i = 1, math.min(#cand, 24) do
+      local cd = cand[i]
+      local blast = {}
+      for _, cell in ipairs(cd[5]) do blast[cell[2] * KEY_W + cell[1]] = true end
+      -- cover: the nearest cells off the blast, from the bomb's cell
+      local pv, q2, qj, got = { [cd[2] * KEY_W + cd[1]] = -1 }, { { cd[1], cd[2], 0 } }, 1, {}
+      local far, farD = cd[2] * KEY_W + cd[1], -1
+      while qj <= #q2 and #got < 2 do
+        local cc, rr, dd = q2[qj][1], q2[qj][2], q2[qj][3]; qj = qj + 1
+        if dd > farD then far, farD = rr * KEY_W + cc, dd end
+        if not blast[rr * KEY_W + cc] then got[#got + 1] = rr * KEY_W + cc
+        elseif dd < 8 then
+          for _, d in ipairs(DIRS) do
+            local nc, nr = cc + d[1], rr + d[2]
+            local k = nr * KEY_W + nc
+            if pv[k] == nil and walkable(g, nc, nr) then pv[k] = rr * KEY_W + cc; q2[#q2 + 1] = { nc, nr, dd + 1 } end
+          end
+        end
+      end
+      local path = {}
+      for _, k in ipairs(wpOf(cd[2] * KEY_W + cd[1])) do
+        path[#path + 1] = (k % KEY_W) * 16 + 8; path[#path + 1] = (k // KEY_W) * 16 + 8
+      end
+      local hgot = (#got == 0 and hearts > 0) and { far } or {}
+      for _, gk in ipairs(hgot) do
+        local cells, k = {}, gk
+        while k ~= -1 do table.insert(cells, 1, k); k = pv[k] end
+        local path2 = {}
+        for j = 2, #cells do
+          path2[#path2 + 1] = (cells[j] % KEY_W) * 16 + 8; path2[#path2 + 1] = (cells[j] // KEY_W) * 16 + 8
+        end
+        local pan = false
+        for _, cell in ipairs(cd[5]) do if panelTodo[cell[2] * KEY_W + cell[1]] then pan = true end end
+        hlist[#hlist + 1] = { path = path, post = { A2, A2 }, path2 = path2, detEnd = remoteOn or nil }
+        hmeta[#hmeta + 1] = { cd[1], cd[2], gk % KEY_W, gk // KEY_W, pan }
+        maxLen = math.max(maxLen, cd[3] + #cells)
+      end
+      for _, gk in ipairs(got) do
+        local cells, k = {}, gk
+        while k ~= -1 do table.insert(cells, 1, k); k = pv[k] end
+        local path2 = {}
+        for j = 2, #cells do
+          path2[#path2 + 1] = (cells[j] % KEY_W) * 16 + 8; path2[#path2 + 1] = (cells[j] // KEY_W) * 16 + 8
+        end
+        -- (a remote bomb goes off only on B: pressed once in cover, or
+        -- after a wait there for a chaser to walk into the blast: 4-5, run
+        -- half45 s0, two $93 (2 HP) never hit by a B pressed on arrival)
+        for _, wt in ipairs(remoteOn and ride.chaserEta and { 0, 40, 90, 160 } or { 0 }) do
+          list[#list + 1] = { path = path, post = { A2, A2 }, path2 = path2, detEnd = remoteOn or nil, detWait = wt }
+          meta[#meta + 1] = { cd[1], cd[2], gk % KEY_W, gk // KEY_W, wt }
+        end
+        maxLen = math.max(maxLen, cd[3] + #cells)
+      end
+    end
+    if #list == 1 and #hlist > 1 then
+      local H = math.min(1100, 16 * maxLen + 260)
+      if emu.simHearts then emu.simHearts(false) end
+      local res, fl, en = emu.simulateMany(hlist, H, false, 0)
+      if emu.simHearts then emu.simHearts(true) end
+      local best, bestS
+      for i = 2, #hlist do
+        if res[i] and res[i] < 0 then
+          local sc = (en[1] - en[i]) * 1000 + (fl[i] - fl[1]) + (hmeta[i][5] and 500 or 0)
+          if sc > 0 and (not bestS or sc > bestS) then best, bestS = i, sc end
+        end
+      end
+      log(string.format("%6d stall breaker: no cover; %d tries spending a heart (%d held): %s", frame, #hlist - 1, hearts,
+        best and string.format("bomb at (%d,%d), stand at (%d,%d)%s", hmeta[best][1], hmeta[best][2], hmeta[best][3], hmeta[best][4],
+          hmeta[best][5] and ", a panel in the blast" or "") or "none"))
+      if best then
+        local e = hlist[best]
+        ride.brk = { path = e.path, post = e.post, path2 = e.path2, detEnd = e.detEnd, ph = 1, at = 0, at2 = 0, start = frame, H = H, heart = true }
+        -- (the hit is the plan until its bomb has gone off: with the
+        -- breaker's walk over, the lookahead saw the coming hit as a death
+        -- and lifted the bomb away with the glove; 4-2, run HZ s0 replayed,
+        -- every 1500 frames for 10000)
+        ride.heartUntil = frame + H
+      end
+    elseif #list == 1 then
+      log(string.format("%6d stall breaker: no tries (%d cells reached, %d with a target)", frame, #order, #cand))
+    else
+      local H = math.min(1260, 16 * maxLen + 260 + ((remoteOn and ride.chaserEta) and 160 or 0))
+      local t0 = os.clock()
+      local res, fl, en, _, _, hpS = emu.simulateMany(list, H, false, 0)
+      local best, bestS
+      for i = 2, #list do
+        if res[i] and res[i] < 0 then
+          -- (a hit that leaves a 2-HP enemy alive counts too)
+          local sc = (en[1] - en[i]) * 1000 + (hpS and (hpS[1] - hpS[i]) * 400 or 0) + (fl[i] - fl[1])
+          if sc > 0 and (not bestS or sc > bestS) then best, bestS = i, sc end
+        end
+      end
+      log(string.format("%6d stall breaker: %d tries, H=%d, %.1fs: %s", frame, #list - 1, H, os.clock() - t0,
+        best and string.format("bomb at (%d,%d), cover (%d,%d), %d kills, %d HP, %+d floor%s", meta[best][1], meta[best][2],
+          meta[best][3], meta[best][4], en[1] - en[best], hpS and hpS[1] - hpS[best] or 0, fl[best] - fl[1],
+          (meta[best][5] or 0) > 0 and string.format(", set off after %d", meta[best][5]) or "") or "none"))
+      if best then
+        local e = list[best]
+        ride.brk = { path = e.path, post = e.post, path2 = e.path2, detEnd = e.detEnd, detWait = e.detWait, ph = 1, at = 0, at2 = 0, start = frame, H = H }
+        -- (an older lookahead commitment would take over and drop it)
+        if ride.la then ride.la.over, ride.la.commitUntil, ride.la.cand = nil, nil, nil end
+      end
+    end
+  end
+  -- Wedged long (600 frames on a cell, nothing about to go off): the
+  -- simulator tries walking to far cells and to cells by panels left,
+  -- over track cells too (the bot keeps off tracks near a $DD block),
+  -- and the bot takes one that lives and gets there. (4-2, runs SH3 s0
+  -- and 4-2_r54: P1 stood 1300+ frames in the left area the column-4
+  -- track and its $DD block fence in, until time ran out.)
+  if wedged and frame - ride.stillSince > 600 and not ride.brk and emu.simulateMany and next(danger) == nil
+      and frame >= (ride.goNext or 0) then
+    ride.goNext = frame + 300
+    local function relaxed(cc, rr)
+      local t = g[rr] and g[rr][cc]
+      return t ~= nil and (walkable(g, cc, rr) or t == 0x4D)
+    end
+    local prev, order, q, qi = { [r * KEY_W + c] = -1 }, {}, { { c, r, 0 } }, 1
+    while qi <= #q do
+      local cc, rr, dd = q[qi][1], q[qi][2], q[qi][3]; qi = qi + 1
+      order[#order + 1] = { cc, rr, dd }
+      if dd < 40 then
+        for _, d in ipairs(DIRS) do
+          local nc, nr = cc + d[1], rr + d[2]
+          local k = nr * KEY_W + nc
+          if prev[k] == nil and relaxed(nc, nr) then prev[k] = rr * KEY_W + cc; q[#q + 1] = { nc, nr, dd + 1 } end
+        end
+      end
+    end
+    local pick, seen = {}, {}
+    for _, o in ipairs(order) do
+      local k = o[2] * KEY_W + o[1]
+      for _, d in ipairs(DIRS) do
+        if panelTodo[(o[2] + d[2]) * KEY_W + o[1] + d[1]] and not seen[k] then pick[#pick + 1] = o; seen[k] = true end
+      end
+    end
+    for i = #order, 1, -1 do
+      if #pick >= 16 then break end
+      local o = order[i]
+      if not seen[o[2] * KEY_W + o[1]] and o[3] >= 4 then pick[#pick + 1] = o; seen[o[2] * KEY_W + o[1]] = true end
+    end
+    local list, maxLen = {}, 0
+    for i = 1, math.min(#pick, 16) do
+      local cells, k = {}, pick[i][2] * KEY_W + pick[i][1]
+      while k ~= -1 do table.insert(cells, 1, k); k = prev[k] end
+      local wp = {}
+      for _, kk in ipairs(cells) do wp[#wp + 1] = (kk % KEY_W) * 16 + 8; wp[#wp + 1] = (kk // KEY_W) * 16 + 8 end
+      list[#list + 1] = { path = wp, pre = {} }
+      maxLen = math.max(maxLen, #cells)
+    end
+    if #list > 0 then
+      local H = math.min(1000, 20 * maxLen + 120)
+      local res, _, _, ps = emu.simulateMany(list, H, false, 0)
+      local best
+      for i = 1, #list do
+        local wp = list[i].path
+        local fx, fy = tostring(ps[i]):match(":(%-?%d+),(%-?%d+)")
+        local got = fx and math.abs(tonumber(fx) - wp[#wp - 1]) <= 4 and math.abs(tonumber(fy) - wp[#wp]) <= 4
+        if res[i] == -1 and got then best = i; break end
+      end
+      log(string.format("%6d wedged %d frames at (%d,%d); walk search (%d tries, H=%d): %s", frame, frame - ride.stillSince, c, r, #list, H,
+        best and string.format("to (%d,%d)", pick[best][1], pick[best][2]) or "none"))
+      if best then ride.brk = { path = list[best].path, post = {}, path2 = {}, ph = 1, at = 0, at2 = 0, start = frame, H = H, walk = true } end
+    end
+  end
+  if ride.brk then
+    local b, inp = ride.brk, nil
+    -- A wedged walk is blind to enemies that stray from the sim (3-2, run
+    -- WS s0: it led down column 21 into an $8F): one within 24 px drops
+    -- it, and the usual dodge takes over. (Not a breaker's bomb walk: its
+    -- target is an enemy; 1-2, run BP s0, dropped for the $94 it was for.)
+    local foe
+    for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
+      local typ = r16(base + 0x7E) & 0xFF
+      if ((r16(base) & 0xF000) == 0x9000 or (r16(base) & 0xF000) == 0xA000) and typ >= 0x80 and typ < 0xC0
+          and typ ~= 0x90 and typ ~= 0x98
+          and math.abs(r16(base + P_X) - r16(P1 + P_X)) < 24 and math.abs(r16(base + P_Y) - r16(P1 + P_Y)) < 24 then
+        foe = string.format("%02X", typ)
+      end
+    end
+    if foe and b.walk then
+      log(string.format("%6d stall breaker dropped: a $%s within 24 px", frame, foe)); ride.brk = nil
+    elseif frame - b.start > b.H or (ride.la and ride.la.over and (ride.la.start or 0) > b.start) then
+      log(string.format("%6d stall breaker dropped%s", frame, frame - b.start > b.H and " (time)" or " (lookahead)")); ride.brk = nil
+    elseif b.seq then
+      local w = b.seq[frame - b.start + 1]
+      if not w then ride.brk = nil else
+        inp = {}
+        for nm, bit in pairs({ up = 0x0800, down = 0x0400, left = 0x0200, right = 0x0100 }) do if w & bit ~= 0 then inp[nm] = true end end
+      end
+      if inp then input = inp; plan, dir, step = "exit", next(inp) or "none", nil end
+    else
+      if b.ph == 1 then inp = brkPad(b.path, b, "at"); if not next(inp) then b.ph, b.p0 = 2, frame end end
+      if b.ph == 2 then if frame - b.p0 < #b.post then inp = { a = true } else b.ph = 3 end end
+      if b.ph == 3 then
+        inp = brkPad(b.path2, b, "at2")
+        if not next(inp) then if b.detEnd then b.ph, b.p0 = 4, frame + (b.detWait or 0) else ride.brk = nil end end
+      end
+      if b.ph == 4 then
+        if frame < b.p0 then inp = {}
+        elseif frame - b.p0 < 4 then inp = { b = true } else
+          inp, ride.brk = {}, nil
+          local hs = {}
+          for _, e in ipairs(elist) do if e.killable then hs[#hs + 1] = string.format("%02X@(%d,%d)hp%d", e.type, e.c, e.r, e.hp or 0) end end
+          log(string.format("%6d stall breaker done; %s", frame, table.concat(hs, " ")))
+        end
+      end
+      if inp then input = inp; plan, dir, step = "breaker", next(inp) or "a", nil end
+    end
+  end
+  if ride.LA and not Riding and (plan ~= "board" or wedged) then
+    local K, A = 8, 20
+    local NAMES = { "none", "up", "down", "left", "right" }
+    local function pad(nm, bomb)
+      local p = (nm == "none") and {} or { [nm] = true }
+      if bomb then p.a = true end
+      return emu.padBits(p)
+    end
+    -- seq: `pre` (pad words) then d1 for A frames then d2; length H
+    local function seqOf(pre, d1, d2, H)
+      local seq = {}
+      for i = 1, #pre do seq[i] = pre[i] end
+      local p1, p2 = pad(d1), pad(d2)
+      for f = #pre + 1, H do seq[f] = (f - #pre <= A) and p1 or p2 end
+      return seq
+    end
+    local function conts(pre, first, H)
+      local order = { first }
+      for _, nm in ipairs(NAMES) do if nm ~= first then order[#order + 1] = nm end end
+      local list = {}
+      for _, d1 in ipairs(order) do
+        for _, d2 in ipairs(order) do list[#list + 1] = seqOf(pre, d1, d2, H) end
+      end
+      return list
+    end
+    -- A live one that ends with room to move first: a dodge into a
+    -- one-cell pocket lives the horizon out, then an $87 shuts it with a
+    -- soft block (4-2, run HZ s0 replayed: fled the $87 in column 12 from
+    -- the (12,9) lane end into (11,10), and sat there sealed in for 10000
+    -- frames). With the room count (botrun's 5th result) all are run.
+    local function firstLive(list, H)
+      local best, bestT, tight = nil, -2, nil
+      local from, calls = 1, 0
+      while from <= #list and calls < 3 do
+        calls = calls + 1
+        local sub = list
+        if from > 1 then sub = {}; for i = from, #list do sub[#sub + 1] = list[i] end end
+        local res, _, _, _, rch = emu.simulateMany(sub, H, true, ride.laDet or 0)
+        local done = 0
+        for i = 1, #sub do
+          local t = res[i]
+          if t == nil then break end
+          done = i
+          if t < 0 then
+            if not rch or (rch[i] or 99) >= 4 then return sub[i], -1 end
+            tight = tight or sub[i]
+          elseif t > bestT then best, bestT = sub[i], t end
+        end
+        -- (only tight ones lived so far: the rest are tried too)
+        if done == 0 then break end
+        from = from + done
+      end
+      if tight then return tight, -1 end
+      return best, bestT
+    end
+    -- closed-loop path candidates: { path = {x1, y1, ...}, pre = pads };
+    -- the simulator steers along them (botrun.c path_pad)
+    local function pathCands(pre, maxN)
+      local prev, order, q, qi = { [r * KEY_W + c] = -1 }, {}, { { c, r, 0 } }, 1
+      while qi <= #q do
+        local cc, rr, dd = q[qi][1], q[qi][2], q[qi][3]; qi = qi + 1
+        order[#order + 1] = { cc, rr, dd }
+        if dd < 10 then
+          for _, d in ipairs(DIRS) do
+            local nc, nr = cc + d[1], rr + d[2]
+            local k = nr * KEY_W + nc
+            if prev[k] == nil and walkable(g, nc, nr) then prev[k] = rr * KEY_W + cc; q[#q + 1] = { nc, nr, dd + 1 } end
+          end
+        end
+      end
+      table.sort(order, function(u, v)
+        local du, dv = danger[u[2] * KEY_W + u[1]] and 1 or 0, danger[v[2] * KEY_W + v[1]] and 1 or 0
+        if du ~= dv then return du < dv end
+        return u[3] < v[3]
+      end)
+      local list = {}
+      for i = 1, math.min(#order, maxN) do
+        local cells, k = {}, order[i][2] * KEY_W + order[i][1]
+        while k ~= -1 do table.insert(cells, 1, k); k = prev[k] end
+        local wp = {}
+        for _, kk in ipairs(cells) do
+          wp[#wp + 1] = (kk % KEY_W) * 16 + 8; wp[#wp + 1] = (kk // KEY_W) * 16 + 8  -- world pixels
+        end
+        list[#list + 1] = { path = wp, pre = pre }
+      end
+      return list
+    end
+    local function pathPad(wp, st)
+      local ox, oy = origin()
+      local x0, y0 = (r16(P1 + P_X) + ox) & 0xFFFF, (r16(P1 + P_Y) + oy) & 0xFFFF
+      local n = #wp // 2
+      while st.at < n and math.abs(wp[2 * st.at + 1] - x0) <= 1 and math.abs(wp[2 * st.at + 2] - y0) <= 1 do st.at = st.at + 1 end
+      if st.at >= n then return {} end
+      local dx, dy = wp[2 * st.at + 1] - x0, wp[2 * st.at + 2] - y0
+      if math.abs(dx) > math.abs(dy) then return { [dx > 0 and "right" or "left"] = true } end
+      return { [dy > 0 and "down" or "up"] = true }
+    end
+    local function cat(a1, a2) for _, v in ipairs(a2) do a1[#a1 + 1] = v end; return a1 end
+    local la = ride.la or {}
+    ride.la = la
+    if ride.LADBG == nil then ride.LADBG = os.getenv("SBM2_LADEBUG") == "1" end
+    if ride.LADBG then
+      ride.simq = ride.simq or {}
+      local sq = ride.simq[frame]
+      if sq then log(string.format("%6d simtest predicted px(%d,%d) frame %d; real px(%d,%d) frame %d", frame, sq[1], sq[2], sq[3], x, y, emu.frame and emu.frame() or -1)) end
+      local s2 = ride.simq2 and ride.simq2[frame]
+      if s2 then
+        local ox, oy = origin()
+        log(string.format("%6d simtest2 follow predicted %s; real %d,%d; still following %s", frame, s2[1],
+          (x + ox) & 0xFFFF, (y + oy) & 0xFFFF, tostring(la.cand == s2[2] and la.over)))
+        ride.simq2[frame] = nil
+      end
+      if frame % 50 == 0 then
+        local p0 = emu.padBits(input)
+        local dd, sx, sy, sf = emu.simulate({ p0, p0, p0, p0, p0 }, 5)
+        ride.simq[frame + 5] = { sx, sy, sf }
+      end
+    end
+    if la.veto and frame < la.veto and input.a then input.a = nil end
+    local myDir = (input.up and "up") or (input.down and "down") or (input.left and "left") or (input.right and "right") or "none"
+    local hb = emu.read(P1 + P_BOMBS_LEFT, WRAM, false) > 0
+    local press = input.a and hb or false
+    local myPad = emu.padBits(input)
+    if Blind then myPad = myPad & ~0x0080 end
+    local key = string.format("%s%s/%04X", myDir, press and "+a" or "", myPad)
+    -- (boss stages: $1A = $x7, 1-8 .. 5-8; Boss.read lists objects anywhere)
+    local bossStage = (emu.read(0x1A, WRAM, false) & 0x0F) == 7
+    local threat = press or bossStage
+    if not threat then
+      for dr = -3, 3 do
+        for dc = -3 + math.abs(dr), 3 - math.abs(dr) do
+          if danger[(r + dr) * KEY_W + c + dc] then threat = true end
+        end
+      end
+    end
+    if not threat then
+      for _, e in ipairs(elist) do
+        if math.abs(e.c - c) + math.abs(e.r - r) <= 6 then threat = true; break end
+      end
+    end
+    local bombNear = press
+    if not bombNear then
+      for k in pairs(danger) do
+        local kr, kc = k // KEY_W, k % KEY_W
+        if math.abs(kr - r) + math.abs(kc - c) <= 6 then bombNear = true; break end
+      end
+    end
+    local H = (bombNear or bossStage) and 175 or 150
+    -- Own remote bombs out: every sequence ends with setting them off (B),
+    -- so "lives" means P1 can still leave their blast (world 2's soft
+    -- blocks grow back: 2-4, run SH2 s0 stood by a remote bomb at (3,5)
+    -- until it was sealed in; never set off, the sim saw no death).
+    -- (not for the bot's own press about to lay one: 5-1, run r74 rerun,
+    -- laying at (2,5) then "died" at +154, P1 fled into the (2,12) corner
+    -- and never killed the $8As)
+    ride.laDet = (remoteOn and next(remoteCells) ~= nil) and H - 30 or 0
+    if ride.laDet > 0 then threat = true end
+    -- (a move checked in the last 8 frames is not checked again when the
+    -- bot flips back to it: 3-5, P1 dithered left/right at (13,9) and every
+    -- frame ran the full check, 0.6 s each; the scenario took over an hour)
+    la.seenKey = la.seenKey or {}
+    local due = frame >= (la.nextF or 0) or (key ~= la.key and frame >= (la.seenKey[key] or 0))
+    -- the rest of the followed candidate, from now
+    local function rest()
+      local cd = la.cand
+      if not cd then return nil end
+      local t = frame - la.start
+      if cd.path then
+        local pre = {}
+        for i = t + 1, #cd.pre do pre[#pre + 1] = cd.pre[i] end
+        local wp = {}
+        for i = 2 * la.st.at + 1, #cd.path do wp[#wp + 1] = cd.path[i] end
+        if #wp == 0 then return nil end
+        return { path = wp, pre = pre }
+      end
+      if t >= #cd - 30 then return nil end
+      local q = {}
+      for i = t + 1, #cd do q[#q + 1] = cd[i] end
+      return q
+    end
+    local function follow(cd, why)
+      la.cand, la.start, la.st, la.over = cd, frame, { at = 0 }, true
+      if ride.LADBG then
+        local _, _, _, ps = emu.simulateMany({ cd }, 30, false, ride.laDet or 0)
+        ride.simq2 = ride.simq2 or {}
+        ride.simq2[frame + 30] = { tostring(ps[1]), cd }
+      end
+      if why then
+        log(string.format("%6d lookahead: %s", frame, why))
+        -- kept to for a while (the bot's next move, standing say, may
+        -- check out while its plan still knows no other way)
+        la.commitUntil = frame + 40
+        -- the bot's way was overridden: it plans around that cell for a while
+        for _, d in ipairs(DIRS) do
+          if d[3] == myDir then
+            ride.laBlock = ride.laBlock or {}
+            ride.laBlock[(r + d[2]) * KEY_W + c + d[1]] = frame + 90
+          end
+        end
+      end
+    end
+    local committed = false
+    if la.over and la.cand and frame < (la.commitUntil or 0) then
+      committed = true
+      if frame >= (la.nextF or 0) then
+        la.nextF = frame + 8
+        local old = rest()
+        local rr = old and emu.simulateMany({ old }, H, false, ride.laDet or 0)[1]
+        if ride.LADBG then log(string.format("%6d dbg recheck rest %s: %s", frame, old and (old.path and "path" or ("seq " .. #old)) or "nil", tostring(rr))) end
+        -- (one that dies only near the end of the check is still the way:
+        -- 4-4, run QA s0 replayed, a "bomb out" held down by the wall, its
+        -- rest dying at +173 of 175; dropped, P1 stood and the blast took a
+        -- heart at +100)
+        if old and (rr < 0 or rr >= H - 30) then follow(old)
+        else committed, la.commitUntil, due = false, nil, true end
+      end
+    end
+    -- Wedged (300 frames on one cell, no bomb about): search for a bomb
+    -- now plus a way out (on foot or a ride) that lives and leaves more
+    -- floor than standing would (4-2: an $87 walled P1 in at a lane end
+    -- with soft blocks; the bot waited there for a ride until time ran out).
+    if wedged and hb and not committed and not bombNear and frame >= (ride.brkNext or 0) then
+      ride.brkNext = frame + 120
+      local HB = 240
+      local bp = { pad("none", true), pad("none", true) }
+      local list = { { pad("none") } }
+      cat(list, conts(bp, "none", HB)); cat(list, pathCands(bp, 16))
+      local res, fl, _, psW = emu.simulateMany(list, HB, false, remoteOn and HB - 30 or 0)
+      local best, bestF = nil, fl[1]
+      local ox, oy = origin()
+      local hx, hy = (r16(P1 + P_X) + ox) & 0xFFFF, (r16(P1 + P_Y) + oy) & 0xFFFF
+      for i = 2, #list do
+        -- (and P1 off the bombed cell at the end: 4-4, run QA s0, a bomb
+        -- laid in the (2,12) dead end "lived" held down against the wall
+        -- only in the sim's exact timing; three hearts went there)
+        local fx, fy = tostring(psW[i]):match(":(%-?%d+),(%-?%d+)")
+        local moved = fx and (math.abs(tonumber(fx) - hx) >= 12 or math.abs(tonumber(fy) - hy) >= 12)
+        if res[i] and res[i] == -1 and fl[i] > bestF and moved then best, bestF = list[i], fl[i] end
+      end
+      if os.getenv("SBM2_DBG") and ride.logMap and not ride.mapDumped then ride.mapDumped = true; ride.logMap() end
+      log(string.format("%6d wedged at (%d,%d) %d frames; bomb search: %s", frame, c, r, frame - ride.stillSince,
+        best and string.format("+%d floor", bestF - fl[1]) or "none"))
+      if best and ride.LADBG then
+        local r0, _, _, psb = emu.simulateMany({ best }, HB, false, 0)
+        local stay = { pad("none", true), pad("none", true) }
+        for f = 3, HB do stay[f] = pad("none") end
+        local rs, _, _, pss = emu.simulateMany({ stay }, HB, false, 0)
+        local mid = {}
+        for f = 1, 120 do mid[f] = best[f] or best[#best] end
+        local _, _, _, psm = emu.simulateMany({ mid }, 120, false, 0)
+        log(string.format("%6d dbg bomb out: best ends %s (at 120: %s); stand on the bomb: %d ends %s; seq[1..3,25,60] %04X %04X %04X %04X %04X", frame,
+          tostring(psb[1]), tostring(psm[1]), rs[1], tostring(pss[1]), best[1] or 0, best[2] or 0, best[3] or 0, best[25] or 0, best[60] or 0))
+        local r1 = emu.simulateMany({ best }, HB, false, HB - 30)
+        local d = best.path and string.format("path %d wps pre %d", #best.path // 2, #best.pre) or string.format("seq %d", #best)
+        log(string.format("%6d dbg bomb out: %s remoteOn %s; lives det0 %d det%d %d; bombs left %d", frame, d, tostring(remoteOn),
+          r0[1], HB - 30, r1[1], emu.read(P1 + P_BOMBS_LEFT, WRAM, false)))
+      end
+      if best then
+        follow(best, "wedged; bomb out")
+        la.commitUntil = frame + HB
+        committed = true
+      end
+    end
+    -- A stall breaker plan in progress was simulated whole: the rest of it
+    -- is checked instead, and kept while it lives (4-5, run half45 s0: a
+    -- plan to hit a $93 with a remote bomb set off 40 frames after cover
+    -- was dropped 7 frames in for the lookahead's own dodge).
+    local b = ride.brk
+    if threat and due and not committed and b and b.path and not b.walk and frame - b.start < b.H then
+      local ox, oy = origin()
+      local x0, y0 = (r16(P1 + P_X) + ox) & 0xFFFF, (r16(P1 + P_Y) + oy) & 0xFFFF
+      local here2 = { x0, y0 }
+      local function from(wp, at)
+        local t = {}
+        for i = 2 * at + 1, #wp do t[#t + 1] = wp[i] end
+        return #t > 0 and t or here2
+      end
+      local e
+      if b.ph == 1 then
+        e = { path = from(b.path, b.at), post = b.post, path2 = #b.path2 > 0 and b.path2 or here2, detEnd = b.detEnd, detWait = b.detWait }
+      elseif b.ph == 2 then
+        local po = {}
+        for i = frame - b.p0 + 1, #b.post do po[#po + 1] = b.post[i] end
+        e = { path = here2, post = po, path2 = #b.path2 > 0 and b.path2 or here2, detEnd = b.detEnd, detWait = b.detWait }
+      elseif b.ph == 3 then
+        e = { path = here2, post = {}, path2 = from(b.path2, b.at2), detEnd = b.detEnd, detWait = b.detWait }
+      elseif b.ph == 4 then
+        e = { path = here2, post = {}, path2 = here2, detEnd = true, detWait = math.max(0, b.p0 - frame) }
+      end
+      if e then
+        local hl = b.heart
+        if hl and emu.simHearts then emu.simHearts(false) end
+        local res = emu.simulateMany({ e }, H, false, 0)
+        if hl and emu.simHearts then emu.simHearts(true) end
+        if res[1] and res[1] < 0 then
+          committed = true
+          la.nextF = frame + 8
+        elseif not b.warned then
+          b.warned = true
+          log(string.format("%6d stall breaker plan dies at +%d now (phase %d)", frame, res[1] or -9, b.ph))
+        end
+      end
+    end
+    if threat and due and not committed then
+      la.lastF, la.nextF, la.key = frame, frame + 8, key
+      if frame % 64 == 0 then la.seenKey = {} end
+      la.seenKey[key] = frame + 8
+      local pre = {}
+      for i = 1, K do pre[i] = myPad end
+      -- the bot's move, then any continuation
+      local list = conts(pre, myDir, H)
+      local cd, t = firstLive(list, H)
+      if ride.LADBG and t >= 0 then
+        local d1, sx, sy, sf, lk, a8, ex = emu.simulate(pre, t + 1)
+        log(string.format("%6d la probe dies %d px(%d,%d) lock %04X a8 %04X exit %04X", frame, d1, sx, sy, lk, a8, ex))
+      end
+      if ride.LADBG then log(string.format("%6d la check %s H=%d t=%d px(%d,%d) over=%s cand=%s", frame, key, H, t, x, y, tostring(la.over), la.cand and (la.cand.path and "path" or "seq") or "-")) end
+      local viaPath = false
+      if t >= 0 then
+        local c2, t2 = firstLive(pathCands(press and { pad(myDir, true), pad(myDir, true) } or {}, 24), H)
+        if t2 < 0 then
+          follow(c2, string.format("%s dies at +%d; path%s", key, t, press and " (bomb kept)" or ""))
+          cd, t, viaPath = c2, t2, true
+        end
+      end
+      if t < 0 then
+        -- the bot keeps control; this is the fallback while it lives
+        if not viaPath then la.cand, la.start, la.st, la.over = cd, frame, { at = 0 }, nil end
+      else
+        local done = false
+        if press then
+          local c3, t3 = firstLive(cat(conts({}, myDir, H), pathCands({}, 24)), H)
+          if t3 < 0 then
+            follow(c3, string.format("bomb vetoed (dies at +%d)", t))
+            la.veto = frame + 30
+            input.a = nil
+            done = true
+          end
+        end
+        if not done then
+          local old = rest()
+          if old then
+            local res = emu.simulateMany({ old }, H, false, ride.laDet or 0)
+            if res[1] >= 0 then old = nil end
+          end
+          if old then
+            follow(old, string.format("%s dies at +%d; fallback", key, t))
+          else
+            local c4, t4 = firstLive(cat(pathCands({}, 24), conts({}, myDir, H)), H)
+            if t4 >= 0 and hb then
+              -- a bomb only when that verifiably lives
+              -- (with remote control the new bomb is set off near the end
+              -- of the check: 3-2, run NA s0, a bomb laid at (13,11) "lived"
+              -- with P1 in the dead end (13,10) above it, walled in for good)
+              local det0 = ride.laDet
+              if remoteOn and (ride.laDet or 0) == 0 then ride.laDet = 145 end
+              local c5, t5 = firstLive(pathCands({ pad("none", true), pad("none", true) }, 16), 175)
+              ride.laDet = det0
+              if t5 < 0 then c4, t4 = c5, t5 end
+            end
+            -- (nothing verified to live: the bot's own plan may know a way
+            -- the candidates miss; overridden only when its move dies soon)
+            if c4 and (t4 < 0 or (t < 40 and t4 > t + 20)) then
+              follow(c4, string.format("%s dies at +%d; override %s(%s)", key, t, c4.path and "path " or "",
+                t4 < 0 and "lives" or "+" .. t4))
+            else
+              la.over = nil
+            end
+          end
+        end
+      end
+    elseif not threat then
+      la.over, la.cand = nil, nil
+    end
+    -- (a rewind (ambush retry) takes frame back past the candidate's start)
+    if la.over and la.cand and frame < la.start then la.over, la.cand = nil, nil end
+    if la.over and la.cand then
+      local cd, t = la.cand, frame - la.start
+      local inp
+      if cd.path then
+        if t < #cd.pre then
+          local w = cd.pre[t + 1]
+          inp = {}
+          if w & 0x0080 ~= 0 then inp.a = true end
+          for nm, bit in pairs({ up = 0x0800, down = 0x0400, left = 0x0200, right = 0x0100 }) do if w & bit ~= 0 then inp[nm] = true end end
+        else
+          inp = pathPad(cd.path, la.st)
+        end
+      elseif t < #cd then
+        local w = cd[t + 1]
+        inp = {}
+        if w & 0x0080 ~= 0 then inp.a = true end
+        for nm, bit in pairs({ up = 0x0800, down = 0x0400, left = 0x0200, right = 0x0100 }) do if w & bit ~= 0 then inp[nm] = true end end
+      end
+      if inp and ride.LADBG then
+        local w = cd.path and -1 or (cd[t + 1] or -2)
+        log(string.format("%6d dbg follow t=%d pad %04X seqw %04X px(%d,%d)", frame, t, emu.padBits(inp), w & 0xFFFF, x, y))
+      end
+      if inp then
+        input = inp
+        plan, dir, step = "lookahead", next(input) or "none", nil
+      else
+        la.over = nil
+      end
+    end
+  end
   local s = string.format("%s %s @(%d,%d) px(%d,%d)", plan == "bomb" and "bomb:" .. tostring(bombWhy) or plan, dir or "-", c, r, x, y)
+  if ride.origLog then
+    local ox, oy = origin(); local k = {}
+    for b in pairs(input or {}) do k[#k + 1] = b end
+    s = s .. string.format(" org(%d,%d) in %s", ox, oy, table.concat(k, "+"))
+  end
   if s ~= lastPlan then
     log(string.format("%6d %s", frame, s)); lastPlan = s
     recent[#recent + 1] = string.format("%d %s", frame, s)
@@ -4750,14 +6009,18 @@ end
 local loaded = LOAD == nil
 if loaded then inputlog.start(nil) end
 emu.addEventCallback(function()
+  -- B (remote detonation) is held 2 frames: the game reads the pad only on
+  -- frames it is not lagging, and a 1-frame press every 20 frames (even)
+  -- can fall on the skipped frame every time (3-1, run BQ s0: 30k frames
+  -- of presses at (15,10), the remote bomb at (14,8) never went off and
+  -- every plan waited on it).
+  -- (on a copy: a think that does not run leaves `input` as it was)
+  local i = {}
+  for k, v in pairs(input) do i[k] = v end
+  if input.b then BHeld = frame elseif BHeld == frame - 1 then i.b = true end
   -- (no bomb while the stage's enemies are not placed yet: see Blind)
-  if Blind and input.a then
-    local i = {}
-    for k, v in pairs(input) do if k ~= "a" then i[k] = v end end
-    emu.setInput(i, 0)
-  else
-    emu.setInput(input, 0)
-  end
+  if Blind then i.a = nil end
+  emu.setInput(i, 0)
 end, emu.eventType.inputPolled)
 
 local LOGFILE = string.format("%s/bot_%06d.log", OUT, FRAME0)
@@ -4772,6 +6035,8 @@ local function logMap()
   end
   log(string.format("%6d map", frame) .. "\n" .. table.concat(rows, "\n"))
 end
+
+ride.logMap = logMap
 
 -- Savestate + this segment's CDL; the driver resumes from here on a crash.
 local function checkpoint()
@@ -4788,8 +6053,11 @@ local function checkpoint()
 end
 
 
+ride.flushEvery = tonumber(os.getenv("SBM2_FLUSHEVERY") or "")  -- frames; to watch a slow run
+ride.origLog = os.getenv("SBM2_ORIGLOG")  -- log the stage origin and pressed buttons with each plan line
 local function onFrame()
   if StopNow then flushLog(); emu.stop(0); return end
+  if ride.flushEvery and frame % ride.flushEvery == 0 then flushLog() end
   Boss.frame()
   -- The ending (stage $60): the game is beaten. Let it play a while, save
   -- the run and stop for good (no rollbacks: its locks are not deaths).

@@ -1,0 +1,10 @@
+# 4-5 from run fullHY s0, from the stage start (4 hearts): panels (29,8)
+# and (29,10) on the far right; P1 kept to the left area, "no ride came" at
+# (9,6) by the row-6 $DC, then explored until time-up
+start 44r71
+budget 16000
+seed 0
+pass STAGE 45
+fail DEATH
+env SBM2_NOREWIND=1
+pads

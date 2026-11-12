@@ -1,0 +1,12 @@
+# 4-3 from run fullIA s0, from the stage start (4 hearts; the clock starts at
+# 4:00). The last two mode 1 panels (3,24) (3,26) are in the lower left
+# pocket (cols 2-4, rows 18-26) that only the rides reach; the bot rode out
+# of it at 138452 and never went back ("plan: none" up top, stall breaker
+# 0 targets), time-up at 146470.
+start 42r75
+budget 19000
+seed 0
+pass STAGE 43
+fail DEATH|GAME OVER
+env SBM2_NOREWIND=1
+pads

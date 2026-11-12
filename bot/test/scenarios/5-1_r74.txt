@@ -1,0 +1,11 @@
+# 5-1 from run fullHZ s0, from the stage start (3 hearts): remote bombs at
+# (3,4) and (7,4) never set off; P1 shuttled between (2,4) and (3,4)
+# ("clear" left, the lookahead back) for 10000 frames and died at 224645
+# (fails on a death or a heart loss)
+start 50r74
+budget 23000
+seed 0
+pass STAGE 51
+fail DEATH|hearts 0[1-9] -> 0[0-9] at px\([1-9][0-9]*,[0-9]+\)
+env SBM2_NOREWIND=1
+pads

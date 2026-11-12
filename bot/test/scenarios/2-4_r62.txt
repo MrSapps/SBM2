@@ -1,0 +1,7 @@
+# 2-4 from full run SH2 s0 (lookahead shield): stood by its own remote bomb at (4,4), waiting at (3,5) for a chaser, until regrown soft blocks sealed it in (frame ~67500 of the run, ~800 into the stage); then "rolling back" forever (no rewinds)
+start 23r62
+budget 12000
+seed 0
+pass STAGE 24
+fail DEATH|trapped by own remote
+env SBM2_NOREWIND=1

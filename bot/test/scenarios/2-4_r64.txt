@@ -1,0 +1,8 @@
+# 2-4 from run fullBRK s0 (seed 0, lookahead, stall breaker): the planner made bomb(13,8) 60
+# times (its blast undone each time), never the push of (3,10) into the hole for panel (3,12); time-up
+start 23r64
+budget 24000
+seed 0
+pass STAGE 24
+fail DEATH
+env SBM2_NOREWIND=1

@@ -1,0 +1,8 @@
+# 4-2 from run fullSH3 s0 (seed 0, lookahead shield): stalled from +2260 with 8 panels left,
+# exploring the left side ((2,6), (2,10)) until time ran out (death at +15667)
+start 41r63
+budget 16500
+seed 0
+pass STAGE 42
+fail DEATH
+env SBM2_NOREWIND=1

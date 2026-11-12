@@ -1,0 +1,11 @@
+# 4-2 from run fullWS s0, from the stage start: never crossed to the right
+# side (panel (24,5) undone, gate (17,3) shut); wedged in the left area by
+# turns at (3,8), (12,9), (5,6), (3,10); "no ride came" at (12,9) by the
+# parked $DC at (13,9); timed out
+start 41r66
+budget 24000
+seed 0
+env SBM2_NOREWIND=1
+pass STAGE 42
+fail DEATH
+pads

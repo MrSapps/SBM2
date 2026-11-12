@@ -36,7 +36,7 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DIR = os.path.join(ROOT, 'bot', 'test', 'scenarios')
-BOTRUN = os.path.join(ROOT, 'build', 'port', 'botrun')
+BOTRUN = os.environ.get('SBM2_BOTRUN') or os.path.join(ROOT, 'build', 'port', 'botrun')
 LIB, LIBP = os.path.join(ROOT, 'build', 'lib'), os.path.join(ROOT, 'build', 'libp')
 
 
@@ -121,6 +121,9 @@ def make(a):
         f.write(f'start {stage}\nbudget {a.budget}\npass {a.pass_}\n')
         if a.fail:
             f.write(f'fail {a.fail}\n')
+        # (no rewinds: a full run's rules; a scenario that rewinds also
+        # replays a different game than the run it was cut from)
+        f.write('env SBM2_NOREWIND=1\n')
         f.write('pads\n' + '\n'.join(encode(rest[:cut])) + '\n')
     print(f'{out}: {a.frame} frames of pads, {os.path.getsize(out)} bytes')
 

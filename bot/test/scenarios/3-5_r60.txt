@@ -1,0 +1,8 @@
+# 3-5 from unaided run B4 s2 (a99f6fe): dodges left then right into an $81 at (9,9)-(10,9); then blast deaths, game-over loop
+start 34r60
+budget 21600
+seed 2
+pass STAGE 35
+fail DEATH
+env SBM2_NOREWIND=1
+pads

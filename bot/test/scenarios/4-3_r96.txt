@@ -1,0 +1,9 @@
+# 4-3 from its start (5 hearts; state from run fullUA s0, worlds 1-3 and 4-1/4-2 deathless).
+# Run fullRA s0 (same play to here): the exit open at 178814, but P1 rode (3,12)->(3,18) and pressed
+# down on the (3,18) board for 600 frames ("frozen"), again and again; time-up at 179660.
+start 42r96
+budget 18500
+pass STAGE 43
+fail DEATH|GAME OVER
+env SBM2_NOREWIND=1
+pads

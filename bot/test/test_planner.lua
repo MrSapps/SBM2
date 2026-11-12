@@ -145,6 +145,14 @@ test("5-5 late: the last panel needs two pushes into holes", function()
   eq(kinds(bot.stagePlan(g, c, r, ctx)), "bomb(7,4) bomb(5,4)", "plan")
 end)
 
+test("5-5 late, (7,4) grown back: bomb it open first", function()
+  local bot, g, c, r = setup("5-5_regrown")
+  local _, done = bot.panels()
+  local ctx = ctxFor(bot, 0, panelGoal(bot))
+  ctx.avoid = done
+  eq(kinds(bot.stagePlan(g, c, r, ctx)), "bomb(8,4) bomb(7,4) bomb(5,4)", "plan")
+end)
+
 test("5-5 mid-stage: two pushes reach the next trap", function()
   local bot, g, c, r = setup("5-5_blocks")
   -- A trap to bomb is a goal, as in think(); the soft blocks here at

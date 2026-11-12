@@ -1,0 +1,9 @@
+# 5-5 from its start with 7 hearts (state from run fullSB s0, 5-1..5-4 deathless). The planner's
+# pushes jammed the $E2s at (9,10) (10,10) and shut P1 in the lower left; the last panel (2,4)
+# needs row 4; time-up at 56775. Passing = clearing 5-5 without a death.
+start 54r94
+budget 24000
+pass STAGE 55
+fail DEATH|GAME OVER
+env SBM2_NOREWIND=1
+pads

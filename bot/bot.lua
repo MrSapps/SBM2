@@ -1148,6 +1148,16 @@ local function stagePlan(g, c0, r0, ctx)
     flashAt = ctx.flashing and (r0 * KEY_W + c0) or nil }
   start.f = 0
   local heap, best, exp = { start }, { [""] = 0 }, 0
+  -- A plan whose pushes wall P1 off from where it stands now is kept only
+  -- as a fallback: pushes can't be undone, and the rest of the stage may
+  -- be back there (5-5, run SB s0: pushes at (11,10) (10,12) (7,10) (5,12)
+  -- jammed the $E2s at (9,10) (10,10) and shut P1 in the lower left; the
+  -- last panel (2,4) was beyond row 6; time-up).
+  local sealed
+  local function backOpen(s)
+    for k in pairs(reach0) do if s.region[k] then return true end end
+    return false
+  end
   while #heap > 0 do
     local s = heapPop(heap)
     if s.terminal then return shorten(steps(s.state), true), exp, true end
@@ -1156,14 +1166,21 @@ local function stagePlan(g, c0, r0, ctx)
       for k in pairs(s.region) do
         if not reach0[k] then
           local c, r = k % KEY_W, k // KEY_W
-          if ctx.objGoal(c, r, s.grid) then return shorten(steps(s), false), exp end
+          if ctx.objGoal(c, r, s.grid) then
+            if backOpen(s) then return shorten(steps(s), false), exp end
+            sealed = sealed or s
+            break
+          end
           if ctx.enemyGoal and ctx.enemyGoal(c, r) then enemy = true end
         end
       end
       if enemy then heapPush(heap, { terminal = true, state = s, f = (s.g + ENEMY_PEN) * 1000 }) end
     end
     exp = exp + 1
-    if exp > ctx.maxExp then return nil, exp end
+    if exp > ctx.maxExp then
+      if sealed then return shorten(steps(sealed), false), exp end
+      return nil, exp
+    end
     PlanWork = PlanWork + 1
     if yieldable and PlanWork >= 60 then
       coroutine.yield()
@@ -1215,6 +1232,7 @@ local function stagePlan(g, c0, r0, ctx)
       end
     end
   end
+  if sealed then return shorten(steps(sealed), false), exp end
   return nil, exp
 end
 
@@ -1522,6 +1540,27 @@ local function think()
     end
     lastRide = { ride.from[1], ride.from[2], frame }
     ride.from = nil
+    -- A board search's sequence walks off on landing; one that goes on
+    -- into a wall there ends now (4-3, runs RA/UA/VB s0: "down 60 then
+    -- down" held Down on the (3,18) board, P1 frozen for the rest of its
+    -- 640 frames, again and again until time-up with the gate open).
+    local b = ride.brk
+    if b and b.board and b.seq then
+      -- (only if every press left goes into a wall: the board's own way is
+      -- still held at landing, and the walk-off comes after it; 4-2_r66
+      -- dropped a "then up" at (16,9) and met a $93)
+      local g0, any = readMap(), false
+      for i = frame - b.start + 1, #b.seq do
+        local w = b.seq[i]
+        local d = (w & 0x0800 ~= 0 and { 0, -1 }) or (w & 0x0400 ~= 0 and { 0, 1 })
+          or (w & 0x0200 ~= 0 and { -1, 0 }) or (w & 0x0100 ~= 0 and { 1, 0 })
+        if d and walkable(g0, rc + d[1], rr + d[2]) then any = true; break end
+      end
+      if not any then
+        log(string.format("%6d board search sequence ends on landing at (%d,%d)", frame, rc, rr))
+        ride.brk = nil
+      end
+    end
   end
   -- On a pad by pixel position: +$A8 still names the previous cell for a
   -- few frames after a landing.
@@ -2179,6 +2218,26 @@ local function think()
   -- Enemies: predicted paths give contact windows (eWin) and kill chances.
   -- enemies/walkers (cells) still drive the exit and hunt plans.
   local elist = Enemies.read(g)
+  -- 5-1 tank: while the light switch still makes its $8As fast chasers
+  -- (P1 can't outrun them, 2 HP each) and P1 holds 2+ hearts, they don't
+  -- count as harmful: the opening (ride.sw51) goes ahead, a hit costing a
+  -- heart and the flash after it. (Every opening step bombs P1's pocket
+  -- open to them, and blown blocks here grow back while P1 waits: run RB
+  -- s0 hid in column 2 with 8 hearts; time-up, 4 of 7 panels left.)
+  do
+    local hz = emu.read(P1 + 0xEF, WRAM, false)
+    local sw = r16(0x5AAC)
+    local tank = emu.read(0x1A, WRAM, false) == 0x50 and sw ~= 0xFFFF and (sw & 1) == 0 and hz >= 2 and hz < 0x80
+    if tank ~= (ride.tank or false) then
+      log(string.format("%6d 5-1 tank %s (%d hearts)", frame, tank and "on: $8A contact costs a heart" or "off", hz))
+    end
+    ride.tank = tank
+    if tank then
+      for _, e in ipairs(elist) do
+        if e.type == 0x8A then e.harmful, e.chaser = false, false end
+      end
+    end
+  end
   -- A new $DC platform (bombing a $6A spawns one: C1:4A16) may serve a
   -- lane written off as "no ride came": all lanes are tried again. (4-2,
   -- run SH3 s0: waited at (17,8) before the column-17 platform existed,
@@ -4117,8 +4176,15 @@ local function think()
     if r16(0x5AAC) ~= ride.swLast then log(string.format("%6d light switch %04X -> %04X", frame, ride.swLast or 0, r16(0x5AAC))); ride.swLast = r16(0x5AAC) end
     if emu.read(0x1A, WRAM, false) == 0x50 and r16(0x5AAC) ~= 0xFFFF and (r16(0x5AAC) & 1) == 0 then
       local T
+      -- The latest step P1 can reach comes first: the row-4 blocks grow
+      -- back behind P1 (r89 rerun: at (8,8) with the $E2 pushed, (4,4)
+      -- and (5,4) were back and the opening went back to step 1, out of
+      -- reach; P1 waited there losing hearts).
+      local reach = regionOf(g, c, r)
+      if g[7][6] == 0x64 and reach[8 * KEY_W + 6] then T = 8 * KEY_W + 6
+      elseif g[6][8] == 0xE2 and g[7][8] == 0xD3 and reach[5 * KEY_W + 8] then T = 5 * KEY_W + 8
       -- (a blasted block reads soft a while before it breaks: Breaking)
-      if SOFT[g[4][4]] and not Breaking[4 * KEY_W + 4] then T = 4 * KEY_W + 3
+      elseif SOFT[g[4][4]] and not Breaking[4 * KEY_W + 4] then T = 4 * KEY_W + 3
       elseif SOFT[g[4][5]] and not Breaking[4 * KEY_W + 5] then T = 4 * KEY_W + 4
       elseif g[6][8] == 0xE2 and g[7][8] == 0xD3 then T = 5 * KEY_W + 8
       elseif g[7][6] == 0x64 then T = 8 * KEY_W + 6 end
@@ -4342,7 +4408,12 @@ local function think()
         -- rest it waited behind every nearer block and enemy until it timed
         -- out (1-2, unaided: the panel bomb at (24,7), planned twice, never
         -- laid; a time-up in 2 of 3 seeds).
-        if not ride.sw51 and ride.planCell and ride.planCell ~= here and planSteps then
+        -- (off unless SBM2_PLANSTEP=1: from 03289bd (11-09) to here the
+        -- switch check below sat inside this block and reset dir, so every
+        -- scenario since passed without it; on, 2-1_r80b dithered at (7,4)/
+        -- (8,4) and timed out)
+        if ride.PLANSTEP == nil then ride.PLANSTEP = os.getenv("SBM2_PLANSTEP") == "1" end
+        if ride.PLANSTEP and not ride.sw51 and ride.planCell and ride.planCell ~= here and planSteps then
           local T = ride.planCell
           dir = bfs(g, c, r, function(cc, rr, n)
             return rr * KEY_W + cc == T and canEscape(cc, rr, n * FPT)
@@ -4376,6 +4447,11 @@ local function think()
               plan = "planstep"
             end
           end
+        end
+        -- (5-1's light switch steps; this check had slipped inside the one
+        -- above, where ride.sw51 is always nil: never walked to, 5-1 timed
+        -- out with the $8As fast chasers, runs RB s0 and r74 reruns)
+        if not dir and ride.sw51 and ride.sw51 ~= here then
           local T = ride.sw51
           dir = bfs(g, c, r, function(cc, rr, n)
             return rr * KEY_W + cc == T and canEscape(cc, rr, n * FPT)
@@ -4816,7 +4892,7 @@ local function think()
               ride.boardSimNext = frame + 120
               local seq, why = boardSim(c, r, ln, bd)
               log(string.format("%6d step onto the ride to (%d,%d); board search: %s", frame, ln[1], ln[2], why))
-              if seq then ride.brk = { seq = seq, start = frame, H = 640 } end
+              if seq then ride.brk = { seq = seq, start = frame, H = 640, board = true } end
             end
             if not ride.brk then
               input[bd] = nil
@@ -4847,7 +4923,7 @@ local function think()
             ride.boardSimNext = frame + 60
             local seq, why = boardSim(c, r, ln, bd)
             log(string.format("%6d step onto the waiting ride at (%d,%d) to (%d,%d); board search: %s", frame, nc, nr, ln[1], ln[2], why))
-            if seq then ride.brk = { seq = seq, start = frame, H = 640 } end
+            if seq then ride.brk = { seq = seq, start = frame, H = 640, board = true } end
           end
           if ln and not ride.brk then
             input[bd] = nil
@@ -4910,7 +4986,7 @@ local function think()
           local seq, why = boardSim(c, r, ln, bd)
           log(string.format("%6d ride to (%d,%d)%s; board search: %s", frame, ln[1], ln[2],
             RideBlock[ln[2] * KEY_W + ln[1]] and " blocked by an enemy" or "", why))
-          if seq then ride.brk = { seq = seq, start = frame, H = 640 } end
+          if seq then ride.brk = { seq = seq, start = frame, H = 640, board = true } end
         end
       end
     end
@@ -5265,7 +5341,7 @@ local function think()
   if ride.LA == nil then ride.LA = os.getenv("SBM2_LOOKAHEAD") ~= "0" and emu.simulateMany ~= nil end
   -- The simulator counts a heart lost as a death (port/botrun.c), except
   -- while a trap is crossed on purpose (plan "trap": a heart is spent).
-  if emu.simHearts then emu.simHearts(plan ~= "trap" and not (ride.brk and ride.brk.heart) and frame >= (ride.heartUntil or 0)) end
+  if emu.simHearts then emu.simHearts(plan ~= "trap" and not (ride.brk and ride.brk.heart) and frame >= (ride.heartUntil or 0) and not ride.tank) end
   -- (P1's cell and since when: a long stay is a wedge, see below)
   if ride.stillAt ~= r * KEY_W + c then ride.stillAt, ride.stillSince = r * KEY_W + c, frame end
   local wedged = frame - ride.stillSince > 300

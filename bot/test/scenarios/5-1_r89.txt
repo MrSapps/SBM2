@@ -1,0 +1,9 @@
+# 5-1 from its start with 8 hearts (state from run fullRB s0, world 4 deathless). The $8As (fast
+# x-ray chasers until the light switch at (6,7) flips) kept P1 in column 2 bombing for them;
+# 4 of 7 panels left at time-up (104680). Passing = clearing 5-1 without a death.
+start 50r89
+budget 17500
+pass STAGE 51
+fail DEATH|GAME OVER
+env SBM2_NOREWIND=1
+pads

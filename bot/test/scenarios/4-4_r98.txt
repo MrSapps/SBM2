@@ -1,0 +1,9 @@
+# 4-4 from its start with 7 hearts (state from run fullXB s0, 4-3 deathless). The $89 in the
+# column-2 pocket (reached only by the (5,10)->(2,10) ride) and an $87 keep the gate shut; the bot
+# refused the ride "blocked by an enemy", the stall breaker had "no tries"; time-up at 37855.
+start 43r98
+budget 30000
+pass STAGE 44
+fail DEATH|GAME OVER
+env SBM2_NOREWIND=1
+pads

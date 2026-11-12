@@ -1549,12 +1549,19 @@ local function think()
       -- (only if every press left goes into a wall: the board's own way is
       -- still held at landing, and the walk-off comes after it; 4-2_r66
       -- dropped a "then up" at (16,9) and met a $93)
+      -- (a bomb or detonate press left, or a way along a lane from here,
+      -- keeps it: 4-4's bomb-and-back "left 220, bomb, then right" rides
+      -- back over the hard blocks)
       local g0, any = readMap(), false
+      local lanes = {}
+      for _, ln in ipairs(laneEnds(g0, rc, rr)) do lanes[(ln[1] - rc) // ln[3] .. "," .. (ln[2] - rr) // ln[3]] = true end
+      local AB = emu.padBits({ a = true, b = true })
       for i = frame - b.start + 1, #b.seq do
         local w = b.seq[i]
+        if w & AB ~= 0 then any = true; break end
         local d = (w & 0x0800 ~= 0 and { 0, -1 }) or (w & 0x0400 ~= 0 and { 0, 1 })
           or (w & 0x0200 ~= 0 and { -1, 0 }) or (w & 0x0100 ~= 0 and { 1, 0 })
-        if d and walkable(g0, rc + d[1], rr + d[2]) then any = true; break end
+        if d and (walkable(g0, rc + d[1], rr + d[2]) or lanes[d[1] .. "," .. d[2]]) then any = true; break end
       end
       if not any then
         log(string.format("%6d board search sequence ends on landing at (%d,%d)", frame, rc, rr))
@@ -2722,6 +2729,21 @@ local function think()
         log(string.format("%6d dbg remote bombs %s; P1 (%d,%d) f52 %04X", frame, table.concat(bs, " "), c, r, r16(P1 + 0x52)))
       end
     end
+    -- Shut in with its own remote bomb for 1200+ frames and 2+ hearts: set
+    -- it off and take the hit (5-5, run AD s0: at (27,10) between the
+    -- (25,10) hole and its bomb at (28,10), (28,11) grown back behind P1;
+    -- waited 13000 frames with 7 hearts until time-up).
+    if remoteCells[here] and frame >= nextDetonate and ride.stillAt == here
+        and frame - (ride.stillSince or frame) > 1200 and emu.read(0x1A, WRAM, false) ~= 0x57 then
+      local hz = emu.read(P1 + 0xEF, WRAM, false)
+      if hz >= 2 and hz < 0x80 then
+        input.b = true
+        nextDetonate = frame + 20
+        ride.heartUntil = frame + 200  -- (the simulator lets this heart go)
+        log(string.format("%6d detonate: shut in with its own bomb for %d frames; a heart for it (%d held)", frame,
+          frame - ride.stillSince, hz))
+      end
+    end
     -- Set off in the last few frames (it goes off ~8 frames after the
     -- press): its blast is danger now. (5-8 form 2: the aim plan walked P1
     -- back into a missed throw's blast after the press, 40 rollbacks.)
@@ -3791,9 +3813,14 @@ local function think()
         -- (only if it would move: 2-2, unaided run A3 s1, every bomb down
         -- column 5 opening the start pocket was refused for the $E2 at
         -- (5,11), which a blast from above only presses into the wall)
-        if tt == 0xE2 and planSteps and pushCell ~= rr * KEY_W + cc then
+        -- (with no plan on too, a push onto floor: 5-5, run AC s0, seek and
+        -- enemy bombs pushed row 10's $E2s into a pair at (10,10)/(11,10)
+        -- with P1 west of them, cut off from row 4's panels; time-up. A
+        -- push into a $D3 hole is still fine then: row 4's chain to 5-5's
+        -- last panel is done that way when the planner runs out of states)
+        if tt == 0xE2 and pushCell ~= rr * KEY_W + cc then
           local to = cell[3] and g[cell[2] + cell[3][2]] and g[cell[2] + cell[3][2]][cell[1] + cell[3][1]]
-          if to == 0x00 or to == 0xD3 then return nil end
+          if to == 0x00 or (to == 0xD3 and planSteps) then return nil end
         end
         if tt == 0xE2 and cell[3] then
           -- Worth pushing toward a hole one or two cells on (a push moves
@@ -4133,7 +4160,14 @@ local function think()
         break
       end
     end
-    if not planSteps and not planCo and settled and frame - lastObjFrame > 240 and frame >= pushNext then
+    -- (stalled, the planner runs every 1200 frames even while seek finds
+    -- soft blocks to bomb, and its bomb is then the only block target:
+    -- 5-5, run AF s0, one push from the last panel, P1 bombed every soft
+    -- block in reach (they grow back) and the planner never ran; time-up)
+    local forcedPlan = frame - (ride.lastStall or -1e9) < 3000 and frame - (ride.planForced or -1e9) > 1200
+    if not planSteps and not planCo and settled and (frame - lastObjFrame > 240 or forcedPlan) and frame >= pushNext then
+      ride.forcedPlan = forcedPlan and frame - lastObjFrame <= 240
+      if ride.forcedPlan then ride.planForced = frame; log(string.format("%6d stalled: stage planner run now", frame)) end
       pushNext = frame + 120
       local anyWalkerIn = false
       local reachNow = regionOf(g, c, r)
@@ -4143,11 +4177,19 @@ local function think()
       local gc0 = {}
       for rr = 0, MAP_H - 1 do local row = {}; for cc = 0, MAP_W - 1 do row[cc] = g[rr][cc] end; gc0[rr] = row end
       local pTodo, pDone, sGone, wk = panelTodo, panelDone, softGone, walkers
+      local panelsOnly = ride.forcedPlan and next(panelTodo) ~= nil
       local ctx = {
         objGoal = function(cc, rr, grid)
           local k = rr * KEY_W + cc
           local t = grid[rr][cc]
           if t == GATE_OPEN or t == ITEM or pTodo[k] or t == 0x68 or t == 0x6B then return true end
+          -- (a stalled run with panels left plans for the panels only: 5-5,
+          -- run AG s0, by row 4 one push from the last panel, the forced
+          -- plan went for soft blocks in the lower left; time-up)
+          if panelsOnly then
+            for _, d in ipairs(DIRS) do if pTodo[(rr + d[2]) * KEY_W + cc + d[1]] then return true end end
+            return false
+          end
           for _, d in ipairs(DIRS) do
             local nk = (rr + d[2]) * KEY_W + cc + d[1]
             local n = grid[rr + d[2]] and grid[rr + d[2]][cc + d[1]]
@@ -4466,6 +4508,7 @@ local function think()
           local goalK
           dir = bfs(g, c, r, function(cc, rr, n)
             if (cc == c and rr == r) or danger[rr * KEY_W + cc] or (want == "enemy" and not sealOK(cc, rr)) then return false end
+            if want == "obj" and ride.forcedPlan and planSteps and pushCell and rr * KEY_W + cc ~= pushCell then return false end
             local why = targetsInReach(cc, rr, n * FPT)
             if want == "item" or want == "open" then
               if why ~= "obj" then return false end
@@ -4859,7 +4902,35 @@ local function think()
         list[#list + 1] = seq; desc[#desc + 1] = string.format("%s %d then %s", bd, T, d2)
       end
     end
-    local res, _, _, ps, rch = emu.simulateMany(list, 640, false, 0)
+    -- Bomb-and-back: ride over, bomb on landing, ride back on the same
+    -- platform (4-4: the $89 lives in the column-2 pocket, reached only by
+    -- the (5,10)->(2,10) ride, and sits by the landing; runs XB/YB s0-s1
+    -- were "blocked by an enemy" there until time-up). Taken when it lives
+    -- and leaves fewer enemies than standing still.
+    local back = ({ up = "down", down = "up", left = "right", right = "left" })[bd]
+    local pa, pk = emu.padBits({ a = true }), emu.padBits({ [back] = true })
+    local nBomb0 = #list
+    local hb = emu.read(P1 + P_BOMBS_LEFT, WRAM, false) > 0
+    -- (with the remote the bomb is set off from the ride back, 90 frames on)
+    local pkb = remoteOn and emu.padBits({ [back] = true, b = true }) or pk
+    if hb then
+      for _, T in ipairs({ 140, 180, 220, 260, 320 }) do
+        local seq = {}
+        for f = 1, 640 do seq[f] = (f <= T and pb) or (f <= T + 3 and pa) or ((f > T + 90 and f <= T + 93) and pkb) or pk end
+        list[#list + 1] = seq; desc[#desc + 1] = string.format("%s %d, bomb, then %s", bd, T, back)
+      end
+      local still = {}
+      for f = 1, 640 do still[f] = 0 end
+      list[#list + 1] = still; desc[#desc + 1] = "still"
+    end
+    local res, _, live, ps, rch = emu.simulateMany(list, 640, false, 0)
+    if hb then
+      local base = live[#list]
+      for i = nBomb0 + 1, #list - 1 do
+        if res[i] == -1 and base and live[i] and live[i] < base then return list[i], desc[i] .. " (kills)" end
+      end
+      for i = #list, nBomb0 + 1, -1 do list[i], desc[i], res[i] = nil, nil, nil end
+    end
     local ex, ey = ln[1] * 16 + 8, ln[2] * 16 + 8
     local hx, hy = bc * 16 + 8, br * 16 + 8
     -- (one that leaves by the open gate first: the sim ends it as -2, not

@@ -1495,8 +1495,24 @@ STOPEARLY = os.getenv("SBM2_STOPEARLY") == "1"
 -- (+ the segment's start frame: after a game over drive.py continues from
 -- the same stage state, and the same choices lost the same way 50 times)
 math.randomseed(SEED + FRAME0 * 7919)
+-- (a global: the main chunk is at Lua's local limit)
+function SealScan()
+  SealCells = {}
+  for rr = 0, MAP_H - 1 do
+    for cc = 0, MAP_W - 1 do
+      local t = emu.read(MAP + rr * ROW + cc * 2, WRAM, false)
+      if t < 0x80 and t ~= 0x66 and emu.read(0x1D000 + rr * ROW + cc * 2, WRAM, false) >= 0x80 then SealCells[rr * KEY_W + cc] = true end
+    end
+  end
+end
 local function think()
   SoftPass = emu.read(P1 + 0xFB, WRAM, false) ~= 0
+  -- Floor cells with a solid tile in CellItems ($7FD000) underneath: the
+  -- flame cleanup (C0:E505) writes CellItems back, so a blast over one
+  -- turns it solid for good (4-4's (13,6)/(13,7), 4-5's column 16: run EA
+  -- s2 bombed (13,5), fled up into the (12..15,5) pocket and was sealed
+  -- in until time-up). Stairs ($66) stop blasts and are left out.
+  if frame % 60 == 0 or not SealCells then SealScan() end
   input = {}
   -- Locked ($52 bit 0): dying, on the exit, warping, a boss's freeze, ...
   -- Only a death is a death: C0:A675 sets $52 = $0801 (docs/enemies.md).
@@ -3820,6 +3836,8 @@ local function think()
       for _, cell in ipairs(blastCells(g, cc, rr, rangeAt(g, cc, rr))) do
         local k = cell[2] * KEY_W + cell[1]
         local tt = g[cell[2]][cell[1]]
+        -- (a blast over a cell that turns solid: never, see SealCells)
+        if SealCells and SealCells[k] then return nil end
         -- The planner's own step may flip a finished panel: it priced that
         -- in, and the parity plan sets the panel right afterwards.
         if pushCell == rr * KEY_W + cc then
@@ -4260,7 +4278,17 @@ local function think()
           return false
         end or nil,
         avoid = pDone, maxExp = 4000, slice = 0.03,
-        noBomb = function(k, t) return (noBombTile[t] or 0) >= 2 or (noBombUntil[k] or 0) > frame end,
+        noBomb = function(k, t)
+          if (noBombTile[t] or 0) >= 2 or (noBombUntil[k] or 0) > frame then return true end
+          -- (nor a bomb whose blast turns a floor cell solid: SealCells)
+          if SealCells and next(SealCells) then
+            local bc, br = k % KEY_W, k // KEY_W
+            for _, cell in ipairs(blastCells(gc0, bc, br, rangeAt(gc0, bc, br))) do
+              if SealCells[cell[2] * KEY_W + cell[1]] then return true end
+            end
+          end
+          return false
+        end,
         hearts = (hearts >= 0x80 or FAKE_HEARTS) and 99 or hearts, flashing = flashing,
       }
       planCo = { coroutine.create(function() return stagePlan(gc0, c, r, ctx) end), sigNow, 0 }
@@ -6205,6 +6233,22 @@ local function think()
       end
     end
   end
+  -- No bomb, from any part of the bot (explore's random presses, a
+  -- lookahead's "bomb kept"), whose blast turns a floor cell solid
+  -- (SealCells: 4-4, run EA s2 replayed, a press in explore at (12,8)
+  -- and P1 then went up column 13 into the pocket it sealed).
+  if input and input.a and SealCells and next(SealCells) and not isBomb(g[r][c]) then
+    for _, cell in ipairs(blastCells(g, c, r, rangeAt(g, c, r))) do
+      if SealCells[cell[2] * KEY_W + cell[1]] then
+        input.a = nil
+        if not ride.sealLogged or frame - ride.sealLogged > 300 then
+          ride.sealLogged = frame
+          log(string.format("%6d no bomb at (%d,%d): its blast turns (%d,%d) solid", frame, c, r, cell[1], cell[2]))
+        end
+        break
+      end
+    end
+  end
   local s = string.format("%s %s @(%d,%d) px(%d,%d)", plan == "bomb" and "bomb:" .. tostring(bombWhy) or plan, dir or "-", c, r, x, y)
   if ride.origLog then
     local ox, oy = origin(); local k = {}
@@ -6489,6 +6533,7 @@ if BOT_TEST then
     heartCells = heartCells, playerTile = playerTile, structSig = structSig, steer = steer,
     log = logLines, frame = function() return frame end,
     readSoftPass = function() SoftPass = emu.read(P1 + 0xFB, WRAM, false) ~= 0 end,
+    sealScan = function() SealScan(); return SealCells end,
     KEY_W = KEY_W, MAP_W = MAP_W, MAP_H = MAP_H, MAP = MAP, ROW = ROW, P1 = P1,
   }
 end

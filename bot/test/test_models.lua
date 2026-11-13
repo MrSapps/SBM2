@@ -244,6 +244,15 @@ test("P1 +$FB walks through soft blocks (4-4: sealed at (2,5) only in the bot's 
   bot.readSoftPass()
 end)
 
+test("a floor cell with a solid CellItems tile turns solid when flamed (4-4 (13,6), C0:E505)", function()
+  setup(room(43))
+  E.poke(0x1D000 + 3 * 0x80 + 6 * 2, 0xC6)
+  local bot = loadBot()
+  local seal = bot.sealScan()
+  check(seal[3 * KEY_W + 6], "(6,3) is a seal cell")
+  check(not seal[3 * KEY_W + 7], "(7,3) is not")
+end)
+
 test("$88 is a chaser that blows up when +$BE reaches $140 (1-4, C1:87BB)", function()
   local text = room(13)
   setup(text)

@@ -1,0 +1,10 @@
+# 4-4 from its start with 3 hearts (state from run fullEA_s2, seed 2). At ~153280 P1 bombed (13,5)
+# and fled up column 13 into the (12..15,5) pocket; the flames turned (13,6)/(13,7) into $C6 (their
+# CellItems, C0:E505) and P1 was sealed in, exploring until time-up at 171124.
+start 43r102
+budget 26000
+pass STAGE 44
+fail DEATH|GAME OVER
+env SBM2_NOREWIND=1
+seed 2
+pads

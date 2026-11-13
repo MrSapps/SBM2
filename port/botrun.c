@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stddef.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include "snes.h"
@@ -291,8 +292,10 @@ static int l_readBytes(lua_State *Ls)
     return 1;
 }
 
+static unsigned live_gen;   /* bumped when the live machine is changed from outside */
 static int l_write(lua_State *Ls)
 {
+    live_gen++;
     poke(luaL_optinteger(Ls, 3, MT_CPU), luaL_checkinteger(Ls, 1), luaL_checkinteger(Ls, 2));
     return 0;
 }
@@ -301,6 +304,7 @@ static int l_write16(lua_State *Ls)
 {
     uint32_t a = luaL_checkinteger(Ls, 1);
     int v = luaL_checkinteger(Ls, 2), t = luaL_optinteger(Ls, 3, MT_CPU);
+    live_gen++;
     poke(t, a, v); poke(t, a + 1, v >> 8);
     return 0;
 }
@@ -358,6 +362,7 @@ static int l_addEventCallback(lua_State *Ls)
  * frame offset at which P1 dies ($7E8052 == $0801, C0:A675), or -1. The
  * real machine is untouched (the future input[] slots it writes are set
  * again by the live frames before they are used). */
+#define SIM_HASH_D 40
 /* One run ahead on a private copy (see l_simulate); thread-safe: the core
  * keeps no global state, and each job has its own machine, input and SRAM. */
 typedef struct SimJob {
@@ -377,6 +382,11 @@ typedef struct SimJob {
     int ph, p0, at2;  /* phase: 1 path, 2 post, 3 path2, 4 B (remote) */
     int detEnd;       /* press B for 4 frames once path2 is done */
     int detWait;      /* ... after standing this many frames in cover */
+    /* the result cache (sim_cache_*): resume from a cached end state */
+    int resume, done;
+    uint32_t f0;
+    uint8_t h0;
+    uint64_t hash[SIM_HASH_D + 1];   /* state hash at offsets 1..SIM_HASH_D (0: unknown) */
 } SimJob;
 
 /* The path controller (the same rule as bot.lua's pathPad; waypoints are
@@ -455,19 +465,53 @@ static uint16_t sim_pad(SimJob *j, const Snes *s, int i, int *at)
 static int sim_heart_death = 1;
 static int l_simHearts(lua_State *Ls) { sim_heart_death = lua_toboolean(Ls, 1); return 0; }
 
+/* The machine at a frame start, as a hash: WRAM, the CPU's registers, PPU
+ * and DMA registers and the timing/APU fields (not the pads latched: a run
+ * ahead latches its own). Equal hashes = the same machine (for the cache). */
+static uint64_t mix64(uint64_t h, const void *p, size_t n)
+{
+    const uint8_t *b = p;
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        uint64_t v;
+        memcpy(&v, b + i, 8);
+        h = (h ^ v) * 0x9E3779B97F4A7C15ull;
+        h ^= h >> 29;
+    }
+    for (; i < n; i++) h = (h ^ b[i]) * 0x100000001B3ull;
+    return h;
+}
+static uint64_t state_hash(const Snes *s)
+{
+    uint64_t h = 0xCBF29CE484222325ull;
+    h = mix64(h, s->wram, sizeof s->wram);
+    h = mix64(h, &s->cpu, offsetof(Cpu, ctx));
+    h = mix64(h, s->ppu, sizeof s->ppu);
+    h = mix64(h, &s->mdr, 1);
+    size_t a = offsetof(Snes, clock), b = offsetof(Snes, input);
+    uint8_t tmp[offsetof(Snes, input) - offsetof(Snes, clock)];
+    memcpy(tmp, (const uint8_t *)s + a, b - a);
+    memset(tmp + offsetof(Snes, joy) - a, 0, sizeof s->joy);
+    h = mix64(h, tmp, b - a);
+    return h | 1;
+}
+
 static void *sim_run(void *arg)
 {
     SimJob *j = arg;
     Snes *s = &j->s;
-    uint32_t f0 = s->frame;
-    uint8_t h0 = s->wram[0x80EF];
+    uint32_t f0 = j->resume ? j->f0 : s->frame;
+    uint8_t h0 = j->resume ? j->h0 : s->wram[0x80EF];
     j->dead = -1;
     long guard = 0;
     int at = 0;
     j->ph = 1; j->at2 = 0;
-    if (j->nwp && j->npre == 0) j->buf[0] = sim_pad(j, s, 0, &at);
-    /* this frame's pad: latched already (see vblank_cb) */
-    if (s->nmitimen & 0x01) s->joy[0] = j->buf[0];
+    if (!j->resume) {
+        memset(j->hash, 0, sizeof j->hash);
+        if (j->nwp && j->npre == 0) j->buf[0] = sim_pad(j, s, 0, &at);
+        /* this frame's pad: latched already (see vblank_cb) */
+        if (s->nmitimen & 0x01) s->joy[0] = j->buf[0];
+    }
     /* A death locks P1 ($52 & $F809 == $0801) until the lives go down
      * (200+ frames); a jump pad's throw, a carry or a warp locks it the
      * same way but lets go within ~75. So a lock is a death only if it
@@ -475,12 +519,21 @@ static void *sim_run(void *arg)
      * past the horizon to tell. On the exit cell ($80A8 == $5D72) it is
      * the warp out: -2. */
     uint32_t lockAt = 0;
+    int hpend = 0;   /* a frame offset whose hash is due (at the live callback's point) */
     while ((s->frame < f0 + (uint32_t)j->frames || lockAt) && guard++ < 400000000L) {
         uint32_t fr = s->frame;
+        /* where step_hook would run vblank_run on the live machine: the
+         * first instruction boundary after the frame start with no NMI
+         * being taken (see snes_step) */
+        if (hpend && !(s->nmi_pending && s->nmi_at <= s->cycle_start) && !s->cpu.nmi && !s->cpu.wai && !s->cpu.stp) {
+            j->hash[hpend] = state_hash(s);
+            hpend = 0;
+        }
         snes_step(s);
         if (s->frame != fr) {
             /* input[F + 1] (buf[F + 1 - f0]) is read when frame F + 1 begins */
             int i = (int)(s->frame - f0) + 1;
+            hpend = !j->resume && i - 1 <= SIM_HASH_D ? i - 1 : 0;
             if (j->nwp && i >= j->npre && i <= j->frames + 2) j->buf[i] = sim_pad(j, s, i, &at);
             if (j->det && i >= j->det && i < j->det + 4 && i <= j->frames + 2) j->buf[i] |= PAD_B;
             uint16_t lock = s->wram[0x8052] | s->wram[0x8053] << 8;
@@ -500,6 +553,7 @@ static void *sim_run(void *arg)
             } else if (!(lock & 1)) lockAt = 0;
         }
     }
+    j->h0 = h0;
     return NULL;
 }
 
@@ -540,6 +594,7 @@ static int l_simulate(lua_State *Ls)
     if (!jobs[0]) jobs[0] = calloc(1, sizeof(SimJob));
     sim_setup(jobs[0], q, np, frames);
     jobs[0]->nwp = jobs[0]->npre = jobs[0]->det = jobs[0]->npost = jobs[0]->nwp2 = jobs[0]->detEnd = jobs[0]->detWait = 0;
+    jobs[0]->resume = 0;
     free(q);
     sim_run(jobs[0]);
     return sim_ret(Ls, jobs[0]);
@@ -554,6 +609,182 @@ static int l_simulate(lua_State *Ls)
  * pre = pads }: the pads, then the simulator steers along the pixel
  * waypoints (path_pad). */
 #include <pthread.h>
+/* The results of one run, kept for the cache. */
+typedef struct SimRes { int dead, fl, en, hp, reach, ph, px, py; } SimRes;
+
+static void sim_result(const SimJob *j, SimRes *r)
+{
+    const uint8_t *w = j->s.wram;
+    r->dead = j->dead;
+    int fl = 0;
+    for (int o = 0; o < 32 * 0x80; o += 2) fl += w[0x1C000 + o] == 0;
+    r->fl = fl;
+    int en = 0, hp = 0;
+    for (int base = 0x8400; base <= 0x8F00; base += 0x100) {
+        int hi = w[base + 1] & 0xF0, ty = w[base + 0x7E];
+        if ((hi == 0x90 || hi == 0xA0) && !(w[base + 5] & 0x80) && ty < 0xC0 && ty != 0x90 && ty != 0x98) {
+            en++;
+            hp += w[base + 0x43] & 0x7F;
+        }
+    }
+    r->en = en; r->hp = hp;
+    /* (world pixels: + the scroll origin, as path_pad) */
+    r->ph = j->ph;
+    r->px = (int)(uint16_t)((w[0x8010] | w[0x8011] << 8) + (w[0x5F01] | w[0x5F02] << 8));
+    r->py = (int)(uint16_t)((w[0x8018] | w[0x8019] << 8) + (w[0x5EFB] | w[0x5EFC] << 8));
+    int px = r->px / 16, py = r->py / 16, reach = 0;
+    if (px >= 0 && px < 32 && py >= 0 && py < 32) {
+        uint8_t seen[32 * 32] = {0};
+        int q[32 * 32], qh = 0, qt = 0;
+        seen[py * 32 + px] = 1; q[qt++] = py * 32 + px;
+        while (qh < qt && reach < 64) {
+            int k = q[qh++], c = k % 32, rr = k / 32;
+            reach++;
+            static const int dc[4] = {1, -1, 0, 0}, dr[4] = {0, 0, 1, -1};
+            for (int d = 0; d < 4; d++) {
+                int nc = c + dc[d], nr = rr + dr[d];
+                if (nc < 0 || nc >= 32 || nr < 0 || nr >= 32) continue;
+                int nk = nr * 32 + nc;
+                if (seen[nk] || (w[0x1C000 + nr * 0x80 + nc * 2] & 0x80)) continue;
+                seen[nk] = 1; q[qt++] = nk;
+            }
+        }
+    }
+    r->reach = reach;
+}
+
+/* --- the run-ahead cache ---
+ * The lookahead asks for the same runs again: the same sequence from the
+ * same frame (a list run again from its start), or the rest of a sequence
+ * run a few frames ago that the machine has followed since (the bot held
+ * its pad). A run from the same frame and machine (frame, clock, no write
+ * or load since) with the same inputs gives the same results; and if the
+ * live machine now hashes the same as a cached run did d frames in, the
+ * rest of that run is this one's start: it goes on from the cached end
+ * state for the frames it lacks. Same results either way, frame for frame.
+ * SBM2_SIMCACHE=0 turns it off. */
+#define SIM_CACHE_N 48
+typedef struct SimEntry {
+    int used;
+    uint32_t F;              /* m.frame at the start */
+    uint64_t clock0;
+    unsigned gen;
+    int heart;               /* sim_heart_death then */
+    uint16_t *key; size_t nkey;   /* the inputs, see sim_key */
+    SimRes res;
+    /* a plain sequence that lived: its end state, to go on from */
+    Snes *end; uint8_t *sram;
+    uint16_t *buf; int frames;
+    uint8_t h0;
+    uint64_t hash[SIM_HASH_D + 1];
+    unsigned long stamp;
+} SimEntry;
+static SimEntry sim_cache[SIM_CACHE_N];
+static unsigned long sim_stamp;
+static int sim_cache_on = -1;
+static unsigned long sim_hits0, sim_hitsD, sim_runs;
+
+/* The inputs of a job as one word string: frames, det, path lengths, pads,
+ * waypoints, post pads, second path, detEnd/detWait. */
+static uint16_t *sim_key(const SimJob *j, size_t *n)
+{
+    int nb = j->frames + 3;
+    size_t len = 8 + (size_t)nb + 2 * j->nwp + j->npost + 2 * j->nwp2;
+    uint16_t *k = malloc(len * 2), *p = k;
+    *p++ = (uint16_t)j->frames; *p++ = (uint16_t)j->det; *p++ = (uint16_t)j->nwp; *p++ = (uint16_t)j->npre;
+    *p++ = (uint16_t)j->npost; *p++ = (uint16_t)j->nwp2; *p++ = (uint16_t)j->detEnd; *p++ = (uint16_t)j->detWait;
+    memcpy(p, j->buf, nb * 2); p += nb;
+    if (j->nwp) { memcpy(p, j->wp, 4 * j->nwp); p += 2 * j->nwp; }
+    if (j->npost) { memcpy(p, j->post, 2 * j->npost); p += j->npost; }
+    if (j->nwp2) { memcpy(p, j->wp2, 4 * j->nwp2); p += 2 * j->nwp2; }
+    *n = len;
+    return k;
+}
+
+static uint64_t live_hash; static uint32_t live_hash_frame; static unsigned live_hash_gen; static uint64_t live_hash_clock;
+
+/* Looks j up; on a hit fills res and returns 1 (done), or readies j to go
+ * on from a cached end state and returns 2. */
+static int sim_cache_find(SimJob *j, const uint16_t *key, size_t nkey, SimRes *res)
+{
+    for (int e = 0; e < SIM_CACHE_N; e++) {
+        SimEntry *c = &sim_cache[e];
+        if (!c->used || c->gen != live_gen || c->heart != sim_heart_death) continue;
+        if (c->F == m.frame && c->clock0 == m.clock && c->nkey == nkey && !memcmp(c->key, key, nkey * 2)) {
+            *res = c->res; c->stamp = ++sim_stamp; sim_hits0++;
+            return 1;
+        }
+    }
+    if (j->nwp) return 0;    /* (closed-loop paths: only the same run again) */
+    for (int e = 0; e < SIM_CACHE_N; e++) {
+        SimEntry *c = &sim_cache[e];
+        if (!c->used || !c->end || c->gen != live_gen || c->heart != sim_heart_death) continue;
+        uint32_t d = m.frame - c->F;
+        if (m.frame <= c->F || d > SIM_HASH_D || !c->hash[d]) continue;
+        int have = c->frames - (int)d;           /* frames of this run already run */
+        if (have < 1 || have > j->frames) continue;
+        /* the same pads from here on, as far as the cached run went */
+        if (memcmp(j->buf, c->buf + d, (size_t)(have + 3) * 2)) continue;
+        if (live_hash_frame != m.frame || live_hash_gen != live_gen || live_hash_clock != m.clock || !live_hash) {
+            live_hash = state_hash(&m); live_hash_frame = m.frame; live_hash_gen = live_gen; live_hash_clock = m.clock;
+        }
+        if (live_hash != c->hash[d]) continue;
+        /* go on from the cached end state */
+        Snes *s = &j->s;
+        uint16_t *buf = j->buf;
+        uint8_t *sram = j->sram;
+        memcpy(s, c->end, sizeof *s);
+        s->cpu.ctx = s;
+        if (c->sram && sram) { memcpy(sram, c->sram, m.sram_size); s->sram = sram; }
+        s->input = buf - m.frame;
+        s->input_len = m.frame + j->frames + 3;
+        j->resume = 1; j->f0 = m.frame; j->h0 = c->h0;
+        memset(j->hash, 0, sizeof j->hash);
+        for (int k = 1; k + (int)d <= SIM_HASH_D; k++) j->hash[k] = c->hash[k + d];
+        c->stamp = ++sim_stamp; sim_hitsD++;
+        return 2;
+    }
+    return 0;
+}
+
+static void sim_cache_put(const SimJob *j, uint16_t *key, size_t nkey, const SimRes *res)
+{
+    int v = 0;
+    for (int e = 0; e < SIM_CACHE_N; e++) {
+        if (!sim_cache[e].used) { v = e; break; }
+        if (sim_cache[e].stamp < sim_cache[v].stamp) v = e;
+    }
+    SimEntry *c = &sim_cache[v];
+    free(c->key);
+    c->used = 1; c->F = m.frame; c->clock0 = m.clock; c->gen = live_gen; c->heart = sim_heart_death;
+    c->key = key; c->nkey = nkey; c->res = *res; c->stamp = ++sim_stamp;
+    if (!j->nwp && j->dead == -1) {
+        if (!c->end) c->end = malloc(sizeof(Snes));
+        memcpy(c->end, &j->s, sizeof(Snes));
+        if (m.sram_size) {
+            if (!c->sram) c->sram = malloc(m.sram_size);
+            memcpy(c->sram, j->s.sram, m.sram_size);
+        }
+        c->buf = realloc(c->buf, (size_t)(j->frames + 3) * 2);
+        memcpy(c->buf, j->buf, (size_t)(j->frames + 3) * 2);
+        c->frames = j->frames;
+        c->h0 = j->h0;
+        memcpy(c->hash, j->hash, sizeof c->hash);
+    } else {
+        free(c->end); c->end = NULL;
+    }
+}
+
+static void push_res(lua_State *Ls, int out, int idx, const SimRes *r)
+{
+    lua_pushinteger(Ls, r->dead); lua_rawseti(Ls, out, idx);
+    lua_pushinteger(Ls, r->fl); lua_rawseti(Ls, out + 1, idx);
+    lua_pushinteger(Ls, r->en); lua_rawseti(Ls, out + 2, idx);
+    lua_pushfstring(Ls, "%d:%d,%d", r->ph, r->px, r->py); lua_rawseti(Ls, out + 3, idx);
+    lua_pushinteger(Ls, r->reach); lua_rawseti(Ls, out + 4, idx);
+    lua_pushinteger(Ls, r->hp); lua_rawseti(Ls, out + 5, idx);
+}
+
 static int l_simulateMany(lua_State *Ls)
 {
     luaL_checktype(Ls, 1, LUA_TTABLE);
@@ -561,21 +792,21 @@ static int l_simulateMany(lua_State *Ls)
     int stop = lua_toboolean(Ls, 3);
     int det = (int)luaL_optinteger(Ls, 4, 0);
     int n = (int)lua_rawlen(Ls, 1);
-    lua_createtable(Ls, n, 0);
-    int out = lua_gettop(Ls);
-    lua_createtable(Ls, n, 0);  /* 2nd result: floor tiles ($00) in the map at the end */
-    int outF = lua_gettop(Ls);
-    lua_createtable(Ls, n, 0);  /* 3rd: live enemies at the end (not mounts $90/$98, not gadgets $C0+) */
-    int outE = lua_gettop(Ls);
-    lua_createtable(Ls, n, 0);  /* 4th: "phase:x,y" at the end, world pixels */
-    int outP = lua_gettop(Ls);
-    lua_createtable(Ls, n, 0);  /* 5th: cells P1 can walk to at the end (tile bit 7 clear; up to 64) */
-    int outR = lua_gettop(Ls);
-    lua_createtable(Ls, n, 0);  /* 6th: the live enemies' HP (+$43 & $7F) summed, at the end */
-    int outH = lua_gettop(Ls);
+    if (sim_cache_on < 0) { const char *e = getenv("SBM2_SIMCACHE"); sim_cache_on = !(e && *e == '0'); }
+    /* results: death offsets (-1 = lives); floor tiles ($00) in the map at
+     * the end; live enemies at the end (not mounts $90/$98, not gadgets
+     * $C0+); "phase:x,y" at the end, world pixels; cells P1 can walk to at
+     * the end (tile bit 7 clear; up to 64); the live enemies' HP (+$43 &
+     * $7F) summed, at the end */
+    for (int t = 0; t < 6; t++) lua_createtable(Ls, n, 0);
+    int out = lua_gettop(Ls) - 5;
     for (int b = 0; b < n; b += SIM_THREADS) {
         int k = n - b < SIM_THREADS ? n - b : SIM_THREADS;
         pthread_t th[SIM_THREADS];
+        uint16_t *keys[SIM_THREADS];
+        size_t nkeys[SIM_THREADS];
+        SimRes res[SIM_THREADS];
+        int run[SIM_THREADS], nrun = 0;
         for (int i = 0; i < k; i++) {
             if (!jobs[i]) jobs[i] = calloc(1, sizeof(SimJob));
             lua_rawgeti(Ls, 1, b + i + 1);
@@ -622,60 +853,27 @@ static int l_simulateMany(lua_State *Ls)
             jobs[i]->det = det > 0 && det <= frames ? det : 0;
             if (jobs[i]->det) for (int f = det; f < det + 4; f++) jobs[i]->buf[f] |= PAD_B;
             free(q);
+            jobs[i]->resume = 0;
+            jobs[i]->done = 0;
+            keys[i] = NULL;
+            if (sim_cache_on) {
+                keys[i] = sim_key(jobs[i], &nkeys[i]);
+                if (sim_cache_find(jobs[i], keys[i], nkeys[i], &res[i]) == 1) jobs[i]->done = 1;
+            }
+            if (!jobs[i]->done) run[nrun++] = i;
         }
-        for (int i = 1; i < k; i++) pthread_create(&th[i], NULL, sim_run, jobs[i]);
-        sim_run(jobs[0]);
-        for (int i = 1; i < k; i++) pthread_join(th[i], NULL);
+        for (int r = 1; r < nrun; r++) pthread_create(&th[r], NULL, sim_run, jobs[run[r]]);
+        if (nrun) sim_run(jobs[run[0]]);
+        for (int r = 1; r < nrun; r++) pthread_join(th[r], NULL);
+        sim_runs += nrun;
         int live = 0;
         for (int i = 0; i < k; i++) {
-            lua_pushinteger(Ls, jobs[i]->dead);
-            lua_rawseti(Ls, out, b + i + 1);
-            int fl = 0;
-            for (int o = 0; o < 32 * 0x80; o += 2) fl += jobs[i]->s.wram[0x1C000 + o] == 0;
-            lua_pushinteger(Ls, fl);
-            lua_rawseti(Ls, outF, b + i + 1);
-            int en = 0, hp = 0;
-            const uint8_t *w = jobs[i]->s.wram;
-            for (int base = 0x8400; base <= 0x8F00; base += 0x100) {
-                int hi = w[base + 1] & 0xF0, ty = w[base + 0x7E];
-                if ((hi == 0x90 || hi == 0xA0) && !(w[base + 5] & 0x80) && ty < 0xC0 && ty != 0x90 && ty != 0x98) {
-                    en++;
-                    hp += w[base + 0x43] & 0x7F;
-                }
-            }
-            lua_pushinteger(Ls, en);
-            lua_rawseti(Ls, outE, b + i + 1);
-            lua_pushinteger(Ls, hp);
-            lua_rawseti(Ls, outH, b + i + 1);
-            /* (world pixels: + the scroll origin, as path_pad) */
-            lua_pushfstring(Ls, "%d:%d,%d", jobs[i]->ph, (int)(uint16_t)((w[0x8010] | w[0x8011] << 8) + (w[0x5F01] | w[0x5F02] << 8)),
-                (int)(uint16_t)((w[0x8018] | w[0x8019] << 8) + (w[0x5EFB] | w[0x5EFC] << 8)));
-            lua_rawseti(Ls, outP, b + i + 1);
-            {
-                int px = (uint16_t)((w[0x8010] | w[0x8011] << 8) + (w[0x5F01] | w[0x5F02] << 8)) / 16;
-                int py = (uint16_t)((w[0x8018] | w[0x8019] << 8) + (w[0x5EFB] | w[0x5EFC] << 8)) / 16;
-                int reach = 0;
-                if (px >= 0 && px < 32 && py >= 0 && py < 32) {
-                    uint8_t seen[32 * 32] = {0};
-                    int q[32 * 32], qh = 0, qt = 0;
-                    seen[py * 32 + px] = 1; q[qt++] = py * 32 + px;
-                    while (qh < qt && reach < 64) {
-                        int k = q[qh++], c = k % 32, r = k / 32;
-                        reach++;
-                        static const int dc[4] = {1, -1, 0, 0}, dr[4] = {0, 0, 1, -1};
-                        for (int d = 0; d < 4; d++) {
-                            int nc = c + dc[d], nr = r + dr[d];
-                            if (nc < 0 || nc >= 32 || nr < 0 || nr >= 32) continue;
-                            int nk = nr * 32 + nc;
-                            if (seen[nk] || (w[0x1C000 + nr * 0x80 + nc * 2] & 0x80)) continue;
-                            seen[nk] = 1; q[qt++] = nk;
-                        }
-                    }
-                }
-                lua_pushinteger(Ls, reach);
-                lua_rawseti(Ls, outR, b + i + 1);
-            }
-            if (jobs[i]->dead < 0) live = 1;
+            if (!jobs[i]->done) {
+                sim_result(jobs[i], &res[i]);
+                if (sim_cache_on) sim_cache_put(jobs[i], keys[i], nkeys[i], &res[i]);
+            } else free(keys[i]);
+            push_res(Ls, out, b + i + 1, &res[i]);
+            if (res[i].dead < 0) live = 1;
         }
         if (stop && live) break;
     }
@@ -731,6 +929,7 @@ static int l_loadSavestate(lua_State *Ls)
 {
     size_t n;
     const char *d = luaL_checklstring(Ls, 1, &n);
+    live_gen++;
     if (n >= 8 && !memcmp(d, MAGIC, 8)) {
         restore_state(d, n);
     } else if (!start_state) {
@@ -764,6 +963,22 @@ static int l_getCdlData(lua_State *Ls)
     return 1;
 }
 
+#include <time.h>
+/* emu.now(): a monotonic wall clock in seconds (profiling) */
+static int l_now(lua_State *Ls)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    lua_pushnumber(Ls, ts.tv_sec + ts.tv_nsec * 1e-9);
+    return 1;
+}
+static int l_simStats(lua_State *Ls)
+{
+    lua_pushinteger(Ls, (lua_Integer)sim_runs);
+    lua_pushinteger(Ls, (lua_Integer)sim_hits0);
+    lua_pushinteger(Ls, (lua_Integer)sim_hitsD);
+    return 3;
+}
 static int l_log(lua_State *Ls) { fprintf(stderr, "%s\n", luaL_checkstring(Ls, 1)); return 0; }
 
 static void set_enum(const char *name, const char *const *keys, int n)
@@ -781,7 +996,7 @@ static void open_emu(void)
         {"removeMemoryCallback", l_removeMemoryCallback}, {"addEventCallback", l_addEventCallback},
         {"setInput", l_setInput}, {"getState", l_getState}, {"createSavestate", l_createSavestate},
         {"loadSavestate", l_loadSavestate}, {"stop", l_stop}, {"takeScreenshot", l_takeScreenshot},
-        {"simulate", l_simulate}, {"simulateMany", l_simulateMany}, {"simHearts", l_simHearts}, {"padBits", l_padBits},
+        {"simulate", l_simulate}, {"simulateMany", l_simulateMany}, {"simStats", l_simStats}, {"now", l_now}, {"simHearts", l_simHearts}, {"padBits", l_padBits},
         {"getCdlData", l_getCdlData}, {"getCdlString", l_getCdlString}, {"log", l_log}, {NULL, NULL}};
     luaL_newlib(L, fns);
     static const char *const mt[] = {"snesMemory", "snesWorkRam", "snesPrgRom"};

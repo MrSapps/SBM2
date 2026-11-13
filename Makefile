@@ -74,8 +74,9 @@ build/tools/lua: tools/lua/main.c $(LUA_CORE:%=$(LUA_SRC)/%.c)
 	$(CC) -O2 -std=gnu99 -DLUA_USE_LINUX -I$(LUA_SRC) -o $@ $^ -lm -ldl
 
 # The bot on the port (frame-step, no Mesen): bot/drive.py --port.
-BOTRUN_SRC := port/botrun.c port/snes.c port/cpu.c port/ppu.c
-build/port/botrun: $(BOTRUN_SRC) port/snes.h port/cpu.h port/ppu.h $(LUA_CORE:%=$(LUA_SRC)/%.c)
+# (the core as one unit, port/core_unity.c: the CPU's bus calls inline)
+BOTRUN_SRC := port/botrun.c port/core_unity.c
+build/port/botrun: $(BOTRUN_SRC) port/snes.c port/cpu.c port/ppu.c port/snes.h port/cpu.h port/ppu.h $(LUA_CORE:%=$(LUA_SRC)/%.c)
 	@mkdir -p build/port
 	$(CC) -O2 -std=gnu99 -DLUA_USE_LINUX -I$(LUA_SRC) -Iport -o $@ $(BOTRUN_SRC) $(LUA_CORE:%=$(LUA_SRC)/%.c) -lm -ldl -lpthread
 

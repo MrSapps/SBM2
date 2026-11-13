@@ -7,9 +7,24 @@
 #define M8 (c->p & FM)
 #define X8 (c->p & FX)
 
+#ifdef CPU_DIRECT_BUS
+/* (core_unity.c: snes.c's bus functions are in this unit) */
+static inline uint8_t rd(Cpu *c, uint32_t a)
+{
+    if (c->read == bus_read) return bus_read_fast(c->ctx, a & 0xFFFFFF);
+    return c->read(c->ctx, a & 0xFFFFFF);
+}
+static inline void wr(Cpu *c, uint32_t a, uint8_t v)
+{
+    if (c->write == bus_write) bus_write_fast(c->ctx, a & 0xFFFFFF, v);
+    else c->write(c->ctx, a & 0xFFFFFF, v);
+}
+static inline void io(Cpu *c) { if (c->idle == bus_idle) bus_idle(c->ctx); else c->idle(c->ctx); }
+#else
 static uint8_t rd(Cpu *c, uint32_t a) { return c->read(c->ctx, a & 0xFFFFFF); }
 static void wr(Cpu *c, uint32_t a, uint8_t v) { c->write(c->ctx, a & 0xFFFFFF, v); }
 static void io(Cpu *c) { c->idle(c->ctx); }
+#endif
 
 static uint8_t fetch(Cpu *c) { return rd(c, (uint32_t)c->pb << 16 | c->pc++); }
 static uint16_t fetch16(Cpu *c) { uint16_t lo = fetch(c); return lo | fetch(c) << 8; }

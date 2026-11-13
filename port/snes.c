@@ -96,11 +96,23 @@ static void hdma_init(Snes *s);
 static void hdma_line(Snes *s);
 
 /* HDMA and refresh add their cost straight to the clock (no recursion). */
-static void tick(Snes *s, uint32_t n)
+static void tick_due(Snes *s);
+static inline void tick(Snes *s, uint32_t n)
 {
     s->cycle_start = s->clock;
     s->clock += n;
     s->hclock += n;
+    /* Nothing due (tick_due would do nothing): off line 0 (HDMA init),
+     * before the refresh, or past it and before the HDMA point, or past
+     * that too (done, or no HDMA on this line) and before the line's end. */
+    uint32_t h = s->hclock;
+    if (s->vcount && (h < REFRESH_AT || (s->refreshed && (h < HDMA_AT ||
+        (h < LINE - 4 && (s->hdma_done || s->vcount >= VBLANK_LINE || s->framestep)))))) return;
+    tick_due(s);
+}
+
+static __attribute__((noinline)) void tick_due(Snes *s)
+{
     for (;;) {
         if (s->framestep) {
             /* no HDMA */
@@ -128,7 +140,7 @@ static void tick(Snes *s, uint32_t n)
 }
 
 /* Master clocks for an access to addr. */
-static uint32_t speed(Snes *s, uint32_t addr)
+static inline uint32_t speed(Snes *s, uint32_t addr)
 {
     uint8_t b = addr >> 16;
     uint16_t a = addr;
@@ -567,6 +579,30 @@ static void bus_write(void *ctx, uint32_t addr, uint8_t v)
 }
 
 static void bus_idle(void *ctx) { Snes *s = ctx; tick(s, s->cpu_speed = 6); }
+
+/* bus_read / bus_write with the common cases (ROM, WRAM banks, low WRAM)
+ * inlined, for core_unity.c's CPU; the same steps in the same order. */
+static inline uint8_t bus_read_fast(Snes *s, uint32_t addr)
+{
+    uint8_t b = addr >> 16;
+    uint16_t a = addr;
+    if ((b & 0xFE) == 0x7E) { tick(s, s->cpu_speed = 8); return s->mdr = s->wram[addr & 0x1FFFF]; }
+    if ((b & 0x40) || (a & 0x8000)) {
+        tick(s, s->cpu_speed = (b & 0x80) && (s->memsel & 1) ? 6 : 8);
+        return s->mdr = rom_byte(s, addr);
+    }
+    if (a < 0x2000) { tick(s, s->cpu_speed = 8); return s->mdr = s->wram[a]; }
+    return bus_read(s, addr);
+}
+
+static inline void bus_write_fast(Snes *s, uint32_t addr, uint8_t v)
+{
+    uint8_t b = addr >> 16;
+    uint16_t a = addr;
+    if ((b & 0xFE) == 0x7E) { tick(s, s->cpu_speed = 8); s->mdr = v; s->wram[addr & 0x1FFFF] = v; return; }
+    if (!(b & 0x40) && a < 0x2000) { tick(s, s->cpu_speed = 8); s->mdr = v; s->wram[a] = v; return; }
+    bus_write(s, addr, v);
+}
 
 uint8_t snes_peek(void *ctx, uint32_t addr)
 {

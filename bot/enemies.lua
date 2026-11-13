@@ -19,10 +19,11 @@ return function(env)
   local FIRST, LAST = 0x8400, 0x8F00
   local SAFE_TYPES = { [0x30] = true, [0x31] = true, [0x16] = true, [0x24] = true, [0x25] = true,
     [0x26] = true, [0x27] = true, [0x28] = true }  -- C5:D850: never kill on contact
-  -- Types that use the chaser once +$D0 bit 7 is set (and $89 always).
+  -- Types that use the chaser once +$D0 bit 7 is set (and $89, $88 always:
+  -- C1:87BB sets +$D0 bits 6-7 on its first move).
   -- ($8C, 1-x: C1:844F sets +$D0 bits 6-7 on its first frame and then
   -- runs ChaseUpdate. Not in stages with magnets, see E.read.)
-  local CHASERS = { [0x82] = true, [0x85] = true, [0x89] = true, [0x8A] = true, [0x8C] = true, [0x91] = true,
+  local CHASERS = { [0x82] = true, [0x85] = true, [0x88] = true, [0x89] = true, [0x8A] = true, [0x8C] = true, [0x91] = true,
     [0x93] = true, [0x97] = true }
   local DIRS = { { 0, -1 }, { 0, 1 }, { -1, 0 }, { 1, 0 } }  -- $0400 & 3: up, down, left, right
 
@@ -80,7 +81,7 @@ return function(env)
           e.killable = not e.gadget and typ ~= 0xDD and (hp & 0x7F) ~= 0x7F and (f4 & 0x40) == 0 and not e.mount
             and (r16(base + 0x68) & 1) == 0
           e.immune = (hp & 0x7F) == 0x7F
-          e.chaser = CHASERS[typ] and ((rd8(base + 0xD0) & 0x80) ~= 0 or typ == 0x89)
+          e.chaser = CHASERS[typ] and ((rd8(base + 0xD0) & 0x80) ~= 0 or typ == 0x89 or typ == 0x88)
           -- (the "magnet caught P1" in 1-3 was the $8C's own pull: see
           -- PullLine in bot.lua; it is a chaser in every stage)
           -- $8A/$97: x-ray chasers by the light switch $7E5AAC ($8A even, $97 odd).

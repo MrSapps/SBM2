@@ -230,6 +230,36 @@ local function readGrid(text)
   return g
 end
 
+test("P1 +$FB walks through soft blocks (4-4: sealed at (2,5) only in the bot's map)", function()
+  -- P1 at (2,3) behind a soft block at (3,3); the room goes on to the right
+  local wall = "C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6"
+  setup(room(43, { [2] = wall, [3] = "C6 C6 . C2 . . . . . . . . . . C6", [4] = wall }))
+  local bot, g = loadBot()
+  bot.readSoftPass()
+  check(not bot.regionOf(g, 2, 3)[3 * KEY_W + 5], "no pass: (5,3) out of reach")
+  E.poke(0x80FB, 1)
+  bot.readSoftPass()
+  check(bot.regionOf(g, 2, 3)[3 * KEY_W + 5], "with +$FB: (5,3) in reach through the soft block")
+  E.poke(0x80FB, 0)
+  bot.readSoftPass()
+end)
+
+test("$88 is a chaser that blows up when +$BE reaches $140 (1-4, C1:87BB)", function()
+  local text = room(13)
+  setup(text)
+  enemy(0x8400, 0x88, 8, 3)
+  E.poke16(0x8400 + 0xBE, 0x140 - 10)
+  local bot, g = loadBot()
+  local f = firstWindow(bot.blastWindows(g), 8, 3)
+  check(f and f <= 12, "a blast at the $88 within 10 frames or so, got " .. tostring(f))
+  local f2 = firstWindow(bot.blastWindows(g), 11, 3)
+  check(f2 and f2 <= 12, "range 3 in world 1 reaches (11,3), got " .. tostring(f2))
+  local En = enemyModule(text)
+  enemy(0x8400, 0x88, 8, 3)
+  local list = En.read(readGrid(text))
+  check(#list == 1 and list[1].chaser, "read as a chaser")
+end)
+
 test("$B2 shots fly straight at 2 px/f and end at a wall (3-3)", function()
   local text = room(32)
   local En = enemyModule(text)

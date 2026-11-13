@@ -1,0 +1,11 @@
+# 4-4 from its start with 4 hearts (state from run fullDA_s1, seed 1). Escaping its own remote bomb
+# at (2,10) P1 went up column 2 into the (2,5) dead end; soft blocks then sat at (2,6) and (2,7)
+# and the heart-spending stall breaker found nothing ("1 tries ... none"): wedged 20000 frames,
+# time-up at 187856.
+start 43r101
+budget 24000
+pass STAGE 44
+fail DEATH|GAME OVER
+env SBM2_NOREWIND=1
+seed 1
+pads

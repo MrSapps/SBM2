@@ -1,0 +1,10 @@
+# 2-2 from its start (state from run fullDA_s1, seed 1). The planner bombed the left side's
+# regrowing soft blocks for 15700 frames and never went past column 13 to the last $86 behind
+# (12,5)/(14,5): time-up at 62601. (Seed 0 took 11500 frames here too.)
+start 21r100
+budget 17000
+pass STAGE 22
+fail DEATH|GAME OVER
+env SBM2_NOREWIND=1
+seed 1
+pads

@@ -293,6 +293,11 @@ local function walkable(g, c, r)
   if badCell[r * KEY_W + c] then return false end
   -- $4B/$63 traps cost a heart or a life (world 5).
   if t == 0x4B or t == 0x63 then return false end
+  -- P1 +$FB (item kind 12) walks through soft blocks (probe: 4-4, run DA
+  -- s1, up column 2 through (2,7)/(2,6) and back; +$FB = 0 stops it at
+  -- (2,7)). Without this the bot saw itself sealed in at (2,5) and stood
+  -- there until time-up. (SoftPass: set each frame in think.)
+  if SoftPass and SOFT[t] then return true end
   return EMPTY[t] == true or (t >= 0x04 and t < 0x80 and not isBomb(t))
 end
 
@@ -482,7 +487,8 @@ local function readBombs(g)
   end
   -- Enemies that blow themselves up (docs/enemies.md), as bombs about to go
   -- off (in the list only: they are not obstacles). Range 3 before world 4,
-  -- else 9 (C1:8074). $89: every 448 frames (+$BE to $1C0) where it stands.
+  -- else 9 (C1:8074). $89: every 448 frames (+$BE to $1C0) where it stands;
+  -- $88 every 320 (+$BE to $140).
   -- $8B (C1:836E, 3-6): rests while +$4E counts down from $500, then walks
   -- (+$C0 bit 15) to the cell at +$4C and blows up there.
   local ox, oy = origin()
@@ -491,8 +497,10 @@ local function readBombs(g)
     if ((r16(base) & 0xF000) == 0x9000 or (r16(base) & 0xF000) == 0xA000) and (r16(base + 4) & 0x8000) == 0 then
       local typ = r16(base + 0x7E) & 0xFF
       local ec, er = (r16(base + P_X) + ox) // 16, (r16(base + P_Y) + oy) // 16
-      if typ == 0x89 and r16(base + 0xBE) >= 0x1C0 - 120 then
-        list[#list + 1] = { ec, er, math.max(1, 0x1C0 - r16(base + 0xBE)), far }
+      -- ($88, C1:87BB: the same blast (C1:8890) when +$BE reaches $140)
+      local due = typ == 0x89 and 0x1C0 or typ == 0x88 and 0x140 or nil
+      if due and r16(base + 0xBE) >= due - 120 then
+        list[#list + 1] = { ec, er, math.max(1, due - r16(base + 0xBE)), far }
       elseif typ == 0x8B and (r16(base + 0xC0) & 0x8000) ~= 0 and r16(base + 0x4E) <= 1 then
         local tk = r16(base + 0x4C)
         local tc, tr = (tk & 0x7F) // 2, tk >> 7
@@ -1488,6 +1496,7 @@ STOPEARLY = os.getenv("SBM2_STOPEARLY") == "1"
 -- the same stage state, and the same choices lost the same way 50 times)
 math.randomseed(SEED + FRAME0 * 7919)
 local function think()
+  SoftPass = emu.read(P1 + 0xFB, WRAM, false) ~= 0
   input = {}
   -- Locked ($52 bit 0): dying, on the exit, warping, a boss's freeze, ...
   -- Only a death is a death: C0:A675 sets $52 = $0801 (docs/enemies.md).
@@ -2422,7 +2431,7 @@ local function think()
   if relax and not ride.relaxLogged then
     ride.relaxLogged = true
     log(string.format("%6d no progress for 3000 frames: lane ends by enemies are rides again (board search decides)", frame))
-  elseif not relax then ride.relaxLogged = nil end
+  elseif not relax then ride.relaxLogged, ride.enemyFirstLogged = nil, nil end
   if not relax then
   -- (and lane ends a walker or chaser reaches within 250 frames, last
   -- frame's estimate: a ride and a wait for the way back)
@@ -4186,6 +4195,15 @@ local function think()
     -- 5-5, run AF s0, one push from the last panel, P1 bombed every soft
     -- block in reach (they grow back) and the planner never ran; time-up)
     local forcedPlan = frame - (ride.lastStall or -1e9) < 3000 and frame - (ride.planForced or -1e9) > 1200
+    -- (and with no progress for 3000 frames and every enemy out of reach:
+    -- seek's soft blocks, growing back, kept it from ever running; 2-2, run
+    -- DA s1, one plan in 10000 frames, time-up)
+    if not forcedPlan and ride.relax and #walkers > 0 and frame - (ride.planForced or -1e9) > 1200 then
+      local reachNow = regionOf(g, c, r)
+      local any = false
+      for _, e in ipairs(walkers) do if reachNow[e[2] * KEY_W + e[1]] then any = true; break end end
+      forcedPlan = not any
+    end
     if not planSteps and not planCo and settled and (frame - lastObjFrame > 240 or forcedPlan) and frame >= pushNext then
       ride.forcedPlan = forcedPlan and frame - lastObjFrame <= 240
       if ride.forcedPlan then ride.planForced = frame; log(string.format("%6d stalled: stage planner run now", frame)) end
@@ -4199,6 +4217,23 @@ local function think()
       for rr = 0, MAP_H - 1 do local row = {}; for cc = 0, MAP_W - 1 do row[cc] = g[rr][cc] end; gc0[rr] = row end
       local pTodo, pDone, sGone, wk = panelTodo, panelDone, softGone, walkers
       local panelsOnly = ride.forcedPlan and next(panelTodo) ~= nil
+      -- No progress for 3000 frames, blocks that grow back, and every
+      -- enemy left out of reach: the enemies are the goal, not more soft
+      -- blocks (2-2, run DA s1: the last $86 behind the regrowing (12,5)
+      -- and (14,5); the left side's blocks were bombed for 15000 frames,
+      -- never past column 13, time-up)
+      local enemyFirst = ride.relax and next(sGone) ~= nil and not anyWalkerIn and #wk > 0
+      if ride.relax and os.getenv("SBM2_PLANDBG") then
+        local ws = {}
+        for _, e in ipairs(wk) do ws[#ws + 1] = string.format("(%d,%d)%s", e[1], e[2], reachNow[e[2] * KEY_W + e[1]] and "r" or "") end
+        local ng = 0
+        for _ in pairs(sGone) do ng = ng + 1 end
+        log(string.format("%6d dbg plan run: walkers %s; softGone %d; enemyFirst %s", frame, table.concat(ws, " "), ng, tostring(enemyFirst)))
+      end
+      if enemyFirst and not ride.enemyFirstLogged then
+        ride.enemyFirstLogged = true
+        log(string.format("%6d no progress, blocks grow back, enemies out of reach: planning for the enemies", frame))
+      end
       local ctx = {
         objGoal = function(cc, rr, grid)
           local k = rr * KEY_W + cc
@@ -4211,6 +4246,7 @@ local function think()
             for _, d in ipairs(DIRS) do if pTodo[(rr + d[2]) * KEY_W + cc + d[1]] then return true end end
             return false
           end
+          if enemyFirst then return false end
           for _, d in ipairs(DIRS) do
             local nk = (rr + d[2]) * KEY_W + cc + d[1]
             local n = grid[rr + d[2]] and grid[rr + d[2]][cc + d[1]]
@@ -5791,6 +5827,7 @@ local function think()
       -- answer as below; botrun's cache gives the batch run its result)
       if #list > 1 then
         local res, _, _, _, rch = emu.simulateMany({ list[1] }, H, true, ride.laDet or 0)
+        ride.firstT = res[1]
         if res[1] and res[1] < 0 and (not rch or (rch[1] or 99) >= 4) then return list[1], -1 end
       end
       while from <= #list and calls < 3 do
@@ -5812,7 +5849,7 @@ local function think()
         if done == 0 then break end
         from = from + done
       end
-      if tight then return tight, -1 end
+      if tight then return tight, -1, true end
       return best, bestT
     end
     -- closed-loop path candidates: { path = {x1, y1, ...}, pre = pads };
@@ -5861,6 +5898,7 @@ local function think()
     local la = ride.la or {}
     ride.la = la
     if ride.LADBG == nil then ride.LADBG = os.getenv("SBM2_LADEBUG") == "1" end
+    if ride.TIGHTDBG == nil then ride.TIGHTDBG = os.getenv("SBM2_TIGHTDBG") == "1" end
     if ride.LADBG then
       ride.simq = ride.simq or {}
       local sq = ride.simq[frame]
@@ -6071,7 +6109,8 @@ local function think()
       for i = 1, K do pre[i] = myPad end
       -- the bot's move, then any continuation
       local list = conts(pre, myDir, H)
-      local cd, t = firstLive(list, H)
+      local cd, t, tightOnly = firstLive(list, H)
+      if ride.TIGHTDBG and cd ~= list[1] then log(string.format("%6d dbg la own %s dies at +%s; t=%d tight=%s", frame, key, tostring(ride.firstT), t, tostring(tightOnly))) end
       if ride.LADBG and t >= 0 then
         local d1, sx, sy, sf, lk, a8, ex = emu.simulate(pre, t + 1)
         log(string.format("%6d la probe dies %d px(%d,%d) lock %04X a8 %04X exit %04X", frame, d1, sx, sy, lk, a8, ex))
@@ -6369,6 +6408,22 @@ local function onFrame()
     end
   end
   local t0, w0 = os.clock(), WALL.now()
+  if WATCHCOL == nil then WATCHCOL = tonumber(os.getenv("SBM2_WATCHCOL") or "") or false; WATCHPREV = {} end
+  if WATCHCOL then
+    -- (debug: tile changes in one column, and the enemies then)
+    for rr = 0, 15 do
+      local t = emu.read(MAP + rr * ROW + WATCHCOL * 2, WRAM, false)
+      if WATCHPREV[rr] and WATCHPREV[rr] ~= t then
+        local es = {}
+        for base = ENEMY_FIRST, ENEMY_LAST, 0x100 do
+          if (r16(base) & 0xF000) == 0x9000 then es[#es + 1] = string.format("%02X(%d,%d)", r16(base + 0x7E) & 0xFF, r16(base + P_X), r16(base + P_Y)) end
+        end
+        log(string.format("%6d dbg col %d row %d: %02X -> %02X; P1 px(%d,%d); %s", frame, WATCHCOL, rr, WATCHPREV[rr], t,
+          r16(P1 + P_X), r16(P1 + P_Y), table.concat(es, " ")))
+      end
+      WATCHPREV[rr] = t
+    end
+  end
   local ok, err = pcall(think)
   WALL.think = WALL.think + WALL.now() - w0
   if ambushStart then
@@ -6433,6 +6488,7 @@ if BOT_TEST then
     blastCells = blastCells, blastWindows = blastWindows, bombEffect = bombEffect, panels = panels,
     heartCells = heartCells, playerTile = playerTile, structSig = structSig, steer = steer,
     log = logLines, frame = function() return frame end,
+    readSoftPass = function() SoftPass = emu.read(P1 + 0xFB, WRAM, false) ~= 0 end,
     KEY_W = KEY_W, MAP_W = MAP_W, MAP_H = MAP_H, MAP = MAP, ROW = ROW, P1 = P1,
   }
 end

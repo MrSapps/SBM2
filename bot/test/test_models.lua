@@ -90,13 +90,17 @@ end)
 
 -- Bomb table ---------------------------------------------------------------
 
-test("enemy bombs (flags bit 3) are due any moment (4-7's $A8)", function()
+-- (only within 2 cells of P1: "due any moment" everywhere froze P1 in 1-7)
+test("enemy bombs (flags bit 3) near P1 are due any moment (4-7's $A8)", function()
   setup(room(46))
-  bomb(0, 8, 3, 72, 0x88, 2)
+  bomb(0, 4, 3, 72, 0x88, 2)   -- 2 cells from P1 at (2,3)
+  bomb(1, 10, 3, 72, 0x88, 2)  -- 8 cells away
   local bot, g = loadBot()
   local w = bot.blastWindows(g)
-  local f = firstWindow(w, 8, 3)
-  check(f and f <= 8, "window at the enemy bomb starts within 8 frames, got " .. tostring(f))
+  local f = firstWindow(w, 4, 3)
+  check(f and f <= 8, "window at the near enemy bomb starts within 8 frames, got " .. tostring(f))
+  local far = firstWindow(w, 10, 3)
+  check(far and far > 8, "the far enemy bomb keeps its fuse, got " .. tostring(far))
 end)
 
 test("a magnet pulls a ticking bomb on its line to the cell next to it (1-3)", function()

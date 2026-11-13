@@ -122,23 +122,44 @@ local logLines, seenUnknown = {}, {}
 local function log(s) logLines[#logLines + 1] = s end
 -- SBM2_SIMPROF=1: simulateMany calls and time by calling line, logged every
 -- 100 calls (to find what makes a stage slow).
+-- (a global: the main chunk is at Lua's 200 locals) wall clock, and the
+-- wall time spent in think (SIMPROF)
+WALL = { now = emu.now or os.clock, think = 0 }
+WALL.t0 = WALL.now()
+-- SBM2_LUAPROF=1: sample the Lua line every 1000 VM instructions (by
+-- function:line), logged with simprof (to find slow planner code)
+if os.getenv("SBM2_LUAPROF") then
+  WALL.lp = {}
+  debug.sethook(function()
+    local i = debug.getinfo(2, "Sl")
+    if i then local k = i.short_src:match("[^/]*$") .. ":" .. (i.currentline or 0); WALL.lp[k] = (WALL.lp[k] or 0) + 1 end
+  end, "", 1000)
+end
 if os.getenv("SBM2_SIMPROF") and emu.simulateMany then
   local orig, prof, n = emu.simulateMany, {}, 0
   emu.simulateMany = function(list, H, ...)
     local ln = debug.getinfo(2, "l").currentline
-    local t0 = os.clock()
-    local a, b, c2, d, e = orig(list, H, ...)
+    local t0 = WALL.now()
+    local a, b, c2, d, e, f = orig(list, H, ...)
     local p = prof[ln] or { 0, 0, 0 }
-    p[1], p[2], p[3] = p[1] + 1, p[2] + os.clock() - t0, p[3] + #list
+    p[1], p[2], p[3] = p[1] + 1, p[2] + WALL.now() - t0, p[3] + #list
     prof[ln] = p
     n = n + 1
     if n % 100 == 0 then
       local t = {}
       for k, v in pairs(prof) do t[#t + 1] = string.format("L%d x%d %.1fs n%d", k, v[1], v[2], v[3]) end
       table.sort(t)
-      log("simprof " .. table.concat(t, " | "))
+      if WALL.lp then
+        local t = {}
+        for k2, v in pairs(WALL.lp) do t[#t + 1] = { k2, v } end
+        table.sort(t, function(u, v) return u[2] > v[2] end)
+        local o = {}
+        for q = 1, math.min(25, #t) do o[#o + 1] = t[q][1] .. "=" .. t[q][2] end
+        log("luaprof " .. table.concat(o, " "))
+      end
+      log(string.format("simprof total %.1fs onFrame %.1fs think %.1fs wall | ", WALL.now() - WALL.t0, WALL.frame or 0, WALL.think) .. table.concat(t, " | "))
     end
-    return a, b, c2, d, e
+    return a, b, c2, d, e, f
   end
 end
 
@@ -4923,16 +4944,25 @@ local function think()
       for f = 1, 640 do still[f] = 0 end
       list[#list + 1] = still; desc[#desc + 1] = "still"
     end
-    local res, _, live, ps, rch = emu.simulateMany(list, 640, false, 0)
+    local res, flo, live, ps, rch = emu.simulateMany(list, 640, false, 0)
+    -- (a bomb-and-back that lives and opens floor: the last resort below)
+    local opener
     if hb then
-      local base = live[#list]
+      local base, fbase = live[#list], flo[#list]
       for i = nBomb0 + 1, #list - 1 do
         if res[i] == -1 and base and live[i] and live[i] < base then return list[i], desc[i] .. " (kills)" end
+        if not opener and res[i] == -1 and fbase and flo[i] and flo[i] > fbase then opener = i end
       end
+      if opener then opener = { list[opener], desc[opener] .. " (opens the landing)" } end
       for i = #list, nBomb0 + 1, -1 do list[i], desc[i], res[i] = nil, nil, nil end
     end
     local ex, ey = ln[1] * 16 + 8, ln[2] * 16 + 8
     local hx, hy = bc * 16 + 8, br * 16 + 8
+    if os.getenv("SBM2_BOARDDBG") then
+      local o = {}
+      for i = 1, #list do o[#o + 1] = string.format("[%s: %s %s r%s]", desc[i], tostring(res[i]), tostring(ps[i]), tostring(rch and rch[i])) end
+      log(string.format("%6d boardSim (%d,%d)->(%d,%d): %s", frame, bc, br, ln[1], ln[2], table.concat(o, " ")))
+    end
     -- (one that leaves by the open gate first: the sim ends it as -2, not
     -- -1; 4-2, run PA s0, "ride to (17,4); board search: none" with the
     -- gate (17,3) open above that lane end, until the memory reset)
@@ -4946,6 +4976,11 @@ local function think()
       if res[i] == -1 and fx and math.abs(fx - ex) + math.abs(fy - ey) < math.abs(fx - hx) + math.abs(fy - hy)
           and (not rch or (rch[i] or 99) >= 4) then return list[i], desc[i] end
     end
+    -- None lands with room: a landing walled in by soft blocks is bombed
+    -- open from the ride, which then goes back (4-2_last_panel: (16,9) to
+    -- (12,9), a one-cell pocket between (12,8) and (12,10); every ride
+    -- lived and was turned down, 5000 frames, then a bomb took P1).
+    if opener then return opener[1], opener[2] end
     return nil, "none"
   end
   -- A step into a waiting $DC from its lane end is a ride too (4-4, run HY
@@ -5751,6 +5786,13 @@ local function think()
     local function firstLive(list, H)
       local best, bestT, tight = nil, -2, nil
       local from, calls = 1, 0
+      -- the first one alone first: when it lives with room that is the
+      -- answer, and the other three of its batch need not run (the same
+      -- answer as below; botrun's cache gives the batch run its result)
+      if #list > 1 then
+        local res, _, _, _, rch = emu.simulateMany({ list[1] }, H, true, ride.laDet or 0)
+        if res[1] and res[1] < 0 and (not rch or (rch[1] or 99) >= 4) then return list[1], -1 end
+      end
       while from <= #list and calls < 3 do
         calls = calls + 1
         local sub = list
@@ -6326,8 +6368,9 @@ local function onFrame()
       ambush, ambushHold = nil, frame + 30
     end
   end
-  local t0 = os.clock()
+  local t0, w0 = os.clock(), WALL.now()
   local ok, err = pcall(think)
+  WALL.think = WALL.think + WALL.now() - w0
   if ambushStart then
     ambushStart = false
     if not ambush then
@@ -6340,6 +6383,10 @@ local function onFrame()
   if not ok then log("error: " .. tostring(err)) end
   local dt = os.clock() - t0
   if dt > 0.05 then log(string.format("%6d slow think %.3fs", frame, dt)) end
+  if emu.simStats and frame % 2000 == 0 then
+    local r, h0, hd = emu.simStats()
+    log(string.format("%6d sim stats: %d runs, %d same-run hits, %d resumed", frame, r, h0, hd))
+  end
   if logMapNext then logMapNext = false; logMap() end
   if shots[frame] then
     writeFile(string.format("%s/f%06d.png", OUT, frame), emu.takeScreenshot())
@@ -6367,7 +6414,9 @@ local function onFrame()
 end
 
 emu.addEventCallback(function()
+  local w0 = WALL.now()
   local ok, err = pcall(onFrame)
+  WALL.frame = (WALL.frame or 0) + WALL.now() - w0
   if not ok then
     log(string.format("%6d fatal: %s", frame, tostring(err)))
     flushLog()

@@ -4987,6 +4987,21 @@ local function think()
         list[#list + 1] = seq; desc[#desc + 1] = string.format("%s %d then %s", bd, T, d2)
       end
     end
+    -- A long lane: stay aboard at the far end (no contact while riding;
+    -- the platform waits 64 frames there) and step off at a chosen frame,
+    -- not as it arrives (4-5, run FA s0: the (9,6)->(20,6) lane takes ~380
+    -- frames, an $89 chaser bobs in column 21 by the landing and P1
+    -- stepping straight off walked into it; turned down for 11000 frames,
+    -- time-up. A bomb can't be set from the platform.)
+    if ln[3] >= 6 then
+      local est = ln[3] * 16 / 0.406
+      for _, k in ipairs({ 0.86, 0.9, 0.94, 0.98, 1.02 }) do
+        local T = math.floor(est * k)
+        local seq = {}
+        for f = 1, 640 do seq[f] = (f <= 60 or f > T) and pb or 0 end
+        list[#list + 1] = seq; desc[#desc + 1] = string.format("%s, aboard to %d, then %s", bd, T, bd)
+      end
+    end
     -- Bomb-and-back: ride over, bomb on landing, ride back on the same
     -- platform (4-4: the $89 lives in the column-2 pocket, reached only by
     -- the (5,10)->(2,10) ride, and sits by the landing; runs XB/YB s0-s1
@@ -5011,6 +5026,11 @@ local function think()
     local res, flo, live, ps, rch = emu.simulateMany(list, 640, false, 0)
     -- (a bomb-and-back that lives and opens floor: the last resort below)
     local opener
+    if os.getenv("SBM2_BOARDDBG") then
+      local o = {}
+      for i = nBomb0 + 1, #list do o[#o + 1] = string.format("[%s: %s live %s flo %s]", desc[i], tostring(res[i]), tostring(live[i]), tostring(flo[i])) end
+      log(string.format("%6d boardSim bombs (has bomb %s): %s", frame, tostring(hb), table.concat(o, " ")))
+    end
     if hb then
       local base, fbase = live[#list], flo[#list]
       for i = nBomb0 + 1, #list - 1 do

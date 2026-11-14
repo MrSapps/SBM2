@@ -1,0 +1,9 @@
+# 4-5 from its start with 1 heart (state from run fullFA_s0, seed 0, commit ba99b0e). Panels on the
+# right, the 2-hp $93s on the left; P1 rode the (9,6)-(20,6) lane back and forth, refused the ride
+# for 11000 frames ("board search: none") and timed out at 182569 (27750 frames in the stage).
+start 44r103
+budget 28000
+pass STAGE 45
+fail DEATH|GAME OVER
+env SBM2_NOREWIND=1
+pads

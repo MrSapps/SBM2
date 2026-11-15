@@ -34,7 +34,7 @@ Line-oriented. `#` starts a comment. Header lines are `key value...`. Object lin
 worldview 1
 stage 23                  # $1A: world<<4 | stage-1 (hex)
 frame 12345               # bot frame (logic frames since run start)
-time 9000                 # stage time left, frames
+time 150                  # stage time left, seconds ($5E10*60 + $5E12)
 origin 16 8               # $5F01 $5EFB (repro only)
 size 17 14                # cols rows of the playfield (cells outside are '#')
 light off                 # light switch $5AAC: on | off | none

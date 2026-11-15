@@ -87,8 +87,13 @@ build/planner/test: $(PLANNER_SRC) planner/*.hpp planner/test/*.cpp
 	@mkdir -p build/planner
 	$(CXX) -O2 -g -std=c++17 -Wall -Wextra -Iplanner -o $@ $(PLANNER_SRC) planner/test/*.cpp
 
-planner-test: build/planner/test
+planner-test: build/planner/test build/planner/plan
 	build/planner/test planner/test/worlds
+
+# plan <snapshot> [goal]: the goal layer's plan for one world view.
+build/planner/plan: $(PLANNER_SRC) planner/*.hpp planner/tools/plan_main.cpp
+	@mkdir -p build/planner
+	$(CXX) -O2 -g -std=c++17 -Wall -Wextra -Iplanner -o $@ $(PLANNER_SRC) planner/tools/plan_main.cpp
 
 # Planner / steering unit tests on text maps (bot/test/maps), no emulator.
 bot-test: build/tools/lua

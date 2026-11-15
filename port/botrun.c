@@ -406,6 +406,9 @@ typedef struct SimJob {
                        * frame callback would run, per frame offset */
     int tcap;
     int16_t *etrace;  /* AG_ESLOTS per frame offset: each enemy slot's cell (agent_enemy_cell) */
+    int16_t *btrace;  /* 2 * nboss per frame offset: boss x, y (agent_boss_xy) */
+    uint16_t bossBase[32];
+    int nboss;
 } SimJob;
 
 /* The path controller (the same rule as bot.lua's pathPad; waypoints are
@@ -544,6 +547,7 @@ static void *sim_run(void *arg)
         j->trace[0] = (int16_t)((s->wram[0x8010] | s->wram[0x8011] << 8) + (s->wram[0x5F01] | s->wram[0x5F02] << 8));
         j->trace[1] = (int16_t)((s->wram[0x8018] | s->wram[0x8019] << 8) + (s->wram[0x5EFB] | s->wram[0x5EFC] << 8));
         if (j->etrace) agent_enemy_cells(s->wram, j->etrace);
+        if (j->btrace) for (int b = 0; b < j->nboss; b++) agent_boss_xy(s->wram, j->bossBase[b], &j->btrace[2 * b], &j->btrace[2 * b + 1]);
     }
     while ((s->frame < f0 + (uint32_t)j->frames || lockAt) && guard++ < 400000000L) {
         uint32_t fr = s->frame;
@@ -556,6 +560,11 @@ static void *sim_run(void *arg)
                 j->trace[2 * tpend] = (int16_t)((s->wram[0x8010] | s->wram[0x8011] << 8) + (s->wram[0x5F01] | s->wram[0x5F02] << 8));
                 j->trace[2 * tpend + 1] = (int16_t)((s->wram[0x8018] | s->wram[0x8019] << 8) + (s->wram[0x5EFB] | s->wram[0x5EFC] << 8));
                 if (j->etrace) agent_enemy_cells(s->wram, j->etrace + AG_ESLOTS * tpend);
+                if (j->btrace)
+                    for (int b = 0; b < j->nboss; b++) {
+                        int16_t *q = j->btrace + 2 * (j->nboss * tpend + b);
+                        agent_boss_xy(s->wram, j->bossBase[b], &q[0], &q[1]);
+                    }
             }
             hpend = tpend = 0;
         }
@@ -932,7 +941,8 @@ static double ag_now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &
 #endif
 static const char *ag_cache;
 static unsigned long ag_hits;
-typedef struct { uint32_t magic; int32_t dead, en, hp, px, py, ph, cap; uint64_t mapSig; } AgCacheHdr;
+typedef struct { uint32_t magic; int32_t dead, en, hp, px, py, ph, cap; uint64_t mapSig; int32_t bossHp, nbt; } AgCacheHdr;
+#define AG_MAGIC 0x41474332
 static uint64_t ag_key(uint64_t live, const AgSimReq *r, int cap)
 {
     uint64_t h = mix64(live, SBM2_CORE_ID, strlen(SBM2_CORE_ID));
@@ -943,6 +953,8 @@ static uint64_t ag_key(uint64_t live, const AgSimReq *r, int cap)
     if (r->npost) h = mix64(h, r->post, (size_t)r->npost * 2);
     if (r->npath2) h = mix64(h, r->path2, (size_t)r->npath2 * 4);
     if (r->wantEnemies) h = mix64(h, "etrace", 6);
+    if (r->nboss) { h = mix64(h, "boss", 4); h = mix64(h, r->bossBase, (size_t)r->nboss * 2); }
+    if (r->wantBoss) h = mix64(h, "btrace", 6);
     return h;
 }
 static void ag_cache_path(char *b, size_t n, uint64_t k) { snprintf(b, n, "%s/%02x/%016llx", ag_cache, (unsigned)(k >> 56), (unsigned long long)k); }
@@ -953,16 +965,19 @@ static int ag_cache_get(uint64_t k, AgSimRes *o)
     FILE *f = fopen(p, "rb");
     if (!f) return 0;
     AgCacheHdr h;
-    int ok = fread(&h, sizeof h, 1, f) == 1 && h.magic == 0x41474331 && h.cap == o->cap &&
+    int ok = fread(&h, sizeof h, 1, f) == 1 && h.magic == AG_MAGIC && h.cap == o->cap &&
              fread(o->pads, 2, (size_t)h.cap, f) == (size_t)h.cap && fread(o->trace, 2, (size_t)h.cap * 2, f) == (size_t)h.cap * 2 &&
-             (!o->etrace || fread(o->etrace, 2, (size_t)h.cap * AG_ESLOTS, f) == (size_t)h.cap * AG_ESLOTS);
+             (!o->etrace || fread(o->etrace, 2, (size_t)h.cap * AG_ESLOTS, f) == (size_t)h.cap * AG_ESLOTS) &&
+             (!o->btrace || fread(o->btrace, 2, (size_t)h.nbt, f) == (size_t)h.nbt);
     fclose(f);
     if (!ok) return 0;
     o->dead = h.dead; o->enemies = h.en; o->hp = h.hp; o->px = h.px; o->py = h.py; o->ph = h.ph; o->mapSig = h.mapSig;
+    o->bossHp = h.bossHp;
     return 1;
 }
-static void ag_cache_put(uint64_t k, const AgSimRes *o)
+static void ag_cache_put(uint64_t k, const AgSimRes *o, int nboss)
 {
+    int nbt = o->btrace ? 2 * nboss * o->cap : 0;
     char p[1024], t[1100];
     ag_cache_path(p, sizeof p, k);
     snprintf(t, sizeof t, "%s/%02x", ag_cache, (unsigned)(k >> 56));
@@ -971,10 +986,11 @@ static void ag_cache_put(uint64_t k, const AgSimRes *o)
     snprintf(t, sizeof t, "%s.%d.tmp", p, (int)getpid());
     FILE *f = fopen(t, "wb");
     if (!f) return;
-    AgCacheHdr h = {0x41474331, o->dead, o->enemies, o->hp, o->px, o->py, o->ph, o->cap, o->mapSig};
+    AgCacheHdr h = {AG_MAGIC, o->dead, o->enemies, o->hp, o->px, o->py, o->ph, o->cap, o->mapSig, o->bossHp, nbt};
     int ok = fwrite(&h, sizeof h, 1, f) == 1 && fwrite(o->pads, 2, (size_t)o->cap, f) == (size_t)o->cap &&
              fwrite(o->trace, 2, (size_t)o->cap * 2, f) == (size_t)o->cap * 2 &&
-             (!o->etrace || fwrite(o->etrace, 2, (size_t)o->cap * AG_ESLOTS, f) == (size_t)o->cap * AG_ESLOTS);
+             (!o->etrace || fwrite(o->etrace, 2, (size_t)o->cap * AG_ESLOTS, f) == (size_t)o->cap * AG_ESLOTS) &&
+             (!o->btrace || fwrite(o->btrace, 2, (size_t)nbt, f) == (size_t)nbt);
     if (fclose(f) == 0 && ok) rename(t, p);
     else remove(t);
 }
@@ -999,7 +1015,7 @@ static void ag_sim(void *ctx, const AgSimReq *rq, AgSimRes *rs, int n)
             mq[nm] = rq[i]; ms[nm] = rs[i]; mi[nm++] = i;
         }
         if (nm) ag_run(mq, ms, nm);
-        for (int k = 0; k < nm; k++) { rs[mi[k]] = ms[k]; ag_cache_put(keys[mi[k]], &rs[mi[k]]); }
+        for (int k = 0; k < nm; k++) { rs[mi[k]] = ms[k]; ag_cache_put(keys[mi[k]], &rs[mi[k]], rq[mi[k]].nboss); }
         free(mq); free(ms); free(mi); free(keys);
     }
 done:
@@ -1044,6 +1060,9 @@ static void ag_run(const AgSimReq *rq, AgSimRes *rs, int n)
             j->trace = rs[b + i].trace;
             j->tcap = rs[b + i].cap;
             j->etrace = r->wantEnemies ? rs[b + i].etrace : NULL;
+            j->nboss = r->nboss < 32 ? r->nboss : 32;
+            for (int q = 0; q < j->nboss; q++) j->bossBase[q] = r->bossBase[q];
+            j->btrace = r->wantBoss && j->nboss ? rs[b + i].btrace : NULL;
         }
         for (int i = 1; i < k; i++) pthread_create(&th[i], NULL, sim_run, jobs[i]);
         sim_run(jobs[0]);
@@ -1055,7 +1074,10 @@ static void ag_run(const AgSimReq *rq, AgSimRes *rs, int n)
             SimRes r;
             j->trace = NULL;
             j->etrace = NULL;
+            j->btrace = NULL;
             sim_result(j, &r);
+            o->bossHp = 0;
+            for (int q = 0; q < j->nboss; q++) o->bossHp += j->s.wram[j->bossBase[q] + 0x20] | j->s.wram[j->bossBase[q] + 0x21] << 8;
             o->dead = r.dead; o->enemies = r.en; o->hp = r.hp;
             o->px = r.px; o->py = r.py; o->ph = r.ph;
             o->mapSig = agent_map_sig(j->s.wram);
@@ -1065,8 +1087,9 @@ static void ag_run(const AgSimReq *rq, AgSimRes *rs, int n)
     }
 }
 
-/* emu.agent(frame [, goal]): the pad for this frame (set as the live pad),
- * and the agent's new log lines */
+/* emu.agent(frame [, goal [, extra]]): the pad for this frame (set as the
+ * live pad), and the agent's new log lines. extra: world-view lines the
+ * script adds (boss lines from bot/boss.lua's exec hooks). */
 static int l_agent(lua_State *Ls)
 {
     int fr = (int)luaL_checkinteger(Ls, 1);
@@ -1075,7 +1098,7 @@ static int l_agent(lua_State *Ls)
         if (!agent) return luaL_error(Ls, "agent: bad goal");
     }
     double t0 = ag_now();
-    uint16_t p = sbm2_agent_frame(agent, m.wram, fr, ag_sim, NULL);
+    uint16_t p = sbm2_agent_frame(agent, m.wram, fr, luaL_optstring(Ls, 3, NULL), ag_sim, NULL);
     ag_tagent += ag_now() - t0; ag_calls++;
     live_pad = p;
     lua_pushinteger(Ls, p);

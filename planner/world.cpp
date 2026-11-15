@@ -136,6 +136,25 @@ bool parseWorld(const std::string& text, World& w, std::string* err) {
       w.items.push_back({std::atoi(arg(1).c_str()), std::atoi(arg(2).c_str()), arg(3) == "heart"});
     } else if (k == "magnet") {
       w.magnets.push_back({std::atoi(arg(1).c_str()), std::atoi(arg(2).c_str()), ch(f, "dir", 'u')});
+    } else if (k == "boss") {
+      BossObj b;
+      b.base = hex(f, "base");
+      b.state = uint32_t(hex(f, "state"));
+      b.x = dec(f, "x"); b.y = dec(f, "y"); b.hp = dec(f, "hp"); b.hurt = dec(f, "hurt");
+      auto box = f["box"];
+      if (!box.empty()) {
+        b.hasBox = std::sscanf(box.c_str(), "%d,%d,%d,%d", &b.box[0], &b.box[1], &b.box[2], &b.box[3]) == 4;
+      }
+      // sense=dx,dy;dx,dy...
+      std::string sp = f["sense"];
+      for (size_t i = 0; i < sp.size();) {
+        size_t j = sp.find(';', i);
+        if (j == std::string::npos) j = sp.size();
+        int dx, dy;
+        if (std::sscanf(sp.substr(i, j - i).c_str(), "%d,%d", &dx, &dy) == 2) b.sense.push_back({dx, dy});
+        i = j + 1;
+      }
+      w.bosses.push_back(b);
     } else if (k == "map" || k == "under" || k == "raw" || k == "rawunder") {
       if (w.cols <= 0 || w.rows <= 0) return fail(k + " before size");
       layer = k;

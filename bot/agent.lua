@@ -22,6 +22,29 @@ local VERBOSE = (os.getenv("SBM2_AGVERBOSE") or "0") ~= "0"
 local STOPAT = tonumber(os.getenv("SBM2_STOPAT") or "", 16)
 
 local function r16(a) return emu.read16(a, WRAM, false) end
+local function s16(v) return v >= 0x8000 and v - 0x10000 or v end
+local function origin() return s16(r16(0x5F01)), s16(r16(0x5EFB)) end
+-- Bosses: their contact boxes and flame sense points come from exec hooks
+-- on the boss code (bot/boss.lua), not WRAM; they go to the agent as
+-- world-view boss lines (docs/worldview.md).
+local Boss = dofile(BOT_DIR .. "/boss.lua")({ r16 = r16, rd8 = function(a) return emu.read(a, WRAM, false) end,
+  origin = origin, MAP_W = 32, MAP_H = 32, KEY_W = 64 })
+local function bossLines()
+  local t = {}
+  local ox, oy = origin()
+  for _, b in ipairs(Boss.read()) do
+    local s = string.format("boss base=%04X state=%06X x=%d y=%d hp=%d hurt=%d", b.base, b.state, b.x + ox, b.y + oy,
+      r16(b.base + 0x20), b.hurt and 1 or 0)
+    if b.box then s = s .. string.format(" box=%d,%d,%d,%d", b.box[1], b.box[2], b.box[3], b.box[4]) end
+    if b.sense and #b.sense > 0 then
+      local p = {}
+      for i, q in ipairs(b.sense) do p[i] = q[1] .. "," .. q[2] end
+      s = s .. " sense=" .. table.concat(p, ";")
+    end
+    t[#t + 1] = s
+  end
+  return table.concat(t, "\n")
+end
 local lines = {}
 local function log(s) lines[#lines + 1] = s end
 local function writeFile(path, data)
@@ -88,7 +111,8 @@ emu.addEventCallback(function()
   else
     deadAt = nil
   end
-  local ok, pad, text = pcall(emu.agent, frame, GOAL)
+  Boss.frame()
+  local ok, pad, text = pcall(emu.agent, frame, GOAL, bossLines())
   if not ok then
     log(string.format("%6d agent error: %s", frame, tostring(pad)))
     return finish(4, "error")

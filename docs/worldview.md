@@ -46,6 +46,7 @@ panel 3 12 todo           # todo | done; mode 0 ($69) or 1 (toggle)
 switch 5 5                # light switch cell
 item 4 5 heart            # visible item: heart | item
 magnet 7 3 dir=r          # magnet cell and pull direction
+boss base=1000 state=CC9ABA x=136 y=64 hp=4 hurt=0 box=-32,32,-32,56 sense=-8,8;8,8
 map
 #################
 #..%%.P.b*..#...#
@@ -108,6 +109,18 @@ tested against them: `f4` = `+4` (bit 15 dormant, 6 hidden, 5 flashing), `c0` = 
 `wait` = `+$4E`, `target` = `+$4C` as a cell, `step` = `+$4A` as `u d l r -`, `vx`/`vy`
 signed px/frame. The `type` is the raw `+$7E` byte. A per-type behaviour table
 (`docs/enemies.md` section 5) belongs to the planner's models, not here.
+
+## Bosses
+
+Boss-engine objects (`$1000`-`$17FF`, `docs/enemies.md` 8) that ran the boss code last
+frame. `x`/`y` are world pixels (`+$11`/`+$14` plus the origin; a blink frame's `+$100`
+on x is taken off), `hp` = `+$20`, `hurt` = `+$26` running (no flame sensed), `state` =
+the 24-bit routine at `+$00`. `box` is the contact box the object last tested P1 against
+(`BossContactP1` CC:A538; P1 is caught when `x+dx0 < p1x <= x+dx1-1`, the same for y);
+`sense` lists the `(dx,dy)` points it looks for flames under (`BossFlameSense` CC:A266):
+a flame there hurts it, a bomb there is eaten. Neither is in WRAM: the host's exec hooks
+on those routines see them (bot/boss.lua), so a boss line is written only where the host
+has them.
 
 ## Versioning
 

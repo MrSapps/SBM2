@@ -22,6 +22,8 @@ typedef struct {
     int detEnd;                          /* press B once path2 is done */
     int frames;
     int wantEnemies;                     /* fill AgSimRes.etrace */
+    const uint16_t *bossBase; int nboss; /* boss objects: their HP summed at the end */
+    int wantBoss;                        /* fill AgSimRes.btrace */
 } AgSimReq;
 
 typedef struct {
@@ -32,6 +34,8 @@ typedef struct {
     uint16_t *pads;    /* cap entries: the pad of each frame (host fills) */
     int16_t *trace;    /* 2 * cap: P1 world x, y at the start of each frame */
     int16_t *etrace;   /* AG_ESLOTS * cap (wantEnemies, else NULL): agent_enemy_cells per frame */
+    int bossHp;        /* sum of +$20 over bossBase at the end */
+    int16_t *btrace;   /* 2 * nboss * cap (wantBoss, else NULL): each boss's world x, y per frame */
     int cap;
 } AgSimRes;
 
@@ -39,8 +43,9 @@ typedef void (*AgSimFn)(void *ctx, const AgSimReq *reqs, AgSimRes *res, int n);
 
 void *sbm2_agent_new(const char *goal);
 void sbm2_agent_free(void *agent);
-/* The pad for this frame. */
-uint16_t sbm2_agent_frame(void *agent, const uint8_t *wram, int frame, AgSimFn sim, void *ctx);
+/* The pad for this frame. extra: world-view lines the host adds (boss lines
+ * from its exec hooks, docs/worldview.md), or NULL. */
+uint16_t sbm2_agent_frame(void *agent, const uint8_t *wram, int frame, const char *extra, AgSimFn sim, void *ctx);
 /* Log lines since the last call ("" if none); valid until the next call. */
 const char *sbm2_agent_log(void *agent);
 /* The world view of the last decision (docs/worldview.md), for repros. */
@@ -88,6 +93,15 @@ static inline void agent_enemy_cells(const uint8_t *w, int16_t *out)
             if (x >= 0 && y >= 0 && x < 16 * 64 && y < 16 * 64) out[i] = (int16_t)((x >> 4) | (y >> 4) << 8);
         }
     }
+}
+
+/* A boss object's world position (+$11/+$14 + origin; a blink's +$100 off). */
+static inline void agent_boss_xy(const uint8_t *w, int base, int16_t *x, int16_t *y)
+{
+    int ox = (int16_t)(w[0x5F01] | w[0x5F02] << 8), oy = (int16_t)(w[0x5EFB] | w[0x5EFC] << 8);
+    int bx = (int16_t)(w[base + 0x11] | w[base + 0x12] << 8), by = (int16_t)(w[base + 0x14] | w[base + 0x15] << 8);
+    if (bx >= 0x100) bx -= 0x100;
+    *x = (int16_t)(bx + ox); *y = (int16_t)(by + oy);
 }
 
 #ifdef __cplusplus

@@ -18,7 +18,8 @@ const int kDirs[4][2] = {{0, -1}, {0, 1}, {-1, 0}, {1, 0}};
 
 int baseCost(TaskKind k) {
   switch (k) {
-    case TaskKind::KillEnemy: return kEnemyCost;
+    case TaskKind::KillEnemy:
+    case TaskKind::HurtBoss: return kEnemyCost;
     case TaskKind::BombSoft:
     case TaskKind::TogglePanel:
     case TaskKind::LightCrystal: return kBombCost;
@@ -122,10 +123,18 @@ class Search {
     return true;
   }
 
+  // (no gate: a boss stage, ended by the boss's end; one hit counts here,
+  // the agent asks again after it)
   bool exited(const Node& n) const {
-    for (size_t i = 0; i < tasks_.size(); i++)
+    bool boss = false;
+    for (size_t i = 0; i < tasks_.size(); i++) {
       if (tasks_[i].kind == TaskKind::EnterGate) return n.done[i];
-    return false;
+      if (tasks_[i].kind == TaskKind::HurtBoss) {
+        if (!n.done[i]) return false;
+        boss = true;
+      }
+    }
+    return boss;
   }
 
   // Everything but the exit (entering the gate ends the stage, so it's last).
@@ -151,6 +160,7 @@ class Search {
       case TaskKind::PickItem: return goal_.items;
       case TaskKind::EnterGate: return goal_.exit;
       case TaskKind::KillEnemy: return goal_.enemies || (goal_.exit && t.blocksExit && !gateOpen(n));
+      case TaskKind::HurtBoss: return goal_.exit || goal_.enemies;
       case TaskKind::TogglePanel: return goal_.exit && !gateOpen(n);
       case TaskKind::LightCrystal:
         // KillAllType8F: crystals are the only way to kill $8F enemies.
@@ -380,6 +390,7 @@ const char* taskName(TaskKind k) {
     case TaskKind::LightCrystal: return "crystal";
     case TaskKind::PickItem: return "item";
     case TaskKind::EnterGate: return "gate";
+    case TaskKind::HurtBoss: return "boss";
   }
   return "?";
 }
@@ -461,6 +472,16 @@ std::vector<Task> worldTasks(const World& w) {
   for (size_t i = 0; i < w.panels.size(); i++)
     if (!w.panels[i].done) out.push_back({TaskKind::TogglePanel, w.panels[i].c, w.panels[i].r, int(i), false, false});
   for (size_t i = 0; i < w.items.size(); i++) out.push_back({TaskKind::PickItem, w.items[i].c, w.items[i].r, int(i), false, false});
+  // A boss part that senses flames: hurt it where its sense points are.
+  for (size_t i = 0; i < w.bosses.size(); i++) {
+    const BossObj& b = w.bosses[i];
+    if (b.sense.empty() || b.hp <= 0) continue;
+    int sx = 0, sy = 0;
+    for (auto& p : b.sense) sx += p.first, sy += p.second;
+    int c = std::clamp((b.x + sx / int(b.sense.size())) / 16, 0, w.cols - 1);
+    int r = std::clamp((b.y + sy / int(b.sense.size())) / 16, 0, w.rows - 1);
+    out.push_back({TaskKind::HurtBoss, c, r, int(i), false, true});
+  }
   if (w.hasGate) out.push_back({TaskKind::EnterGate, w.gateC, w.gateR, -1, false, false});
   return out;
 }

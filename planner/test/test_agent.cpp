@@ -166,8 +166,57 @@ TEST("agent: 1-2 start: boxed in by a barrel, the plan bombs through it") {
   CHECK(a.what().find("bomb at") != std::string::npos);
 }
 
+// 1-8: the boss body (11 HP, 5x5 sense points) swings along row 4. The
+// plan's step is to hurt it; the bomb never goes on a sense cell (eaten)
+// and its blast reaches one when it goes off.
+TEST("agent: 1-8 boss: bomb next to the sense points, not on them") {
+  World w;
+  std::string err;
+  CHECK(loadWorld(sbm2test::worldsDir + "/1-8_boss.txt", w, &err));
+  CHECK_EQ(w.bosses.size(), size_t(3));
+  Plan p = plan(w, Goal{true, false, false, false});
+  CHECK(p.ok && !p.steps.empty() && p.tasks[size_t(p.steps[0].task)].kind == TaskKind::HurtBoss);
+  const BossObj* body = nullptr;
+  for (const BossObj& b : w.bosses)
+    if (!b.sense.empty()) body = &b;
+  CHECK(body != nullptr);
+  if (!body) return;
+  FakeOracle o;
+  o.answer = [&](const SimReq& q, SimOut& r) {
+    r.dead = -1;
+    r.bossHp = q.wantBoss ? 11 : 10;  // (every option hits: the agent's pick is checked below)
+    if (q.wantBoss) {  // the body stays put
+      r.btrace.assign(size_t(2 * q.bossBase.size() * size_t(q.frames + 1)), 0);
+      for (size_t f = 0; f <= size_t(q.frames); f++)
+        for (size_t b = 0; b < q.bossBase.size(); b++) {
+          r.btrace[2 * (f * q.bossBase.size() + b)] = int16_t(w.bosses[b].x);
+          r.btrace[2 * (f * q.bossBase.size() + b) + 1] = int16_t(w.bosses[b].y);
+        }
+    }
+  };
+  Agent a = agentFor("exit");
+  Live l = liveOf(w);
+  l.bossHp = 11;
+  a.decide(w, l, o);
+  CHECK(a.committed());
+  CHECK(a.what().find("boss") != std::string::npos);
+  const SimReq& r = o.seen.back();
+  CHECK(!r.post.empty());
+  int bc = r.path[r.path.size() - 2] / 16, br = r.path.back() / 16;
+  bool onSense = false, reaches = false;
+  auto blast = blastCells(w, bc, br, w.p.fire, w.p.pierce);
+  for (auto& sp : body->sense) {
+    int c = (body->x + sp.first) >> 4, rr = (body->y + sp.second) >> 4;
+    if (c == bc && rr == br) onSense = true;
+    for (const Cell& x : blast)
+      if (x.c == c && x.r == rr) reaches = true;
+  }
+  CHECK(!onSense);
+  CHECK(reaches);
+}
+
 TEST("snapshot text: encode(parse(file)) gives the file back (worldview.lua's format)") {
-  for (const char* name : {"1-1_bomb.txt", "1-2_barrel.txt", "s3_36_m300.txt"}) {
+  for (const char* name : {"1-1_bomb.txt", "1-2_barrel.txt", "s3_36_m300.txt", "1-8_boss.txt"}) {
     std::string path = sbm2test::worldsDir + "/" + name, err;
     std::ifstream f(path);
     std::stringstream ss;

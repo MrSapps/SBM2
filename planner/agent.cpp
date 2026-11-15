@@ -173,7 +173,7 @@ void Agent::watchLag(const uint8_t* w) {
   lastTick_ = t;
 }
 
-uint16_t Agent::frame(const uint8_t* wram, int frame, Oracle& o) {
+uint16_t Agent::frame(const uint8_t* wram, int frame, Oracle& o, const char* extra) {
   frame_ = frame;
   watchLag(wram);
   Live live = readLive(wram);
@@ -194,6 +194,11 @@ uint16_t Agent::frame(const uint8_t* wram, int frame, Oracle& o) {
     pads_.clear();
   }
   World w = captureWorld(wram, frame);
+  if (extra && *extra) {  // (boss lines: parsed by the one snapshot parser)
+    World x;
+    if (parseWorld("worldview 1\nsize 1 1\n" + std::string(extra) + "\nmap\n.\n", x)) w.bosses = x.bosses;
+  }
+  for (const BossObj& b : w.bosses) live.bossHp += b.hp;
   decide(w, live, o);
   return committed() ? pads_[size_t(at_++)] : 0;
 }
@@ -207,7 +212,10 @@ bool Agent::tryCands(std::vector<Cand>& cs, const Live& live, Oracle& o, size_t 
   if (cs.size() > maxRuns) cs.resize(maxRuns);
   for (size_t b = 0, bn = 0; b < cs.size(); b += batchSize(bn++)) {
     std::vector<SimReq> reqs;
-    for (size_t i = b; i < std::min(cs.size(), b + batchSize(bn)); i++) reqs.push_back(cs[i].req);
+    for (size_t i = b; i < std::min(cs.size(), b + batchSize(bn)); i++) {
+      reqs.push_back(cs[i].req);
+      reqs.back().bossBase = bossBase_;
+    }
     std::vector<SimOut> out;
     o.run(reqs, out);
     sims_ += int(reqs.size());
@@ -220,8 +228,8 @@ bool Agent::tryCands(std::vector<Cand>& cs, const Live& live, Oracle& o, size_t 
         int aAt = -1;
         for (size_t f = 0; f < r.pads.size() && aAt < 0; f++)
           if (r.pads[f] & kPadA) aAt = int(f);
-        std::snprintf(vb, sizeof vb, "  opt %zu %s -> dead %d en %d/%d hp %d/%d at (%d,%d)%s A@%d cells %zu", b + i + 1,
-                      c.what.c_str(), r.dead, r.enemies, live.enemies, r.hp, live.hp, r.px, r.py,
+        std::snprintf(vb, sizeof vb, "  opt %zu %s -> dead %d en %d/%d hp %d/%d boss %d/%d at (%d,%d)%s A@%d cells %zu", b + i + 1,
+                      c.what.c_str(), r.dead, r.enemies, live.enemies, r.hp, live.hp, r.bossHp, live.bossHp, r.px, r.py,
                       r.mapSig != live.mapSig ? " map" : "", aAt, c.req.path.size() / 2 - 1);
         log(vb);
         if (!r.etrace.empty()) {
@@ -248,6 +256,7 @@ bool Agent::tryCands(std::vector<Cand>& cs, const Live& live, Oracle& o, size_t 
         case Cand::Live: ok = r.dead == -1 && at; break;
         case Cand::Change: ok = r.dead == -1 && at && r.mapSig != live.mapSig; break;
         case Cand::Kill: ok = r.dead == -1 && at && (r.enemies < live.enemies || r.hp < live.hp); break;
+        case Cand::BossHit: ok = r.dead == -1 && at && r.bossHp < live.bossHp; break;
       }
       if (ok) {
         pads_ = r.pads;
@@ -339,6 +348,8 @@ void Agent::decide(const World& w, const Live& live, Oracle& o) {
   decisions_++;
   frame_ = w.frame;
   worldText_ = encodeWorld(w);
+  bossBase_.clear();
+  for (const BossObj& b : w.bosses) bossBase_.push_back(uint16_t(b.base));
   pads_.clear();
   at_ = 0;
   Grid g(w);
@@ -450,6 +461,98 @@ void Agent::decide(const World& w, const Live& live, Oracle& o) {
     case TaskKind::LightCrystal:
       bombCands(sc, sr, Cand::Change, tname, 6, cs);
       break;
+    case TaskKind::HurtBoss: {
+      // The boss's path: one run with P1 holding still, every boss object's
+      // position per frame. A bomb at x (reached in d cells after `wait`)
+      // hurts it if, while the flames are out, one of its sense points is
+      // in the blast, and none was on x from the drop to the blast (a bomb
+      // on a sense point is eaten, BossEatBomb CC:A2C4). Earliest first;
+      // the oracle checks each (a boss reacts to P1, e.g. 1-8's strikes).
+      const int kMaxD = 12, kMaxWait = 120;
+      const int fuse = int(kNewFuse * eScale_ + 0.5), flame = int(kFlameFrames * eScale_ + 0.5);
+      SimReq probe;
+      probe.path = g.waypoints({g.idx(g.pc, g.pr)});
+      probe.frames = int(fpc_ * kMaxD) + kMaxWait + 4 + fuse + flame;
+      probe.bossBase = bossBase_;
+      probe.wantBoss = true;
+      std::vector<SimOut> pout;
+      o.run({probe}, pout);
+      sims_++;
+      if (pout.empty() || pout[0].btrace.empty()) return survive(w, live, o, tname.c_str());
+      const std::vector<int16_t>& bt = pout[0].btrace;
+      const int nb = int(bossBase_.size()), pf = int(bt.size()) / (2 * nb);
+      // Sense cells at frame f (cell index per point), from the last frame's points.
+      auto senseCells = [&](int f, std::vector<int>& out) {
+        out.clear();
+        for (int b = 0; b < nb; b++) {
+          const BossObj& bo = w.bosses[size_t(b)];
+          int x = bt[size_t(2 * (nb * f + b))], y = bt[size_t(2 * (nb * f + b) + 1)];
+          for (auto& sp : bo.sense) {
+            int c = (x + sp.first) >> 4, r = (y + sp.second) >> 4;
+            if (w.inside(c, r)) out.push_back(g.idx(c, r));
+          }
+        }
+      };
+      std::vector<std::vector<int>> sense(static_cast<size_t>(pf));
+      for (int f = 0; f < pf; f++) senseCells(f, sense[size_t(f)]);
+      // (the contact boxes, for covers: a cell any box reaches in [t0, t1])
+      auto boxed = [&](int c, int r, int t0, int t1) {
+        int px = c * 16 + 8, py = r * 16 + 8;
+        for (int f = std::max(0, t0); f <= std::min(pf - 1, t1); f += 2)
+          for (int b = 0; b < nb; b++) {
+            const BossObj& bo = w.bosses[size_t(b)];
+            if (!bo.hasBox) continue;
+            int x = bt[size_t(2 * (nb * f + b))], y = bt[size_t(2 * (nb * f + b) + 1)];
+            if (x + bo.box[0] - 8 < px && px <= x + bo.box[1] + 7 && y + bo.box[2] - 8 < py && py <= y + bo.box[3] + 7)
+              return 1.0;
+          }
+        return 0.0;
+      };
+      std::vector<uint8_t> inBlast(size_t(w.cols * w.rows));
+      struct X { int boom, d, k, wait; };
+      std::vector<X> xs;
+      for (int k = 0; k < w.cols * w.rows; k++) {
+        int d = dist[size_t(k)];
+        if (d < 0 || d > kMaxD) continue;
+        int xc = k % w.cols, xr = k / w.cols;
+        if (!canPlaceOn(w.at(xc, xr)) || w.bombAt(xc, xr)) continue;
+        std::fill(inBlast.begin(), inBlast.end(), 0);
+        for (const Cell& x : blastCells(w, xc, xr, w.p.fire, w.p.pierce)) inBlast[size_t(g.idx(x.c, x.r))] = 1;
+        for (int wait = 0; wait <= kMaxWait; wait += 8) {
+          int tp = wait + int(fpc_ * d + 0.5) + 2, boom = tp + fuse;
+          if (boom + flame / 2 >= pf) break;
+          bool eaten = false;
+          for (int f = tp; f <= boom && !eaten; f++)
+            for (int q : sense[size_t(f)]) eaten |= q == k;
+          if (eaten) continue;
+          int hits = 0;
+          for (int f = boom; f < boom + flame * 3 / 4; f++) {
+            bool h = false;
+            for (int q : sense[size_t(f)]) h |= inBlast[size_t(q)] != 0;
+            hits += h;
+          }
+          if (hits >= 6) {
+            xs.push_back({boom, d, k, wait});
+            break;
+          }
+        }
+      }
+      std::sort(xs.begin(), xs.end(), [](const X& a, const X& b) { return a.boom != b.boom ? a.boom < b.boom : a.d < b.d; });
+      if (xs.size() > 8) xs.resize(8);
+      Risk risk = boxed;
+      for (const X& x : xs) {
+        size_t n0 = cs.size();
+        bombCands(x.k % w.cols, x.k / w.cols, Cand::BossHit, tname + " (wait " + std::to_string(x.wait) + ")", 1, cs, risk,
+                  x.wait);
+        for (size_t j = n0; j < cs.size(); j++) {
+          cs[j].req.pre.assign(size_t(x.wait), 0);
+          cs[j].commit += x.wait;
+          cs[j].req.frames += x.wait;
+        }
+      }
+      if (cs.empty() || !tryCands(cs, live, o, 8)) survive(w, live, o, tname.c_str());
+      return;
+    }
     case TaskKind::KillEnemy: {
       // The enemy model (enemies.hpp) gives the odds a bomb at x kills:
       // reached in d cells after standing `wait` frames, it goes off at
@@ -593,7 +696,8 @@ struct COracle : sbm2::Oracle {
     for (size_t i = 0; i < n; i++) {
       const sbm2::SimReq& r = reqs[i];
       rq[i] = {r.pre.data(), int(r.pre.size()), r.path.data(), int(r.path.size() / 2), r.post.data(),
-               int(r.post.size()), r.path2.data(), int(r.path2.size() / 2), r.detEnd, r.frames, r.wantEnemies};
+               int(r.post.size()), r.path2.data(), int(r.path2.size() / 2), r.detEnd, r.frames, r.wantEnemies,
+               r.bossBase.data(), int(r.bossBase.size()), r.wantBoss};
       out[i].pads.assign(size_t(r.frames + 1), 0);
       out[i].trace.assign(size_t(2 * (r.frames + 1)), 0);
       if (r.wantEnemies) out[i].etrace.assign(size_t(AG_ESLOTS * (r.frames + 1)), -1);
@@ -601,6 +705,8 @@ struct COracle : sbm2::Oracle {
       rs[i].pads = out[i].pads.data();
       rs[i].trace = out[i].trace.data();
       rs[i].etrace = r.wantEnemies ? out[i].etrace.data() : nullptr;
+      if (r.wantBoss) out[i].btrace.assign(size_t(2 * r.bossBase.size() * size_t(r.frames + 1)), 0);
+      rs[i].btrace = r.wantBoss && !r.bossBase.empty() ? out[i].btrace.data() : nullptr;
       rs[i].cap = r.frames + 1;
     }
     fn(ctx, rq.data(), rs.data(), int(n));
@@ -612,6 +718,7 @@ struct COracle : sbm2::Oracle {
       out[i].py = rs[i].py;
       out[i].ph = rs[i].ph;
       out[i].mapSig = rs[i].mapSig;
+      out[i].bossHp = rs[i].bossHp;
     }
   }
 };
@@ -627,11 +734,11 @@ void* sbm2_agent_new(const char* goal) {
   return c;
 }
 void sbm2_agent_free(void* a) { delete static_cast<CAgent*>(a); }
-uint16_t sbm2_agent_frame(void* a, const uint8_t* wram, int frame, AgSimFn sim, void* ctx) {
+uint16_t sbm2_agent_frame(void* a, const uint8_t* wram, int frame, const char* extra, AgSimFn sim, void* ctx) {
   COracle o;
   o.fn = sim;
   o.ctx = ctx;
-  return static_cast<CAgent*>(a)->agent.frame(wram, frame, o);
+  return static_cast<CAgent*>(a)->agent.frame(wram, frame, o, extra);
 }
 const char* sbm2_agent_log(void* a) {
   CAgent* c = static_cast<CAgent*>(a);

@@ -19,13 +19,13 @@
 
 namespace sbm2 {
 
-enum class TaskKind { KillEnemy, BombSoft /* or a barrel */, TogglePanel, LightCrystal, PickItem, EnterGate };
+enum class TaskKind { KillEnemy, BombSoft /* or a barrel */, TogglePanel, LightCrystal, PickItem, EnterGate, HurtBoss };
 const char* taskName(TaskKind k);
 
 struct Task {
   TaskKind kind;
   int c = 0, r = 0;   // target cell
-  int ref = -1;       // index into world.enemies / panels / items, else -1
+  int ref = -1;       // index into world.enemies / panels / items / bosses, else -1
   bool needsCrystals = false;  // $8F: immune until every crystal is lit
   bool blocksExit = false;     // KillEnemy: keeps the gate shut while alive
 };

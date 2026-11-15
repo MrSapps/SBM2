@@ -277,6 +277,24 @@ std::string encodeWorld(const World& w) {
     std::snprintf(b, sizeof b, "magnet %d %d dir=%c", m.c, m.r, m.dir);
     add(b);
   }
+  for (const BossObj& m : w.bosses) {
+    std::string s;
+    std::snprintf(b, sizeof b, "boss base=%04X state=%06X x=%d y=%d hp=%d hurt=%d", m.base, unsigned(m.state), m.x, m.y, m.hp,
+                  int(m.hurt));
+    s = b;
+    if (m.hasBox) {
+      std::snprintf(b, sizeof b, " box=%d,%d,%d,%d", m.box[0], m.box[1], m.box[2], m.box[3]);
+      s += b;
+    }
+    if (!m.sense.empty()) {
+      s += " sense=";
+      for (size_t i = 0; i < m.sense.size(); i++) {
+        std::snprintf(b, sizeof b, "%s%d,%d", i ? ";" : "", m.sense[i].first, m.sense[i].second);
+        s += b;
+      }
+    }
+    add(s);
+  }
   auto grid = [&](const char* name, const std::vector<char>& v) {
     add(name);
     for (int r = 0; r < w.rows; r++) add(std::string(v.begin() + r * w.cols, v.begin() + (r + 1) * w.cols));

@@ -32,6 +32,8 @@ struct SimReq {
   bool detEnd = false;
   int frames = 0;
   bool wantEnemies = false;  // fill SimOut::etrace
+  std::vector<uint16_t> bossBase;  // boss objects: SimOut::bossHp sums their HP
+  bool wantBoss = false;           // fill SimOut::btrace
 };
 
 struct SimOut {
@@ -43,6 +45,8 @@ struct SimOut {
   std::vector<int16_t> trace;   // x, y per frame start
   // wantEnemies: kEnemySlots per frame, each slot's cell (c | r << 8) or -1
   std::vector<int16_t> etrace;
+  int bossHp = 0;
+  std::vector<int16_t> btrace;  // wantBoss: per frame, per bossBase: world x, y
 };
 constexpr int kEnemySlots = 12;  // $8400..$8F00 (agent_api.h AG_ESLOTS)
 
@@ -59,6 +63,7 @@ struct Live {  // what the agent reads from WRAM besides the world view
   bool inStage = false, locked = false;
   int px = 0, py = 0;  // P1 world pixels
   int enemies = 0, hp = 0;
+  int bossHp = 0;  // the world's boss lines, summed
   uint64_t mapSig = 0;
 };
 Live readLive(const uint8_t* wram);
@@ -66,7 +71,8 @@ Live readLive(const uint8_t* wram);
 class Agent {
  public:
   explicit Agent(const Goal& g) : goal_(g) {}
-  uint16_t frame(const uint8_t* wram, int frame, Oracle& o);
+  // extra: world-view lines the host adds (boss lines), or null.
+  uint16_t frame(const uint8_t* wram, int frame, Oracle& o, const char* extra = nullptr);
   // Decide from a world view (tests call this directly with a fake oracle).
   void decide(const World& w, const Live& live, Oracle& o);
   std::string takeLog();
@@ -81,7 +87,7 @@ class Agent {
     std::string what;
     int commit = 0;   // frames to play
     int endC = -1, endR = -1;
-    enum Want { Live, Exit, Change, Kill } want = Live;
+    enum Want { Live, Exit, Change, Kill, BossHit } want = Live;
   };
   bool tryCands(std::vector<Cand>& cs, const Live& live, Oracle& o, size_t maxRuns);
   void survive(const World& w, const Live& live, Oracle& o, const char* why);
@@ -89,6 +95,7 @@ class Agent {
   void log(const std::string& s);
 
   Goal goal_;
+  std::vector<uint16_t> bossBase_;  // this decision's boss objects (every run reports their HP)
   std::vector<uint16_t> pads_;
   std::vector<int16_t> trace_;
   int at_ = 0, frame_ = 0, decisions_ = 0, sims_ = 0;

@@ -3,12 +3,15 @@
 #include <algorithm>
 #include <climits>
 #include <cstdio>
+#include <cstdlib>
 #include <deque>
+#include <functional>
 #include <queue>
 
 #include "agent_api.h"
 #include "blast.hpp"
 #include "capture.hpp"
+#include "enemies.hpp"
 
 namespace sbm2 {
 
@@ -133,6 +136,16 @@ Live readLive(const uint8_t* w) {
   return l;
 }
 
+void Agent::learnSpeed(const SimReq& q, const SimOut& r) {
+  if (q.post.empty() || !q.pre.empty() || q.path.size() < 6) return;
+  int cells = int(q.path.size() / 2) - 1;
+  for (size_t f = 0; f < r.pads.size(); f++)
+    if (r.pads[f] & kPadA) {
+      if (r.dead < 0 || r.dead > int(f)) fpc_ = 0.5 * fpc_ + 0.5 * double(f) / cells;
+      return;
+    }
+}
+
 void Agent::log(const std::string& s) {
   char b[32];
   std::snprintf(b, sizeof b, "%6d ", frame_);
@@ -145,8 +158,24 @@ std::string Agent::takeLog() {
   return s;
 }
 
+void Agent::watchLag(const uint8_t* w) {
+  int t = rd16(w, 0x32);
+  if (lastTick_ >= 0) {
+    int d = (t - lastTick_) & 0xFFFF;
+    if (d <= 2) {
+      lagReal_ += 1, lagLogic_ += d;
+      if (lagReal_ >= 256) {
+        if (lagLogic_ > 0) eScale_ = std::clamp(lagReal_ / lagLogic_, 1.0, 4.0);
+        lagReal_ *= 0.5, lagLogic_ *= 0.5;
+      }
+    }
+  }
+  lastTick_ = t;
+}
+
 uint16_t Agent::frame(const uint8_t* wram, int frame, Oracle& o) {
   frame_ = frame;
+  watchLag(wram);
   Live live = readLive(wram);
   if (!live.inStage || live.locked) {
     if (committed() && !live.inStage) pads_.clear();
@@ -185,6 +214,33 @@ bool Agent::tryCands(std::vector<Cand>& cs, const Live& live, Oracle& o, size_t 
     for (size_t i = 0; i < out.size(); i++) {
       const Cand& c = cs[b + i];
       const SimOut& r = out[i];
+      learnSpeed(c.req, r);
+      if (verbose) {
+        char vb[240];
+        int aAt = -1;
+        for (size_t f = 0; f < r.pads.size() && aAt < 0; f++)
+          if (r.pads[f] & kPadA) aAt = int(f);
+        std::snprintf(vb, sizeof vb, "  opt %zu %s -> dead %d en %d/%d hp %d/%d at (%d,%d)%s A@%d cells %zu", b + i + 1,
+                      c.what.c_str(), r.dead, r.enemies, live.enemies, r.hp, live.hp, r.px, r.py,
+                      r.mapSig != live.mapSig ? " map" : "", aAt, c.req.path.size() / 2 - 1);
+        log(vb);
+        if (!r.etrace.empty()) {
+          for (int sl = 0; sl < kEnemySlots; sl++) {
+            std::string t;
+            int last = -2;
+            for (size_t f = 0; f * kEnemySlots < r.etrace.size(); f++) {
+              int v = r.etrace[f * kEnemySlots + size_t(sl)];
+              if (v == last) continue;
+              last = v;
+              char tb[32];
+              if (v < 0) std::snprintf(tb, sizeof tb, " %zu:-", f);
+              else std::snprintf(tb, sizeof tb, " %zu:(%d,%d)", f, v & 0xFF, v >> 8);
+              t += tb;
+            }
+            if (t != " 0:-") log("    slot" + std::to_string(sl + 4) + t);
+          }
+        }
+      }
       bool ok = false;
       bool at = c.endC < 0 || (std::abs(r.px - (c.endC * 16 + 8)) <= 2 && std::abs(r.py - (c.endR * 16 + 8)) <= 2);
       switch (c.want) {
@@ -304,9 +360,14 @@ void Agent::decide(const World& w, const Live& live, Oracle& o) {
   std::string tname = tb;
 
   // Bomb at x, then cover: candidates for every safe cell near x.
-  auto bombCands = [&](int xc, int xr, Cand::Want want, const std::string& what, int maxY, std::vector<Cand>& out) {
+  // (risk: odds an enemy comes by a cover cell in [t0, t1], if known:
+  // risky covers go last; waitPre: frames P1 stands before it sets off)
+  using Risk = std::function<double(int, int, int, int)>;
+  auto bombCands = [&](int xc, int xr, Cand::Want want, const std::string& what, int maxY, std::vector<Cand>& out,
+                       const Risk& risk = nullptr, int waitPre = 0) {
     if (dist[size_t(g.idx(xc, xr))] < 0 || !canPlaceOn(w.at(xc, xr)) || w.bombAt(xc, xr)) return;
     auto p1 = g.pathTo(prev, g.pc, g.pr, xc, xr);
+    int tx = waitPre + int(fpc_ * double(p1.size() - 1) + 0.5) + 2;  // the press, by P1's speed
     int t1 = kWalkFPT * int(p1.size() - 1) + kSettle;
     std::vector<int> d2, prev2;
     g.bfs(xc, xr, d2, prev2);
@@ -318,19 +379,26 @@ void Agent::decide(const World& w, const Live& live, Oracle& o) {
       int yc = k % w.cols, yr = k / w.cols;
       int t2 = t1 + kWalkFPT * d2[size_t(k)] + kSettle;
       if (dm.deadly(yc, yr, t2, t1 + kNewFuse + kFlameFrames + kTail)) continue;
-      ys.push_back({d2[size_t(k)], k});
+      int key = d2[size_t(k)];
+      if (risk) {
+        // (P1 there from about tx + its walk until the commit's tail)
+        int ty = tx + int(fpc_ * d2[size_t(k)]);
+        if (risk(yc, yr, ty - 8, tx + kNewFuse + kFlameFrames + kTail) > 0.2) key += 1000;
+      }
+      ys.push_back({key, k});
     }
     std::sort(ys.begin(), ys.end());
     int n = 0;
-    for (auto& [d, k] : ys) {
+    for (auto& [key, k] : ys) {
       if (n++ >= maxY) break;
+      int d = key % 1000;
       Cand c;
       c.req.path = g.waypoints(p1);
       c.req.post = {kPadA, kPadA};
       c.req.path2 = g.waypoints(g.pathTo(prev2, xc, xr, k % w.cols, k / w.cols));
       c.req.detEnd = w.p.remote;
       int t2 = kWalkFPT * d + kSettle;
-      int wait = w.p.remote ? 30 + kFlameFrames : kNewFuse + kFlameFrames;
+      int wait = int((w.p.remote ? 30 + kFlameFrames : kNewFuse + kFlameFrames) * eScale_ + 0.5);  // (logic frames: lag stretches them)
       c.commit = t1 + 2 + t2 + wait;
       c.req.frames = c.commit + kTail;
       c.endC = k % w.cols;
@@ -383,20 +451,103 @@ void Agent::decide(const World& w, const Live& live, Oracle& o) {
       bombCands(sc, sr, Cand::Change, tname, 6, cs);
       break;
     case TaskKind::KillEnemy: {
-      // Cells whose blast covers the enemy's cell or the cell it heads for,
-      // nearest first; two covers each.
+      // The enemy model (enemies.hpp) gives the odds a bomb at x kills:
+      // reached in d cells after standing `wait` frames, it goes off at
+      // wait + fpc*d + 2 + fuse. The best few cells go to the oracle, each
+      // with covers enemies are unlikely to come by, and with a few waits:
+      // the game's random choices follow P1's moves, so another wait is
+      // another draw.
       const Enemy& e = w.enemies[size_t(task.ref)];
-      std::vector<std::pair<int, int>> xs;
+      const int kMaxD = 10, kRolls = 16;
+      const int horizon = int(fpc_ * kMaxD) + 48 + 2 + int((kNewFuse + kFlameFrames) * eScale_) + kTail + 40;
+      {
+        char eb[64];
+        std::snprintf(eb, sizeof eb, "lag: x%.2f real frames per logic frame", eScale_);
+        if (verbose) log(eb);
+      }
+      EnemyModel em(w, horizon, uint32_t(w.frame) * 2654435761u + 1, eScale_);
+      // One option: bomb at x after `wait`, the cover picked by the odds
+      // of meeting an enemy there; its odds are for that exact plan (the
+      // chasers head for P1 in that cover). score = kill odds x the odds no
+      // enemy comes by the cover.
+      struct X { double p, score; int t; Cand c; };
+      auto option = [&](int xc, int xr, int d, int wait, X& out) {
+        int tp = wait + int(fpc_ * d + 0.5) + 2;
+        int boom = tp + int(kNewFuse * eScale_ + 0.5);
+        ModelBomb mb{xc, xr, tp, boom, w.p.fire, w.p.pierce};
+        auto trackTo = [&](const Cand& c) {
+          int d2 = int(c.req.path2.size() / 2) - 1;
+          return std::vector<P1At>{{0, g.pc, g.pr}, {tp - 2, xc, xr}, {tp + int(fpc_ * d2), c.endC, c.endR}};
+        };
+        std::vector<Cand> first;
+        bombCands(xc, xr, Cand::Kill, "", 1, first);
+        if (first.empty()) return false;
+        auto runs = em.roll(&mb, trackTo(first[0]), kRolls);
+        Risk risk = [&runs](int c, int r, int t0, int t1) { return EnemyModel::nearOdds(runs, c, r, t0, t1); };
+        std::vector<Cand> pick;
+        bombCands(xc, xr, Cand::Kill, "", 1, pick, risk, wait);
+        if (pick.empty()) return false;
+        if (pick[0].endC != first[0].endC || pick[0].endR != first[0].endR) runs = em.roll(&mb, trackTo(pick[0]), kRolls);
+        int d2 = int(pick[0].req.path2.size() / 2) - 1, ty = tp + int(fpc_ * d2);
+        double p = EnemyModel::killOdds(runs);
+        double safe = 1 - EnemyModel::nearOdds(runs, pick[0].endC, pick[0].endR, ty - 8, boom + kFlameFrames + kTail);
+        out = {p, p * safe, boom, pick[0]};
+        char what[120];
+        std::snprintf(what, sizeof what, "%s (odds %.2f, cover %.2f, wait %d): bomb at (%d,%d), cover (%d,%d)", tname.c_str(), p,
+                      safe, wait, xc, xr, out.c.endC, out.c.endR);
+        out.c.what = what;
+        out.c.req.pre.assign(size_t(wait), 0);
+        out.c.commit += wait;
+        out.c.req.frames += wait;
+        return true;
+      };
+      std::vector<X> xs;
+      for (int k = 0; k < w.cols * w.rows; k++) {
+        int d = dist[size_t(k)];
+        if (d < 0 || d > kMaxD) continue;
+        int xc = k % w.cols, xr = k / w.cols;
+        if (!canPlaceOn(w.at(xc, xr)) || w.bombAt(xc, xr)) continue;
+        bool any = false;  // (an enemy that could get into range at all)
+        for (const Enemy& q : w.enemies)
+          if (EnemyModel::modelled(q) && std::abs(q.col() - xc) + std::abs(q.row() - xr) <= w.p.fire + 8) any = true;
+        if (!any) continue;
+        X best{-1, -1, 0, {}};
+        for (int wait : {0, 24, 48}) {
+          X x;
+          if (option(xc, xr, d, wait, x) && x.score - wait / 400.0 > best.score - (best.p < 0 ? 0 : (best.c.req.pre.size() / 400.0)))
+            best = x;
+        }
+        if (best.p >= 0.15 && best.score >= 0.1) xs.push_back(best);
+      }
+      std::sort(xs.begin(), xs.end(), [](const X& a, const X& b) { return a.score - a.t / 1000.0 > b.score - b.t / 1000.0; });
+      if (xs.size() > 4) xs.resize(4);
+      std::vector<std::vector<Cand>> per;
+      for (const X& x : xs) per.push_back({x.c});
+      if (verbose)  // (the real enemy tracks, to hold the model to)
+        for (auto& pc : per)
+          for (Cand& c : pc) c.req.wantEnemies = true;
+      for (int extra : {0, 8, 16})
+        for (auto& pc : per)
+          for (const Cand& c0 : pc) {
+            Cand c = c0;
+            c.req.pre.resize(c.req.pre.size() + size_t(extra), 0);
+            c.commit += extra;
+            c.req.frames += extra;
+            if (extra) c.what += " +" + std::to_string(extra);
+            cs.push_back(c);
+          }
+      // (last: the cells by the target or the cell it heads for)
+      std::vector<std::pair<int, int>> near;
       for (int k = 0; k < w.cols * w.rows; k++) {
         if (dist[size_t(k)] < 0) continue;
         int xc = k % w.cols, xr = k / w.cols;
         if (std::abs(xc - e.col()) + std::abs(xr - e.row()) > w.p.fire + 3) continue;
-        if (covers(w, xc, xr, e.col(), e.row()) || covers(w, xc, xr, e.tc, e.tr)) xs.push_back({dist[size_t(k)], k});
+        if (covers(w, xc, xr, e.col(), e.row()) || covers(w, xc, xr, e.tc, e.tr)) near.push_back({dist[size_t(k)], k});
       }
-      std::sort(xs.begin(), xs.end());
-      for (size_t i = 0; i < xs.size() && i < 6; i++)
-        bombCands(xs[i].second % w.cols, xs[i].second / w.cols, Cand::Kill, tname, 2, cs);
-      if (tryCands(cs, live, o, 12)) return;
+      std::sort(near.begin(), near.end());
+      for (size_t i = 0; i < near.size() && i < 2; i++)
+        bombCands(near[i].second % w.cols, near[i].second / w.cols, Cand::Kill, tname, 1, cs);
+      if (tryCands(cs, live, o, 14)) return;
       // No bomb gets it yet: close in a few cells, then look again.
       cs.clear();
       int bestK = -1, bestD = INT_MAX;
@@ -420,6 +571,8 @@ void Agent::decide(const World& w, const Live& live, Oracle& o) {
   if (cs.empty() || !tryCands(cs, live, o, 12)) survive(w, live, o, tname.c_str());
 }
 
+static_assert(kEnemySlots == AG_ESLOTS, "enemy slots");
+
 }  // namespace sbm2
 
 // --- C glue ---
@@ -440,12 +593,14 @@ struct COracle : sbm2::Oracle {
     for (size_t i = 0; i < n; i++) {
       const sbm2::SimReq& r = reqs[i];
       rq[i] = {r.pre.data(), int(r.pre.size()), r.path.data(), int(r.path.size() / 2), r.post.data(),
-               int(r.post.size()), r.path2.data(), int(r.path2.size() / 2), r.detEnd, r.frames};
+               int(r.post.size()), r.path2.data(), int(r.path2.size() / 2), r.detEnd, r.frames, r.wantEnemies};
       out[i].pads.assign(size_t(r.frames + 1), 0);
       out[i].trace.assign(size_t(2 * (r.frames + 1)), 0);
+      if (r.wantEnemies) out[i].etrace.assign(size_t(AG_ESLOTS * (r.frames + 1)), -1);
       rs[i] = {};
       rs[i].pads = out[i].pads.data();
       rs[i].trace = out[i].trace.data();
+      rs[i].etrace = r.wantEnemies ? out[i].etrace.data() : nullptr;
       rs[i].cap = r.frames + 1;
     }
     fn(ctx, rq.data(), rs.data(), int(n));
@@ -466,7 +621,10 @@ extern "C" {
 void* sbm2_agent_new(const char* goal) {
   sbm2::Goal g;
   if (!sbm2::Goal::parse(goal && *goal ? goal : "exit", g)) return nullptr;
-  return new CAgent(g);
+  CAgent* c = new CAgent(g);
+  const char* v = std::getenv("SBM2_AGVERBOSE");
+  c->agent.verbose = v && *v && *v != '0';
+  return c;
 }
 void sbm2_agent_free(void* a) { delete static_cast<CAgent*>(a); }
 uint16_t sbm2_agent_frame(void* a, const uint8_t* wram, int frame, AgSimFn sim, void* ctx) {

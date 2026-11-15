@@ -16,6 +16,7 @@ local FRAME0 = tonumber(os.getenv("SBM2_FRAME0") or "0")
 local LOAD = os.getenv("SBM2_LOAD"); if LOAD == "" then LOAD = nil end
 local GOAL = os.getenv("SBM2_GOAL") or "exit"
 local STOPEARLY = os.getenv("SBM2_STOPEARLY") == "1"
+local VERBOSE = (os.getenv("SBM2_AGVERBOSE") or "0") ~= "0"
 -- SBM2_STOPAT=XX: stop on entering stage XX (hex); else with STOPEARLY on
 -- entering the next one.
 local STOPAT = tonumber(os.getenv("SBM2_STOPAT") or "", 16)
@@ -94,6 +95,8 @@ emu.addEventCallback(function()
   end
   if text ~= "" then
     for ln in text:gmatch("[^\n]+") do log(ln) end
+    -- (SBM2_AGVERBOSE: the world view of each decision, for repros)
+    if VERBOSE then writeFile(string.format("%s/wv_%06d.txt", OUT, frame), emu.agentWorld()) end
   end
   if frame % 600 == 0 then flush() end
   frame = frame + 1

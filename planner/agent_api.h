@@ -21,6 +21,7 @@ typedef struct {
     const int16_t *path2; int npath2;
     int detEnd;                          /* press B once path2 is done */
     int frames;
+    int wantEnemies;                     /* fill AgSimRes.etrace */
 } AgSimReq;
 
 typedef struct {
@@ -30,6 +31,7 @@ typedef struct {
     uint64_t mapSig;   /* TileMap hash at the end (agent_map_sig) */
     uint16_t *pads;    /* cap entries: the pad of each frame (host fills) */
     int16_t *trace;    /* 2 * cap: P1 world x, y at the start of each frame */
+    int16_t *etrace;   /* AG_ESLOTS * cap (wantEnemies, else NULL): agent_enemy_cells per frame */
     int cap;
 } AgSimRes;
 
@@ -67,6 +69,23 @@ static inline void agent_enemies(const uint8_t *w, int *en, int *hp)
         if ((hi == 0x90 || hi == 0xA0) && !(w[base + 5] & 0x80) && ty < 0xC0 && ty != 0x90 && ty != 0x98) {
             (*en)++;
             *hp += w[base + 0x43] & 0x7F;
+        }
+    }
+}
+
+/* The enemy slots ($8400..$8F00) and each one's cell, as the world view
+ * places it ((x + origin) / 16, packed c | r << 8), or -1 when the slot holds
+ * no live enemy as agent_enemies counts them. */
+#define AG_ESLOTS 12
+static inline void agent_enemy_cells(const uint8_t *w, int16_t *out)
+{
+    int ox = (int16_t)(w[0x5F01] | w[0x5F02] << 8), oy = (int16_t)(w[0x5EFB] | w[0x5EFC] << 8);
+    for (int i = 0; i < AG_ESLOTS; i++) {
+        int base = 0x8400 + 0x100 * i, hi = w[base + 1] & 0xF0, ty = w[base + 0x7E];
+        out[i] = -1;
+        if ((hi == 0x90 || hi == 0xA0) && !(w[base + 5] & 0x80) && ty < 0xC0 && ty != 0x90 && ty != 0x98) {
+            int x = (int16_t)(w[base + 0x10] | w[base + 0x11] << 8) + ox, y = (int16_t)(w[base + 0x18] | w[base + 0x19] << 8) + oy;
+            if (x >= 0 && y >= 0 && x < 16 * 64 && y < 16 * 64) out[i] = (int16_t)((x >> 4) | (y >> 4) << 8);
         }
     }
 }

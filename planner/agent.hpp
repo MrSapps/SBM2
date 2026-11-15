@@ -31,6 +31,7 @@ struct SimReq {
   std::vector<int16_t> path2;
   bool detEnd = false;
   int frames = 0;
+  bool wantEnemies = false;  // fill SimOut::etrace
 };
 
 struct SimOut {
@@ -40,7 +41,10 @@ struct SimOut {
   uint64_t mapSig = 0;
   std::vector<uint16_t> pads;   // one per frame
   std::vector<int16_t> trace;   // x, y per frame start
+  // wantEnemies: kEnemySlots per frame, each slot's cell (c | r << 8) or -1
+  std::vector<int16_t> etrace;
 };
+constexpr int kEnemySlots = 12;  // $8400..$8F00 (agent_api.h AG_ESLOTS)
 
 class Oracle {
  public:
@@ -69,6 +73,7 @@ class Agent {
   const std::string& worldText() const { return worldText_; }
   bool committed() const { return at_ < int(pads_.size()); }
   const std::string& what() const { return what_; }
+  bool verbose = false;  // log every oracle answer
 
  private:
   struct Cand {
@@ -80,12 +85,22 @@ class Agent {
   };
   bool tryCands(std::vector<Cand>& cs, const Live& live, Oracle& o, size_t maxRuns);
   void survive(const World& w, const Live& live, Oracle& o, const char* why);
+  void learnSpeed(const SimReq& q, const SimOut& r);
   void log(const std::string& s);
 
   Goal goal_;
   std::vector<uint16_t> pads_;
   std::vector<int16_t> trace_;
   int at_ = 0, frame_ = 0, decisions_ = 0, sims_ = 0;
+  // Frames per cell P1 walks, measured from the oracle's runs (the bomb
+  // press frame over the cells walked to it); P1's speed changes with items.
+  double fpc_ = 16;
+  // The game lags: on a busy frame its logic doesn't run ($7E0032 counts
+  // logic frames). Real frames per logic frame, measured live over the
+  // last ~256 frames; the enemy model's clock (fuses too) runs by it.
+  int lastTick_ = -1;
+  double lagReal_ = 0, lagLogic_ = 0, eScale_ = 1;
+  void watchLag(const uint8_t* wram);
   std::string what_, log_, logOut_, worldText_;
 };
 

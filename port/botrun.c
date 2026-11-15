@@ -30,6 +30,7 @@
 #include "lua.h"
 #include "lauxlib.h"
 #include "lualib.h"
+#include "../planner/agent_api.h"  /* (header only: agent_enemy_cells for the sims) */
 
 extern int SANDBOX_ALLOW_LOADFILE;  /* Mesen's sandbox switch (lauxlib.c) */
 
@@ -404,6 +405,7 @@ typedef struct SimJob {
     int16_t *trace;   /* the agent's runs: P1 world x, y where the live
                        * frame callback would run, per frame offset */
     int tcap;
+    int16_t *etrace;  /* AG_ESLOTS per frame offset: each enemy slot's cell (agent_enemy_cell) */
 } SimJob;
 
 /* The path controller (the same rule as bot.lua's pathPad; waypoints are
@@ -541,6 +543,7 @@ static void *sim_run(void *arg)
     if (j->trace && j->tcap > 0) {
         j->trace[0] = (int16_t)((s->wram[0x8010] | s->wram[0x8011] << 8) + (s->wram[0x5F01] | s->wram[0x5F02] << 8));
         j->trace[1] = (int16_t)((s->wram[0x8018] | s->wram[0x8019] << 8) + (s->wram[0x5EFB] | s->wram[0x5EFC] << 8));
+        if (j->etrace) agent_enemy_cells(s->wram, j->etrace);
     }
     while ((s->frame < f0 + (uint32_t)j->frames || lockAt) && guard++ < 400000000L) {
         uint32_t fr = s->frame;
@@ -552,6 +555,7 @@ static void *sim_run(void *arg)
             if (tpend) {
                 j->trace[2 * tpend] = (int16_t)((s->wram[0x8010] | s->wram[0x8011] << 8) + (s->wram[0x5F01] | s->wram[0x5F02] << 8));
                 j->trace[2 * tpend + 1] = (int16_t)((s->wram[0x8018] | s->wram[0x8019] << 8) + (s->wram[0x5EFB] | s->wram[0x5EFC] << 8));
+                if (j->etrace) agent_enemy_cells(s->wram, j->etrace + AG_ESLOTS * tpend);
             }
             hpend = tpend = 0;
         }
@@ -938,6 +942,7 @@ static uint64_t ag_key(uint64_t live, const AgSimReq *r, int cap)
     if (r->npath) h = mix64(h, r->path, (size_t)r->npath * 4);
     if (r->npost) h = mix64(h, r->post, (size_t)r->npost * 2);
     if (r->npath2) h = mix64(h, r->path2, (size_t)r->npath2 * 4);
+    if (r->wantEnemies) h = mix64(h, "etrace", 6);
     return h;
 }
 static void ag_cache_path(char *b, size_t n, uint64_t k) { snprintf(b, n, "%s/%02x/%016llx", ag_cache, (unsigned)(k >> 56), (unsigned long long)k); }
@@ -949,7 +954,8 @@ static int ag_cache_get(uint64_t k, AgSimRes *o)
     if (!f) return 0;
     AgCacheHdr h;
     int ok = fread(&h, sizeof h, 1, f) == 1 && h.magic == 0x41474331 && h.cap == o->cap &&
-             fread(o->pads, 2, (size_t)h.cap, f) == (size_t)h.cap && fread(o->trace, 2, (size_t)h.cap * 2, f) == (size_t)h.cap * 2;
+             fread(o->pads, 2, (size_t)h.cap, f) == (size_t)h.cap && fread(o->trace, 2, (size_t)h.cap * 2, f) == (size_t)h.cap * 2 &&
+             (!o->etrace || fread(o->etrace, 2, (size_t)h.cap * AG_ESLOTS, f) == (size_t)h.cap * AG_ESLOTS);
     fclose(f);
     if (!ok) return 0;
     o->dead = h.dead; o->enemies = h.en; o->hp = h.hp; o->px = h.px; o->py = h.py; o->ph = h.ph; o->mapSig = h.mapSig;
@@ -967,7 +973,8 @@ static void ag_cache_put(uint64_t k, const AgSimRes *o)
     if (!f) return;
     AgCacheHdr h = {0x41474331, o->dead, o->enemies, o->hp, o->px, o->py, o->ph, o->cap, o->mapSig};
     int ok = fwrite(&h, sizeof h, 1, f) == 1 && fwrite(o->pads, 2, (size_t)o->cap, f) == (size_t)o->cap &&
-             fwrite(o->trace, 2, (size_t)o->cap * 2, f) == (size_t)o->cap * 2;
+             fwrite(o->trace, 2, (size_t)o->cap * 2, f) == (size_t)o->cap * 2 &&
+             (!o->etrace || fwrite(o->etrace, 2, (size_t)o->cap * AG_ESLOTS, f) == (size_t)o->cap * AG_ESLOTS);
     if (fclose(f) == 0 && ok) rename(t, p);
     else remove(t);
 }
@@ -1036,6 +1043,7 @@ static void ag_run(const AgSimReq *rq, AgSimRes *rs, int n)
             j->done = 0;
             j->trace = rs[b + i].trace;
             j->tcap = rs[b + i].cap;
+            j->etrace = r->wantEnemies ? rs[b + i].etrace : NULL;
         }
         for (int i = 1; i < k; i++) pthread_create(&th[i], NULL, sim_run, jobs[i]);
         sim_run(jobs[0]);
@@ -1046,6 +1054,7 @@ static void ag_run(const AgSimReq *rq, AgSimRes *rs, int n)
             AgSimRes *o = &rs[b + i];
             SimRes r;
             j->trace = NULL;
+            j->etrace = NULL;
             sim_result(j, &r);
             o->dead = r.dead; o->enemies = r.en; o->hp = r.hp;
             o->px = r.px; o->py = r.py; o->ph = r.ph;

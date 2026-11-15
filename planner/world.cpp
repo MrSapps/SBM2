@@ -111,6 +111,7 @@ bool parseWorld(const std::string& text, World& w, std::string* err) {
       b.c = dec(f, "c"); b.r = dec(f, "r"); b.fuse = dec(f, "fuse"); b.range = dec(f, "range", 1);
       b.slot = dec(f, "slot"); b.enemyOwned = f["owner"] == "enemy";
       b.remote = dec(f, "remote"); b.pierce = dec(f, "pierce"); b.magnet = dec(f, "magnet");
+      b.flags = hex(f, "flags");
       w.bombs.push_back(b);
     } else if (k == "enemy") {
       Enemy e;

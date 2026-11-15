@@ -28,9 +28,6 @@ int baseCost(TaskKind k) {
 
 bool isBombTask(TaskKind k) { return k != TaskKind::PickItem && k != TaskKind::EnterGate; }
 
-// A bomb can't be placed on tiles with bit 6 set: panels, crystals, stairs,
-// switches, bombs (docs/mechanics.md, "button places nothing").
-bool canPlaceOn(char c) { return walkableClass(c) && std::string("Py^sbg").find(c) == std::string::npos; }
 // Cells a blast passes on through (it stops at stairs, $4B traps, items).
 bool blastPasses(char c) { return walkableClass(c) && std::string("^Ti").find(c) == std::string::npos; }
 
@@ -175,7 +172,7 @@ class Search {
   bool walkable(const Node& n, int c, int r) const {
     if (!w_.inside(c, r)) return false;
     char t = w_.at(c, r);
-    if (t == '%') {
+    if (breakable(t)) {
       int s = softAt_[size_t(cellIdx(c, r))];
       return w_.p.softpass || (s >= 0 && n.done[size_t(s)]);
     }
@@ -183,7 +180,7 @@ class Search {
   }
   char cls(const Node& n, int c, int r) const {
     char t = w_.at(c, r);
-    if (t == '%' && walkable(n, c, r)) return '.';
+    if (breakable(t) && walkable(n, c, r)) return '.';
     return t;
   }
 
@@ -209,7 +206,7 @@ class Search {
         if (!w_.inside(cc, rr)) continue;
         int step = kFPT;
         if (!walkable(n, cc, rr)) {
-          if (w_.at(cc, rr) != '%') continue;
+          if (!breakable(w_.at(cc, rr))) continue;
           step += kSoftCross;
         }
         int j = cellIdx(cc, rr);
@@ -240,7 +237,7 @@ class Search {
     for (auto& dd : kDirs)
       for (int k = 1; k <= std::max(1, w_.p.fire); k++) {
         int c = t.c + dd[0] * k, r = t.r + dd[1] * k;
-        if (w_.inside(c, r) && w_.at(c, r) == '%' && !walkable(n, c, r)) {
+        if (w_.inside(c, r) && breakable(w_.at(c, r)) && !walkable(n, c, r)) {
           consider(c, r);  // the route bombs it first, then P1 stands there
           break;
         }
@@ -264,7 +261,8 @@ class Search {
         int cc = c + dd[0] * k, rr = r + dd[1] * k;
         if (!w_.inside(cc, rr)) break;
         char x = cls(n, cc, rr);
-        if (x == '%' || x == 'y' || x == 'P') mark(cc, rr);
+        if (breakable(x) || x == 'y' || x == 'P') mark(cc, rr);
+        if (x == 'B') break;  // (its burst does more; not counted)
         if (x == '%' && w_.p.pierce) continue;
         if (!blastPasses(x)) break;
       }
@@ -286,7 +284,7 @@ class Search {
       Node s{cellIdx(c, r), n.done, 0, 0, ni, int(i), c, r, 0, {}};
       s.done[i] = 1;
       for (int j = cellIdx(c, r); j >= 0; j = rt.prev[size_t(j)])
-        if (w_.map[size_t(j)] == '%') {
+        if (breakable(w_.map[size_t(j)])) {
           int k = softAt_[size_t(j)];
           if (k >= 0 && !s.done[size_t(k)]) {
             s.done[size_t(k)] = 1;
@@ -439,6 +437,11 @@ bool blocksExit(const Enemy& e) {
   return true;
 }
 
+// A bomb can't be placed on tiles with bit 6 set: panels, crystals, stairs,
+// switches, bombs (docs/mechanics.md, "button places nothing").
+bool breakable(char c) { return c == '%' || c == 'B'; }
+bool canPlaceOn(char c) { return walkableClass(c) && std::string("Py^sbg").find(c) == std::string::npos; }
+
 bool walkableClass(char c) { return std::string(".i^Pyspf=ktTcCg*").find(c) != std::string::npos; }
 
 std::vector<Task> worldTasks(const World& w) {
@@ -452,7 +455,7 @@ std::vector<Task> worldTasks(const World& w) {
   for (int r = 0; r < w.rows; r++)
     for (int c = 0; c < w.cols; c++) {
       char x = w.at(c, r);
-      if (x == '%') out.push_back({TaskKind::BombSoft, c, r, -1, false, false});
+      if (breakable(x)) out.push_back({TaskKind::BombSoft, c, r, -1, false, false});
       if (x == 'y') out.push_back({TaskKind::LightCrystal, c, r, -1, false, false});
     }
   for (size_t i = 0; i < w.panels.size(); i++)

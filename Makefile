@@ -80,6 +80,18 @@ build/port/botrun: $(BOTRUN_SRC) port/snes.c port/cpu.c port/ppu.c port/snes.h p
 	@mkdir -p build/port
 	$(CC) -O2 -std=gnu99 -DLUA_USE_LINUX -I$(LUA_SRC) -Iport -o $@ $(BOTRUN_SRC) $(LUA_CORE:%=$(LUA_SRC)/%.c) -lm -ldl -lpthread
 
+# botrun with the C++ agent built in (emu.agent): bot/agent.lua drives the
+# game with planner/agent.cpp. C objects via $(CC), linked with $(CXX).
+AGENT_CXX := $(filter-out planner/test/%,$(wildcard planner/*.cpp))
+AGENT_OBJ := build/port/agentobj
+build/port/agentrun: $(BOTRUN_SRC) port/snes.c port/cpu.c port/ppu.c port/*.h planner/*.cpp planner/*.hpp planner/agent_api.h
+	@mkdir -p $(AGENT_OBJ)
+	$(CC) -O2 -std=gnu99 -DLUA_USE_LINUX -DSBM2_AGENT -I$(LUA_SRC) -Iport -Iplanner -c port/botrun.c -o $(AGENT_OBJ)/botrun.o
+	$(CC) -O2 -std=gnu99 -Iport -c port/core_unity.c -o $(AGENT_OBJ)/core.o
+	@for f in $(LUA_CORE); do [ $(AGENT_OBJ)/lua_$$f.o -nt $(LUA_SRC)/$$f.c ] || \
+	  $(CC) -O2 -std=gnu99 -DLUA_USE_LINUX -I$(LUA_SRC) -c $(LUA_SRC)/$$f.c -o $(AGENT_OBJ)/lua_$$f.o || exit 1; done
+	$(CXX) -O2 -g -std=c++17 -Wall -Wextra -Iplanner -o $@ $(AGENT_OBJ)/*.o $(AGENT_CXX) -lm -ldl -lpthread
+
 # New C++ planner (planner/): unit tests on world view snapshots
 # (docs/worldview.md), no emulator.
 PLANNER_SRC := $(wildcard planner/*.cpp)

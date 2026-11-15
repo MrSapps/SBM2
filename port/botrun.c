@@ -387,6 +387,9 @@ typedef struct SimJob {
     uint32_t f0;
     uint8_t h0;
     uint64_t hash[SIM_HASH_D + 1];   /* state hash at offsets 1..SIM_HASH_D (0: unknown) */
+    int16_t *trace;   /* the agent's runs: P1 world x, y where the live
+                       * frame callback would run, per frame offset */
+    int tcap;
 } SimJob;
 
 /* The path controller (the same rule as bot.lua's pathPad; waypoints are
@@ -520,20 +523,30 @@ static void *sim_run(void *arg)
      * the warp out: -2. */
     uint32_t lockAt = 0;
     int hpend = 0;   /* a frame offset whose hash is due (at the live callback's point) */
+    int tpend = 0;   /* ... whose trace entry is due */
+    if (j->trace && j->tcap > 0) {
+        j->trace[0] = (int16_t)((s->wram[0x8010] | s->wram[0x8011] << 8) + (s->wram[0x5F01] | s->wram[0x5F02] << 8));
+        j->trace[1] = (int16_t)((s->wram[0x8018] | s->wram[0x8019] << 8) + (s->wram[0x5EFB] | s->wram[0x5EFC] << 8));
+    }
     while ((s->frame < f0 + (uint32_t)j->frames || lockAt) && guard++ < 400000000L) {
         uint32_t fr = s->frame;
         /* where step_hook would run vblank_run on the live machine: the
          * first instruction boundary after the frame start with no NMI
          * being taken (see snes_step) */
-        if (hpend && !(s->nmi_pending && s->nmi_at <= s->cycle_start) && !s->cpu.nmi && !s->cpu.wai && !s->cpu.stp) {
-            j->hash[hpend] = state_hash(s);
-            hpend = 0;
+        if ((hpend || tpend) && !(s->nmi_pending && s->nmi_at <= s->cycle_start) && !s->cpu.nmi && !s->cpu.wai && !s->cpu.stp) {
+            if (hpend) j->hash[hpend] = state_hash(s);
+            if (tpend) {
+                j->trace[2 * tpend] = (int16_t)((s->wram[0x8010] | s->wram[0x8011] << 8) + (s->wram[0x5F01] | s->wram[0x5F02] << 8));
+                j->trace[2 * tpend + 1] = (int16_t)((s->wram[0x8018] | s->wram[0x8019] << 8) + (s->wram[0x5EFB] | s->wram[0x5EFC] << 8));
+            }
+            hpend = tpend = 0;
         }
         snes_step(s);
         if (s->frame != fr) {
             /* input[F + 1] (buf[F + 1 - f0]) is read when frame F + 1 begins */
             int i = (int)(s->frame - f0) + 1;
             hpend = !j->resume && i - 1 <= SIM_HASH_D ? i - 1 : 0;
+            tpend = j->trace && i - 1 < j->tcap ? i - 1 : 0;
             if (j->nwp && i >= j->npre && i <= j->frames + 2) j->buf[i] = sim_pad(j, s, i, &at);
             if (j->det && i >= j->det && i < j->det + 4 && i <= j->frames + 2) j->buf[i] |= PAD_B;
             uint16_t lock = s->wram[0x8052] | s->wram[0x8053] << 8;
@@ -880,6 +893,91 @@ static int l_simulateMany(lua_State *Ls)
     return 6;
 }
 
+#ifdef SBM2_AGENT
+/* --- the C++ agent (planner/agent.hpp): emu.agent(frame) -> pad, log ---
+ * Its oracle: runs on copies of the live machine, as emu.simulateMany's
+ * path entries (no cache: the agent plays back the pads each run pressed,
+ * so it needs them all). */
+#include "agent_api.h"
+static void *agent;
+
+static void ag_sim(void *ctx, const AgSimReq *rq, AgSimRes *rs, int n)
+{
+    (void)ctx;
+    for (int b = 0; b < n; b += SIM_THREADS) {
+        int k = n - b < SIM_THREADS ? n - b : SIM_THREADS;
+        pthread_t th[SIM_THREADS];
+        for (int i = 0; i < k; i++) {
+            const AgSimReq *r = &rq[b + i];
+            if (!jobs[i]) jobs[i] = calloc(1, sizeof(SimJob));
+            SimJob *j = jobs[i];
+            sim_setup(j, r->pre, r->npre, r->frames);
+            j->nwp = r->npath;
+            j->wp = realloc(j->wp, (size_t)(r->npath ? r->npath : 1) * 4);
+            if (r->npath) memcpy(j->wp, r->path, (size_t)r->npath * 4);
+            j->npre = r->npath ? r->npre : 0;
+            if (r->npath) for (int f = r->npre; f <= r->frames + 2; f++) j->buf[f] = 0;
+            free(j->post);
+            j->post = malloc((size_t)(r->npost ? r->npost : 1) * 2);
+            if (r->npost) memcpy(j->post, r->post, (size_t)r->npost * 2);
+            j->npost = r->npost;
+            j->wp2 = realloc(j->wp2, (size_t)(r->npath2 ? r->npath2 : 1) * 4);
+            if (r->npath2) memcpy(j->wp2, r->path2, (size_t)r->npath2 * 4);
+            j->nwp2 = r->npath2;
+            j->detEnd = r->detEnd;
+            j->detWait = 0;
+            j->det = 0;
+            j->resume = 0;
+            j->done = 0;
+            j->trace = rs[b + i].trace;
+            j->tcap = rs[b + i].cap;
+        }
+        for (int i = 1; i < k; i++) pthread_create(&th[i], NULL, sim_run, jobs[i]);
+        sim_run(jobs[0]);
+        for (int i = 1; i < k; i++) pthread_join(th[i], NULL);
+        sim_runs += k;
+        for (int i = 0; i < k; i++) {
+            SimJob *j = jobs[i];
+            AgSimRes *o = &rs[b + i];
+            SimRes r;
+            j->trace = NULL;
+            sim_result(j, &r);
+            o->dead = r.dead; o->enemies = r.en; o->hp = r.hp;
+            o->px = r.px; o->py = r.py; o->ph = r.ph;
+            o->mapSig = agent_map_sig(j->s.wram);
+            for (int f = 0; f < o->cap && f <= j->frames + 2; f++) o->pads[f] = j->buf[f];
+        }
+    }
+}
+
+/* emu.agent(frame [, goal]): the pad for this frame (set as the live pad),
+ * and the agent's new log lines */
+static int l_agent(lua_State *Ls)
+{
+    int fr = (int)luaL_checkinteger(Ls, 1);
+    if (!agent) {
+        agent = sbm2_agent_new(luaL_optstring(Ls, 2, "exit"));
+        if (!agent) return luaL_error(Ls, "agent: bad goal");
+    }
+    uint16_t p = sbm2_agent_frame(agent, m.wram, fr, ag_sim, NULL);
+    live_pad = p;
+    lua_pushinteger(Ls, p);
+    lua_pushstring(Ls, sbm2_agent_log(agent));
+    return 2;
+}
+/* emu.captureWorld(frame): the C++ world view text of the live WRAM */
+static int l_captureWorld(lua_State *Ls)
+{
+    lua_pushstring(Ls, sbm2_capture(m.wram, (int)luaL_optinteger(Ls, 1, 0)));
+    return 1;
+}
+static int l_agentWorld(lua_State *Ls)
+{
+    lua_pushstring(Ls, agent ? sbm2_agent_world(agent) : "");
+    return 1;
+}
+#endif
+
 static int l_padBits(lua_State *Ls)
 {
     static const struct { const char *k; uint16_t bit; } map[] = {
@@ -997,7 +1095,11 @@ static void open_emu(void)
         {"setInput", l_setInput}, {"getState", l_getState}, {"createSavestate", l_createSavestate},
         {"loadSavestate", l_loadSavestate}, {"stop", l_stop}, {"takeScreenshot", l_takeScreenshot},
         {"simulate", l_simulate}, {"simulateMany", l_simulateMany}, {"simStats", l_simStats}, {"now", l_now}, {"simHearts", l_simHearts}, {"padBits", l_padBits},
-        {"getCdlData", l_getCdlData}, {"getCdlString", l_getCdlString}, {"log", l_log}, {NULL, NULL}};
+        {"getCdlData", l_getCdlData}, {"getCdlString", l_getCdlString}, {"log", l_log},
+#ifdef SBM2_AGENT
+        {"agent", l_agent}, {"agentWorld", l_agentWorld}, {"captureWorld", l_captureWorld},
+#endif
+        {NULL, NULL}};
     luaL_newlib(L, fns);
     static const char *const mt[] = {"snesMemory", "snesWorkRam", "snesPrgRom"};
     set_enum("memType", mt, 3);

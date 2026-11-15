@@ -1,0 +1,7 @@
+# The C++ agent (planner/agent.cpp) clears 1-1 from its start, no deaths.
+start 10
+agent 1
+budget 21600
+pass STAGE 11
+fail DEATH|agent error
+env SBM2_STOPEARLY=1

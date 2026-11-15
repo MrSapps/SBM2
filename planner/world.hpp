@@ -20,7 +20,7 @@ struct Player {
 };
 
 struct Bomb {
-  int c = 0, r = 0, fuse = 0, range = 1, slot = 0;
+  int c = 0, r = 0, fuse = 0, range = 1, slot = 0, flags = 0;
   bool enemyOwned = false, remote = false, pierce = false, magnet = false;
 };
 

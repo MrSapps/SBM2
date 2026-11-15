@@ -1,0 +1,8 @@
+# The C++ agent plays 1-1 and then 1-2 in one go, no deaths.
+start 10
+agent 1
+budget 30000
+pass STAGE 12
+fail DEATH|agent error
+env SBM2_STOPEARLY=1
+env SBM2_STOPAT=12

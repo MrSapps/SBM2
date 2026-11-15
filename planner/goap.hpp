@@ -19,7 +19,7 @@
 
 namespace sbm2 {
 
-enum class TaskKind { KillEnemy, BombSoft, TogglePanel, LightCrystal, PickItem, EnterGate };
+enum class TaskKind { KillEnemy, BombSoft /* or a barrel */, TogglePanel, LightCrystal, PickItem, EnterGate };
 const char* taskName(TaskKind k);
 
 struct Task {
@@ -69,6 +69,9 @@ struct PlanOptions {
 
 // Rules shared with the lower layers.
 bool walkableClass(char c);  // P1 can stand here (soft blocks excepted)
+bool canPlaceOn(char c);     // ...and drop a bomb here
+// A blast clears it: soft blocks and barrels (a barrel bursts, C1:26AA).
+bool breakable(char c);
 std::vector<Task> worldTasks(const World& w);
 
 Plan plan(const World& w, const Goal& g, const PlanOptions& o = {});

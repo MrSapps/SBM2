@@ -1,0 +1,8 @@
+# The C++ agent clears 1-2 from its start, no deaths (P1 starts boxed in by
+# a barrel: barrels are breakable, C1:26AA).
+start 11
+agent 1
+budget 21600
+pass STAGE 12
+fail DEATH|agent error
+env SBM2_STOPEARLY=1

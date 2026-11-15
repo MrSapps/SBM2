@@ -12,6 +12,8 @@ there to the moment under test, run-length encoded per logic frame:
     fail rollback         optional: regex that fails it at once
     seed 0                optional (SBM2_SEED)
     env SBM2_X=1          optional, repeatable
+    agent 1               optional: the C++ agent (build/port/agentrun,
+                          bot/agent.lua) instead of bot/bot.lua
     pads                  then "<repeat> <word>,<word>..." lines: one logic
     120 0001,0000         frame each (the $0001 NMI marker and its pad reads,
     ...                   bot/inputlog.lua format), repeated <repeat> times
@@ -37,6 +39,7 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DIR = os.path.join(ROOT, 'bot', 'test', 'scenarios')
 BOTRUN = os.environ.get('SBM2_BOTRUN') or os.path.join(ROOT, 'build', 'port', 'botrun')
+AGENTRUN = os.environ.get('SBM2_AGENTRUN') or os.path.join(ROOT, 'build', 'port', 'agentrun')
 LIB, LIBP = os.path.join(ROOT, 'build', 'lib'), os.path.join(ROOT, 'build', 'libp')
 
 
@@ -86,7 +89,7 @@ def parse(path):
         elif k == 'env':
             a, _, b = v.partition('=')
             sc['env'][a] = b
-        elif k in ('start', 'budget', 'pass', 'fail', 'seed'):
+        elif k in ('start', 'budget', 'pass', 'fail', 'seed', 'agent'):
             sc[k] = v
         else:
             raise SystemExit(f'{path}: unknown key {k}')
@@ -145,7 +148,9 @@ def run_one(sc, verbose):
                SBM2_PREFIX=pre, SBM2_NOASSIST='1', SBM2_SEED=sc['seed'], SBM2_CKPT='1000000', **sc['env'])
     env.update(extra)
     t0 = time.time()
-    subprocess.run([BOTRUN, os.path.join(ROOT, 'baserom.sfc'), os.path.join(ROOT, 'bot', 'bot.lua')],
+    agent = sc.get('agent', '0') not in ('0', '')
+    subprocess.run([AGENTRUN if agent else BOTRUN, os.path.join(ROOT, 'baserom.sfc'),
+                    os.path.join(ROOT, 'bot', 'agent.lua' if agent else 'bot.lua')],
                    env=env, stdout=subprocess.DEVNULL, stderr=open(os.path.join(out, 'stderr.txt'), 'w'))
     dt = time.time() - t0
     text = ''.join(open(p, errors='replace').read() for p in sorted(glob.glob(os.path.join(out, 'bot_*.log'))))

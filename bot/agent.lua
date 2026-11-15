@@ -40,10 +40,12 @@ end
 
 local frame, loaded, stage, deadAt = FRAME0, LOAD == nil, nil, nil
 local deaths = 0
+local T0 = emu.now()
 if loaded then inputlog.start(nil) end
 
 local function finish(code, why)
   log(string.format("%6d END %02X %s deaths %d", frame, emu.read(0x1A, WRAM, false), why, deaths))
+  if emu.agentStats then log(string.format("%6d STATS wall %.2f %s", frame, emu.now() - T0, emu.agentStats())) end
   flush()
   inputlog.save(OUT .. "/run.inputs")
   emu.stop(code)

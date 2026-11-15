@@ -25,6 +25,7 @@
 #include <stddef.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <time.h>
 #include "snes.h"
 #include "lua.h"
 #include "lauxlib.h"
@@ -35,6 +36,9 @@ extern int SANDBOX_ALLOW_LOADFILE;  /* Mesen's sandbox switch (lauxlib.c) */
 static Snes m;
 static lua_State *L;
 static uint8_t *cdl;
+/* Code/data logging per instruction (emu.getCdl*); off in agentrun unless
+ * SBM2_CDL=1 (it costs ~a third of the live machine's time). */
+static int cdl_on = 1;
 static int stopped = -1;
 static int loaded_state;       /* set by loadSavestate within a callback */
 static int skip_end_frame;     /* the state was saved after its endFrame */
@@ -52,6 +56,12 @@ static MemCb cbs[MAX_CB];
 static int ncb, nlive[3];
 static uint32_t cb_lo[3], cb_hi[3];   /* bounds of the live ranges per type */
 
+static uint8_t cb_read(void *ctx, uint32_t addr);
+static void cb_write(void *ctx, uint32_t addr, uint8_t v);
+static uint8_t (*bus_read)(void *, uint32_t);
+static void (*bus_write)(void *, uint32_t, uint8_t);
+/* The live machine's bus: the callback wrappers only while a read or write
+ * callback is registered, else the core's own (its inlined fast path). */
 static void cb_bounds(void)
 {
     for (int t = 0; t < 3; t++) { cb_lo[t] = 0xFFFFFFFF; cb_hi[t] = 0; }
@@ -60,6 +70,10 @@ static void cb_bounds(void)
         int t = cbs[i].type;
         if (cbs[i].lo < cb_lo[t]) cb_lo[t] = cbs[i].lo;
         if (cbs[i].hi > cb_hi[t]) cb_hi[t] = cbs[i].hi;
+    }
+    if (bus_read) {
+        m.cpu.read = cb_lo[CB_READ] <= cb_hi[CB_READ] ? cb_read : bus_read;
+        m.cpu.write = cb_lo[CB_WRITE] <= cb_hi[CB_WRITE] ? cb_write : bus_write;
     }
 }
 enum { EV_END_FRAME, EV_INPUT_POLLED, EV_N };
@@ -126,7 +140,7 @@ static int step_hook(Snes *s)
         if (loaded_state || stopped >= 0) return 1;
     }
     uint32_t pc = (uint32_t)s->cpu.pb << 16 | s->cpu.pc;
-    if (is_rom(pc)) {
+    if (cdl_on && is_rom(pc)) {
         uint32_t o = rom_offset(pc);
         cdl[o] |= 0x01 | (s->cpu.p & 0x20 ? 0x20 : 0) | (s->cpu.p & 0x10 ? 0x10 : 0);
     }
@@ -900,12 +914,103 @@ static int l_simulateMany(lua_State *Ls)
  * so it needs them all). */
 #include "agent_api.h"
 static void *agent;
+static double ag_tsim, ag_tagent; static unsigned long ag_nsim, ag_simfr, ag_calls;
+static double ag_now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
 
+/* The oracle's disk cache (SBM2_AGCACHE=dir): a run's result keyed by the
+ * live machine (state_hash), the request and the emulator's source
+ * (SBM2_CORE_ID, from the Makefile: snes/cpu/ppu/botrun sources). The game
+ * is deterministic, so a hit is the run itself: a rerun of an unchanged
+ * scenario runs no sims, and after an agent change everything up to its
+ * first different decision is a hit. */
+#ifndef SBM2_CORE_ID
+#define SBM2_CORE_ID "dev"
+#endif
+static const char *ag_cache;
+static unsigned long ag_hits;
+typedef struct { uint32_t magic; int32_t dead, en, hp, px, py, ph, cap; uint64_t mapSig; } AgCacheHdr;
+static uint64_t ag_key(uint64_t live, const AgSimReq *r, int cap)
+{
+    uint64_t h = mix64(live, SBM2_CORE_ID, strlen(SBM2_CORE_ID));
+    int32_t v[8] = {r->npre, r->npath, r->npost, r->npath2, r->detEnd, r->frames, cap, sim_heart_death};
+    h = mix64(h, v, sizeof v);
+    if (r->npre) h = mix64(h, r->pre, (size_t)r->npre * 2);
+    if (r->npath) h = mix64(h, r->path, (size_t)r->npath * 4);
+    if (r->npost) h = mix64(h, r->post, (size_t)r->npost * 2);
+    if (r->npath2) h = mix64(h, r->path2, (size_t)r->npath2 * 4);
+    return h;
+}
+static void ag_cache_path(char *b, size_t n, uint64_t k) { snprintf(b, n, "%s/%02x/%016llx", ag_cache, (unsigned)(k >> 56), (unsigned long long)k); }
+static int ag_cache_get(uint64_t k, AgSimRes *o)
+{
+    char p[1024];
+    ag_cache_path(p, sizeof p, k);
+    FILE *f = fopen(p, "rb");
+    if (!f) return 0;
+    AgCacheHdr h;
+    int ok = fread(&h, sizeof h, 1, f) == 1 && h.magic == 0x41474331 && h.cap == o->cap &&
+             fread(o->pads, 2, (size_t)h.cap, f) == (size_t)h.cap && fread(o->trace, 2, (size_t)h.cap * 2, f) == (size_t)h.cap * 2;
+    fclose(f);
+    if (!ok) return 0;
+    o->dead = h.dead; o->enemies = h.en; o->hp = h.hp; o->px = h.px; o->py = h.py; o->ph = h.ph; o->mapSig = h.mapSig;
+    return 1;
+}
+static void ag_cache_put(uint64_t k, const AgSimRes *o)
+{
+    char p[1024], t[1100];
+    ag_cache_path(p, sizeof p, k);
+    snprintf(t, sizeof t, "%s/%02x", ag_cache, (unsigned)(k >> 56));
+    mkdir(ag_cache, 0777);
+    mkdir(t, 0777);
+    snprintf(t, sizeof t, "%s.%d.tmp", p, (int)getpid());
+    FILE *f = fopen(t, "wb");
+    if (!f) return;
+    AgCacheHdr h = {0x41474331, o->dead, o->enemies, o->hp, o->px, o->py, o->ph, o->cap, o->mapSig};
+    int ok = fwrite(&h, sizeof h, 1, f) == 1 && fwrite(o->pads, 2, (size_t)o->cap, f) == (size_t)o->cap &&
+             fwrite(o->trace, 2, (size_t)o->cap * 2, f) == (size_t)o->cap * 2;
+    if (fclose(f) == 0 && ok) rename(t, p);
+    else remove(t);
+}
+
+static void ag_run(const AgSimReq *rq, AgSimRes *rs, int n);
 static void ag_sim(void *ctx, const AgSimReq *rq, AgSimRes *rs, int n)
 {
     (void)ctx;
-    for (int b = 0; b < n; b += SIM_THREADS) {
-        int k = n - b < SIM_THREADS ? n - b : SIM_THREADS;
+    double t0 = ag_now();
+    static int init;
+    if (!init) { init = 1; ag_cache = getenv("SBM2_AGCACHE"); if (ag_cache && !*ag_cache) ag_cache = NULL; }
+    if (!ag_cache) { ag_run(rq, rs, n); goto done; }
+    {
+        uint64_t live = state_hash(&m);
+        AgSimReq *mq = malloc(sizeof *mq * (size_t)n);
+        AgSimRes *ms = malloc(sizeof *ms * (size_t)n);
+        int *mi = malloc(sizeof *mi * (size_t)n), nm = 0;
+        uint64_t *keys = malloc(sizeof *keys * (size_t)n);
+        for (int i = 0; i < n; i++) {
+            keys[i] = ag_key(live, &rq[i], rs[i].cap);
+            if (ag_cache_get(keys[i], &rs[i])) { ag_hits++; continue; }
+            mq[nm] = rq[i]; ms[nm] = rs[i]; mi[nm++] = i;
+        }
+        if (nm) ag_run(mq, ms, nm);
+        for (int k = 0; k < nm; k++) { rs[mi[k]] = ms[k]; ag_cache_put(keys[mi[k]], &rs[mi[k]]); }
+        free(mq); free(ms); free(mi); free(keys);
+    }
+done:
+    ag_nsim += (unsigned long)n;
+    ag_tsim += ag_now() - t0;
+    if (getenv("SBM2_AGPROF")) {
+        fprintf(stderr, "sim f%u n%d %.0fms frames", m.frame, n, (ag_now() - t0) * 1e3);
+        for (int i = 0; i < n; i++) fprintf(stderr, " %d%s", rq[i].frames, rs[i].dead == -1 ? "" : rs[i].dead == -2 ? "x" : "d");
+        fprintf(stderr, "\n");
+    }
+}
+
+static void ag_run(const AgSimReq *rq, AgSimRes *rs, int n)
+{
+    static int nth;
+    if (!nth) { const char *e = getenv("SBM2_SIMTHREADS"); nth = e ? atoi(e) : SIM_THREADS; if (nth < 1 || nth > SIM_THREADS) nth = SIM_THREADS; }
+    for (int b = 0; b < n; b += nth) {
+        int k = n - b < nth ? n - b : nth;
         pthread_t th[SIM_THREADS];
         for (int i = 0; i < k; i++) {
             const AgSimReq *r = &rq[b + i];
@@ -946,6 +1051,7 @@ static void ag_sim(void *ctx, const AgSimReq *rq, AgSimRes *rs, int n)
             o->px = r.px; o->py = r.py; o->ph = r.ph;
             o->mapSig = agent_map_sig(j->s.wram);
             for (int f = 0; f < o->cap && f <= j->frames + 2; f++) o->pads[f] = j->buf[f];
+            ag_simfr += j->frames;
         }
     }
 }
@@ -959,7 +1065,9 @@ static int l_agent(lua_State *Ls)
         agent = sbm2_agent_new(luaL_optstring(Ls, 2, "exit"));
         if (!agent) return luaL_error(Ls, "agent: bad goal");
     }
+    double t0 = ag_now();
     uint16_t p = sbm2_agent_frame(agent, m.wram, fr, ag_sim, NULL);
+    ag_tagent += ag_now() - t0; ag_calls++;
     live_pad = p;
     lua_pushinteger(Ls, p);
     lua_pushstring(Ls, sbm2_agent_log(agent));
@@ -969,6 +1077,12 @@ static int l_agent(lua_State *Ls)
 static int l_captureWorld(lua_State *Ls)
 {
     lua_pushstring(Ls, sbm2_capture(m.wram, (int)luaL_optinteger(Ls, 1, 0)));
+    return 1;
+}
+/* emu.agentStats(): calls, sims, sim frames, seconds in sims, seconds in the agent (sims included) */
+static int l_agentStats(lua_State *Ls)
+{
+    lua_pushfstring(Ls, "calls %d sims %d hits %d simframes %d tsim %f tagent %f", (int)ag_calls, (int)ag_nsim, (int)ag_hits, (int)ag_simfr, ag_tsim, ag_tagent);
     return 1;
 }
 static int l_agentWorld(lua_State *Ls)
@@ -1097,7 +1211,7 @@ static void open_emu(void)
         {"simulate", l_simulate}, {"simulateMany", l_simulateMany}, {"simStats", l_simStats}, {"now", l_now}, {"simHearts", l_simHearts}, {"padBits", l_padBits},
         {"getCdlData", l_getCdlData}, {"getCdlString", l_getCdlString}, {"log", l_log},
 #ifdef SBM2_AGENT
-        {"agent", l_agent}, {"agentWorld", l_agentWorld}, {"captureWorld", l_captureWorld},
+        {"agent", l_agent}, {"agentWorld", l_agentWorld}, {"agentStats", l_agentStats}, {"captureWorld", l_captureWorld},
 #endif
         {NULL, NULL}};
     luaL_newlib(L, fns);
@@ -1324,9 +1438,11 @@ int main(int argc, char **argv)
     /* Frame-step frames index input[] by m.frame; keep it within the buffer. */
     bus_read = m.cpu.read;
     bus_write = m.cpu.write;
-    m.cpu.read = cb_read;
-    m.cpu.write = cb_write;
+    cb_bounds();
     m.hook = step_hook;
+#ifdef SBM2_AGENT
+    cdl_on = getenv("SBM2_CDL") && !strcmp(getenv("SBM2_CDL"), "1");
+#endif
     /* SBM2_TIMED=0: frame-step (one video frame per logic frame, no lag).
      * Default: the timed machine, which has Mesen's lag frames. */
     const char *tm = getenv("SBM2_TIMED");

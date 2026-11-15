@@ -169,12 +169,16 @@ uint16_t Agent::frame(const uint8_t* wram, int frame, Oracle& o) {
   return committed() ? pads_[size_t(at_++)] : 0;
 }
 
+// Oracle batch sizes: the first option alone (it is the best guess and
+// usually lives), then wider. Runs in a batch go in parallel, so a lone
+// first run spends no CPU on options that turn out not to be needed.
+static size_t batchSize(size_t n) { return n == 0 ? 1 : n == 1 ? 3 : 4; }
+
 bool Agent::tryCands(std::vector<Cand>& cs, const Live& live, Oracle& o, size_t maxRuns) {
   if (cs.size() > maxRuns) cs.resize(maxRuns);
-  const size_t kBatch = 4;
-  for (size_t b = 0; b < cs.size(); b += kBatch) {
+  for (size_t b = 0, bn = 0; b < cs.size(); b += batchSize(bn++)) {
     std::vector<SimReq> reqs;
-    for (size_t i = b; i < std::min(cs.size(), b + kBatch); i++) reqs.push_back(cs[i].req);
+    for (size_t i = b; i < std::min(cs.size(), b + batchSize(bn)); i++) reqs.push_back(cs[i].req);
     std::vector<SimOut> out;
     o.run(reqs, out);
     sims_ += int(reqs.size());
@@ -237,8 +241,8 @@ void Agent::survive(const World& w, const Live& live, Oracle& o, const char* why
   }
   int best = -1, bestDead = -1;
   std::vector<SimOut> keep;
-  for (size_t b = 0; b < reqs.size(); b += 4) {
-    std::vector<SimReq> part(reqs.begin() + long(b), reqs.begin() + long(std::min(reqs.size(), b + 4)));
+  for (size_t b = 0, bn = 0; b < reqs.size(); b += batchSize(bn++)) {
+    std::vector<SimReq> part(reqs.begin() + long(b), reqs.begin() + long(std::min(reqs.size(), b + batchSize(bn))));
     std::vector<SimOut> out;
     o.run(part, out);
     sims_ += int(part.size());
@@ -262,7 +266,9 @@ void Agent::survive(const World& w, const Live& live, Oracle& o, const char* why
   int k = ends[size_t(best)];
   pads_ = keep[size_t(best)].pads;
   trace_ = keep[size_t(best)].trace;
-  int n = bestDead == INT_MAX ? 24 : std::max(1, std::min(8, bestDead / 2));
+  // (a run that lived: play all but its last kTail frames, at most 60)
+  int n = bestDead == INT_MAX ? std::clamp(int(keep[size_t(best)].pads.size()) - kTail, 24, 60)
+                              : std::max(1, std::min(8, bestDead / 2));
   pads_.resize(std::min(pads_.size(), size_t(n)));
   trace_.resize(pads_.size() * 2);
   at_ = 0;

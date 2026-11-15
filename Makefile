@@ -84,9 +84,11 @@ build/port/botrun: $(BOTRUN_SRC) port/snes.c port/cpu.c port/ppu.c port/snes.h p
 # game with planner/agent.cpp. C objects via $(CC), linked with $(CXX).
 AGENT_CXX := $(filter-out planner/test/%,$(wildcard planner/*.cpp))
 AGENT_OBJ := build/port/agentobj
+# The oracle cache's key (SBM2_AGCACHE): whatever decides a run's outcome.
+AGENT_CORE_ID = $(shell cat port/snes.c port/cpu.c port/ppu.c port/*.h port/core_unity.c port/botrun.c planner/agent_api.h | md5sum | cut -c1-16)
 build/port/agentrun: $(BOTRUN_SRC) port/snes.c port/cpu.c port/ppu.c port/*.h planner/*.cpp planner/*.hpp planner/agent_api.h
 	@mkdir -p $(AGENT_OBJ)
-	$(CC) -O2 -std=gnu99 -DLUA_USE_LINUX -DSBM2_AGENT -I$(LUA_SRC) -Iport -Iplanner -c port/botrun.c -o $(AGENT_OBJ)/botrun.o
+	$(CC) -O2 -std=gnu99 -DLUA_USE_LINUX -DSBM2_AGENT -DSBM2_CORE_ID=\"$(AGENT_CORE_ID)\" -I$(LUA_SRC) -Iport -Iplanner -c port/botrun.c -o $(AGENT_OBJ)/botrun.o
 	$(CC) -O2 -std=gnu99 -Iport -c port/core_unity.c -o $(AGENT_OBJ)/core.o
 	@for f in $(LUA_CORE); do [ $(AGENT_OBJ)/lua_$$f.o -nt $(LUA_SRC)/$$f.c ] || \
 	  $(CC) -O2 -std=gnu99 -DLUA_USE_LINUX -I$(LUA_SRC) -c $(LUA_SRC)/$$f.c -o $(AGENT_OBJ)/lua_$$f.o || exit 1; done

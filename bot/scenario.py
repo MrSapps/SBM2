@@ -147,6 +147,9 @@ def run_one(sc, verbose):
     env = dict(os.environ, SBM2_OUT=out, SBM2_FRAMES=sc['budget'], SBM2_LOAD=start_state(sc['start']),
                SBM2_PREFIX=pre, SBM2_NOASSIST='1', SBM2_SEED=sc['seed'], SBM2_CKPT='1000000', **sc['env'])
     env.update(extra)
+    # The agent oracle's disk cache (port/botrun.c ag_sim; exact, keyed by
+    # machine state + request + emulator source). SBM2_AGCACHE= turns it off.
+    env.setdefault('SBM2_AGCACHE', os.path.join(ROOT, 'build', 'agcache'))
     t0 = time.time()
     agent = sc.get('agent', '0') not in ('0', '')
     subprocess.run([AGENTRUN if agent else BOTRUN, os.path.join(ROOT, 'baserom.sfc'),

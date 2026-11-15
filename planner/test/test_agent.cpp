@@ -488,3 +488,270 @@ TEST("agent: a block that grows back in the run still counts as done") {
   b.decide(w, liveOf(w), o);
   CHECK_EQ(b.what(), std::string("survive"));
 }
+
+// World 2's blocks grow back ~190 frames after they break: a block's bomb
+// is played to the flames' end by the run's real press (A), or the remote's
+// set-off (B), not by the pessimistic walk budget (it waited in cover so
+// long the block it opened was back).
+TEST("agent: a bomb move ends when its flames do, by the real press") {
+  World w = mk({"###########",
+                "#........%#",
+                "#.#.#.#.#.#",
+                "###########"}, 1, 1);
+  FakeOracle o;
+  o.answer = [](const SimReq& q, SimOut& r) {
+    r.dead = -1;
+    r.mapSig = 2;
+    if (!q.post.empty()) r.pads[10] |= kPadA;
+  };
+  Agent a = agentFor("blocks");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.committed());
+  CHECK_EQ(a.pending(), 10 + 2 + 150 + kFlameFrames + 4);
+  // The remote: 30 frames past the set-off, then the flames.
+  w.p.remote = true;
+  o.answer = [](const SimReq& q, SimOut& r) {
+    r.dead = -1;
+    r.mapSig = 2;
+    if (!q.post.empty()) r.pads[10] |= kPadA, r.pads[40] |= kPadB, r.pads[41] |= kPadB;
+  };
+  Agent b = agentFor("blocks");
+  b.decide(w, liveOf(w), o);
+  CHECK(b.committed());
+  CHECK_EQ(b.pending(), 41 + 30 + kFlameFrames);
+}
+
+// A flame on the gate brings enemies back; one on an item burns it. No
+// bomb cell whose blast reaches either (a kill near the gate, a heart).
+TEST("agent: no bomb whose blast reaches the gate, a reachable item or a done panel") {
+  World w = mk({"###########",
+                "#g...P....#",
+                "#.#.#.#.#.#",
+                "#.........#",
+                "###########"}, 1, 3, "gate 1 1 closed\nitem 3 3 heart kind=11\npanel 5 1 done mode=1\n" +
+                std::string("enemy type=80 x=") + std::to_string(3 * 16 + 8) + " y=" + std::to_string(1 * 16 + 8) + "\n");
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 1; r.enemies = r.hp = 1; };  // (no kill: every option is tried)
+  Agent a = agentFor("exit");
+  a.decide(w, liveOf(w), o);
+  int bombs = 0, onItem = 0;
+  for (const SimReq& r : o.seen) {
+    if (r.post.empty()) continue;
+    bombs++;
+    int bc, br, yc, yr;
+    bombAndCover(r, bc, br, yc, yr);
+    // (on the item's own cell is fine: P1 picks it up placing the bomb)
+    onItem += bc == 3 && br == 3;
+    for (const Cell& x : blastCells(w, bc, br, w.p.fire, false)) {
+      CHECK(!(x.c == 1 && x.r == 1));
+      CHECK(!(x.c == 3 && x.r == 3) || (bc == 3 && br == 3));
+      CHECK(!(x.c == 5 && x.r == 1));  // (the done panel)
+    }
+  }
+  CHECK(bombs > 0);
+  CHECK(onItem > 0);
+}
+
+// B sets off the oldest remote bomb only (docs/mechanics.md 10): press when
+// an enemy is in its blast (and its chain's), P1 out of it.
+TEST("agent: remote trap: set off the oldest when an enemy is in its blast") {
+  World w = mk({"#########",
+                "#.......#",
+                "#.#.#.#.#",
+                "#.......#",
+                "#########"}, 1, 3,
+               "bomb c=3 r=1 fuse=0 range=2 owner=p1 remote=1\nbomb c=7 r=3 fuse=0 range=2 owner=p1 remote=1\n"
+               "enemy type=80 x=" + std::to_string(5 * 16 + 8) + " y=" + std::to_string(1 * 16 + 8));
+  std::vector<int> order;
+  noteRemotes(w, order);
+  CHECK_EQ(order.size(), size_t(2));
+  CHECK(remoteTrigger(w, order));  // (5,1) is 2 right of (3,1)
+  // The newer one first in line: its blast doesn't reach (5,1).
+  std::vector<int> rev{order[1], order[0]};
+  CHECK(!remoteTrigger(w, rev));
+  // P1 in the blast: no.
+  World p = w;
+  p.p.x = 3 * 16 + 8, p.p.y = 2 * 16 + 8;
+  CHECK(!remoteTrigger(p, order));
+  // Nobody in it: no. The gate in it: no.
+  World e = w;
+  e.enemies[0].x = 7 * 16 + 8, e.enemies[0].y = 1 * 16 + 8;
+  CHECK(!remoteTrigger(e, order));
+  World gte = w;
+  gte.hasGate = true, gte.gateC = 1, gte.gateR = 1;
+  CHECK(!remoteTrigger(gte, order));
+  World jp = w;  // (a jump pad is no enemy)
+  jp.enemies[0].type = 0xA0;
+  CHECK(!remoteTrigger(jp, order));
+  // Without an enemy (a stale trap): only P1, the gate and items clear.
+  CHECK(remoteTrigger(e, order, nullptr, false));
+  CHECK(!remoteTrigger(p, order, nullptr, false));
+  CHECK(!remoteTrigger(gte, order, nullptr, false));
+  // A bomb gone (set off) leaves the order; a new one goes last.
+  World x = w;
+  x.bombs.erase(x.bombs.begin());
+  noteRemotes(x, order);
+  CHECK_EQ(order.size(), size_t(1));
+  CHECK_EQ(order[0], 3 * w.cols + 7);
+}
+
+// With the remote and a bomb to spare, a kill lays a trap (no B in the run)
+// where the model says enemies walk; a bomb move with traps out presses B
+// once per older bomb, so its own goes off.
+TEST("agent: remote: lay a trap for a kill; later moves press B past the traps") {
+  World w = mk({"###########",
+                "#.........#",
+                "#.#.#.#.#.#",
+                "#.........#",
+                "###########"}, 1, 3,
+               "enemy slot=5 type=80 x=" + std::to_string(7 * 16 + 8) + " y=" + std::to_string(1 * 16 + 8) +
+                   " vx=-0.5 vy=0 step=l target=6,1 hp=1 spd=0.5");
+  w.p.remote = true;
+  w.p.bombs = 3;
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 1; r.enemies = r.hp = 1; };
+  Agent a = agentFor("enemies");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.what().find("trap for kill") == 0);
+  bool sawTrap = false;
+  for (const SimReq& r : o.seen)
+    if (!r.post.empty()) {
+      CHECK_EQ(r.detEnd, 0);
+      sawTrap = true;
+    }
+  CHECK(sawTrap);
+  // The trap is out, none to spare: wait for it (no bomb pressed, no B).
+  World t = w;
+  t.bombs.push_back({});
+  t.bombs.back().c = 3, t.bombs.back().r = 3, t.bombs.back().remote = true, t.bombs.back().range = 2;
+  t.p.bombs = 1;
+  t.frame = 100;
+  o.seen.clear();
+  a.decide(t, liveOf(t), o);
+  CHECK_EQ(a.what(), std::string("survive"));
+  for (const SimReq& r : o.seen) CHECK(r.post.empty() && r.detEnd == 0);
+  // Waiting is no reason to set it off; past kTrapWait it goes (P1 clear).
+  World tq = t;
+  tq.p.x = 1 * 16 + 8, tq.p.y = 1 * 16 + 8;
+  Agent idle = agentFor("enemies");
+  CHECK_EQ(idle.trapCheck(tq), 2);  // (never laid one: stale)
+  CHECK_EQ(a.trapCheck(tq), 0);
+  tq.frame = 100 + kTrapWait;
+  CHECK_EQ(a.trapCheck(tq), 2);
+  // Walled off from the enemy, a trap out: nothing to do but survive, and
+  // the trap may be in the way: set it off as soon as P1 is clear.
+  World s2 = mk({"###########",
+                 "#.....#.#.#",
+                 "#.#.#.###.#",
+                 "#.........#",
+                 "###########"}, 1, 3,
+                "enemy slot=5 type=80 x=" + std::to_string(7 * 16 + 8) + " y=" + std::to_string(1 * 16 + 8) +
+                    " vx=0 vy=0 hp=1 spd=0.5\nbomb c=3 r=3 fuse=0 range=2 owner=p1 remote=1");
+  s2.p.remote = true;
+  s2.p.bombs = 1;
+  s2.frame = 100;
+  Agent st = agentFor("enemies");
+  o.seen.clear();
+  st.decide(s2, liveOf(s2), o);
+  // P1 starts in the trap's blast (row 3): the first way out tried leaves it.
+  CHECK(!o.seen.empty() && o.seen[0].path.size() >= 2);
+  int ex = o.seen[0].path[o.seen[0].path.size() - 2] / 16, ey = o.seen[0].path.back() / 16;
+  auto inB = [](int c, int r) { return (r == 3 && c >= 1 && c <= 5) || (c == 3 && r >= 1 && r <= 3); };
+  CHECK(!inB(ex, ey) && !inB(ex - 1, ey) && !inB(ex + 1, ey) && !inB(ex, ey - 1) && !inB(ex, ey + 1));  // (nor next to it)
+  CHECK_EQ(st.what(), std::string("survive"));
+  CHECK(st.takeLog().find("traps out") == std::string::npos);
+  CHECK(st.trapStuck());
+  CHECK(!a.trapStuck());
+  // A block with one trap out: B twice.
+  World b = mk({"#########",
+                "#...%...#",
+                "#.#.#.#.#",
+                "#.......#",
+                "#########"}, 1, 1, "bomb c=7 r=3 fuse=0 range=2 owner=p1 remote=1");
+  b.p.remote = true;
+  b.p.bombs = 1;
+  o.seen.clear();
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 2; };
+  Agent c = agentFor("blocks");
+  c.decide(b, liveOf(b), o);
+  CHECK(c.committed());
+  CHECK(!o.seen.empty() && o.seen[0].detEnd == 2);
+}
+
+// A route over a spring pad: walk onto the pad, then the landing (the path
+// follower holds that way through the lock and the flight). Held by the
+// pad, P1 is not "locked": the agent decides (nothing held bounces in place).
+TEST("agent: spring pads: a walk jumps; held by a pad is no lock") {
+  World w = mk({"#########",
+                "#...S...#",
+                "#########",
+                "#.......#",
+                "#.......#",
+                "#...i...#",
+                "#########"}, 1, 1, "item 4 5 item kind=2");
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; };
+  Agent a = agentFor("items");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.committed());
+  bool jumped = false;
+  for (const SimReq& q : o.seen)
+    for (size_t i = 0; i + 3 < q.path.size(); i += 2)
+      jumped |= q.path[i] == 4 * 16 + 8 && q.path[i + 1] == 1 * 16 + 8 && q.path[i + 2] == 4 * 16 + 8 &&
+                q.path[i + 3] == 4 * 16 + 8;
+  CHECK(jumped);
+  // Nothing to do (no gate): staying alive never ends a move on the pad.
+  World nx = w;
+  nx.p.x = 3 * 16 + 8;
+  Agent b = agentFor("exit");
+  o.seen.clear();
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = 5; };  // (every way tried)
+  b.decide(nx, liveOf(nx), o);
+  CHECK(!o.seen.empty());
+  for (const SimReq& q : o.seen)
+    CHECK(!(q.path.size() >= 2 && q.path[q.path.size() - 2] == 4 * 16 + 8 && q.path.back() == 1 * 16 + 8));
+  std::vector<uint8_t> wram(size_t(kWramSize), 0);
+  wram[0x1C000] = 0xC3;  // (a stage: hard wall at (0,0), P1 object live)
+  wram[0xBC] = 1;
+  wram[0x8001] = 0x90;
+  wram[0x8010] = 4 * 16 + 8, wram[0x8018] = 1 * 16 + 8;
+  wram[0x8052] = 0x01, wram[0x8053] = 0x08;
+  wram[0x1C000 + 1 * 0x80 + 4 * 2] = 0x4C;
+  CHECK(readLive(wram.data()).inStage);
+  CHECK(!readLive(wram.data()).locked);
+  wram[0x1C000 + 1 * 0x80 + 4 * 2] = 0x00;
+  CHECK(readLive(wram.data()).locked);
+  wram[0x1C000 + 1 * 0x80 + 4 * 2] = 0x4C, wram[0x8053] = 0x18;  // (in the air)
+  CHECK(readLive(wram.data()).locked);
+}
+
+// A trap on a gap a soft block left (it may grow back; the bomb keeps it
+// open) ranks over an equally likely cell nearer P1.
+TEST("agent: remote trap: a gap a block left ranks higher") {
+  auto world = [](char gap) {
+    World w = mk({"###########",
+                  "#.........#",
+                  "#.#######.#",
+                  "#.........#",
+                  "###########"}, 1, 1,
+                 "enemy slot=5 type=80 x=" + std::to_string(5 * 16 + 8) + " y=" + std::to_string(1 * 16 + 8) +
+                     " vx=0 vy=0 hp=1 spd=0");
+    w.map[size_t(1 * w.cols + 7)] = gap;
+    w.p.remote = true;
+    w.p.bombs = 3;
+    return w;
+  };
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 1; r.enemies = r.hp = 1; };
+  Agent plain = agentFor("enemies");
+  plain.decide(world('.'), liveOf(world('.')), o);
+  CHECK(plain.what().find("trap for kill") == 0);
+  CHECK(plain.what().find("bomb at (7,1)") == std::string::npos);
+  Agent seen = agentFor("enemies");
+  World soft = world('%');
+  seen.decide(soft, liveOf(soft), o);
+  World w = world('.');
+  w.frame = 200;
+  seen.decide(w, liveOf(w), o);
+  CHECK(seen.what().find("trap for kill 5,1: bomb at (7,1)") == 0);
+}

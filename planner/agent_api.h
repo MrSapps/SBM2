@@ -19,7 +19,7 @@ typedef struct {
     const int16_t *path; int npath;     /* waypoints: x, y world pixels */
     const uint16_t *post; int npost;
     const int16_t *path2; int npath2;
-    int detEnd;                          /* press B once path2 is done */
+    int detEnd;                          /* press B this many times (20 frames apart) once path2 is done */
     int frames;
     int wantEnemies;                     /* fill AgSimRes.etrace */
     const uint16_t *bossBase; int nboss; /* boss objects: their HP summed at the end */

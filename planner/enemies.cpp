@@ -27,7 +27,9 @@ bool EnemyModel::isChaser(const Enemy& e) {
 }
 
 bool EnemyModel::modelled(const Enemy& e) {
-  if (!e.type || (e.type & 0x40) || e.type >= 0xC0 || e.type == 0x90 || e.type == 0x98) return false;
+  if (!e.type || (e.type & 0x40) || e.type >= 0xC0 || isThrower(e.type)) return false;
+  // ($90/$98 walk as generic ones; +$BE bit 15: a mount, or hidden)
+  if ((e.type == 0x90 || e.type == 0x98) && (e.be & 0x8000)) return false;
   return e.hp > 0 && e.hp < 0x7F && !e.dormant() && !e.hidden();
 }
 

@@ -1,9 +1,12 @@
 #include "goap.hpp"
 
+#include "blast.hpp"
+
 #include <algorithm>
 #include <climits>
 #include <deque>
 #include <queue>
+#include <set>
 #include <sstream>
 #include <unordered_map>
 
@@ -14,6 +17,7 @@ constexpr int kFPT = 20;          // frames per cell walked (bot.lua FPT)
 constexpr int kBombCost = 40;     // place a bomb and step out of its line
 constexpr int kEnemyCost = 120;   // line up on a moving enemy
 constexpr int kSoftCross = 190;   // bomb a soft block in the way: fuse 150 + flames
+constexpr int kBurnCost = 3000;   // a blast burns an item the goal wants: only if nothing else does
 const int kDirs[4][2] = {{0, -1}, {0, 1}, {-1, 0}, {1, 0}};
 
 int baseCost(TaskKind k) {
@@ -59,10 +63,14 @@ class Search {
       }
       if (t.kind == TaskKind::PressButton) buttons_.push_back(int(i));
       if (t.kind == TaskKind::BombSoft) softAt_[size_t(t.r * w.cols + t.c)] = int(i);
+      if (t.kind == TaskKind::PickItem) itemAt_[t.r * w.cols + t.c].push_back(int(i));
       if (t.kind == TaskKind::TogglePanel) hasPanels_ = true;
     }
     for (const Panel& p : w.panels)
       if (!p.done) hasPanels_ = true;
+    std::vector<uint8_t> pd = panelsDone(w);
+    for (size_t i = 0; i < w.panels.size(); i++)
+      if (w.panels[i].mode == 1 && pd[i]) donePanel_.insert(w.panels[i].r * w.cols + w.panels[i].c);
   }
 
   Plan run() {
@@ -253,11 +261,19 @@ class Search {
       q.pop();
       if (dist > rt.d[size_t(i)]) continue;
       int c = i % w_.cols, r = i / w_.cols;
-      for (auto& dd : kDirs) {
+      int land[4][2], nj = jumps(w_, c, r, land);
+      for (int di = 0; di < 4; di++) {
+        auto& dd = kDirs[di];
         int cc = c + dd[0], rr = r + dd[1];
-        if (!w_.inside(cc, rr)) continue;
         int step = kFPT;
-        if (!walkable(n, cc, rr)) {
+        if (nj >= 0) {  // only a jump leaves a pad (or a jump-pad object's cell)
+          if (di >= nj) continue;
+          cc = land[di][0], rr = land[di][1];
+          step = kSpringFrames;
+        }
+        else if (!w_.inside(cc, rr)) continue;
+        else if (w_.at(cc, rr) == 'S') {}
+        else if (!walkable(n, cc, rr)) {
           if (!breakable(w_.at(cc, rr))) continue;
           step += kSoftCross;
         }
@@ -277,6 +293,12 @@ class Search {
     dist = INT_MAX;
     auto consider = [&](int c, int r) {
       int x = rt.d[size_t(cellIdx(c, r))];
+      if (x == INT_MAX) return;
+      if (isBombTask(t.kind)) {
+        Harm h = harm(n, c, r);
+        if (h.gate) return;
+        x += h.cost;
+      }
       if (x < dist) { dist = x; bc = c; br = r; }
     };
     if (!isBombTask(t.kind)) {
@@ -315,12 +337,55 @@ class Search {
     return dist != INT_MAX;
   }
 
+  // What a bomb at (c,r) spoils: a flame on the gate brings enemies back
+  // (never), and one on an item burns it (the item tasks it ends, and their
+  // cost when the goal wanted them). An item still in its block is only
+  // uncovered by the blast that breaks the block; the next one burns it.
+  struct Harm {
+    bool gate = false;
+    int cost = 0;
+    std::vector<int> burnt;
+  };
+  Harm harm(const Node& n, int c, int r) const {
+    Harm h;
+    for (auto& dd : kDirs)
+      for (int k = 1; k <= std::max(1, w_.p.fire); k++) {
+        int cc = c + dd[0] * k, rr = r + dd[1] * k;
+        if (!w_.inside(cc, rr)) break;
+        char x = cls(n, cc, rr);
+        if (w_.hasGate && cc == w_.gateC && rr == w_.gateR) h.gate = true;
+        if (donePanel_.count(cellIdx(cc, rr))) h.cost += kBurnCost;  // (toggled back: todo again, unplanned)
+        auto it = itemAt_.find(cellIdx(cc, rr));
+        if (it != itemAt_.end() && !breakable(x)) {
+          for (int i : it->second)
+            if (!n.done[size_t(i)]) {
+              h.burnt.push_back(i);
+              if (tasks_[size_t(i)].powerup || goal_.items) h.cost += kBurnCost;
+            }
+          if (!w_.p.pierce) break;  // (an item stops a flame)
+        }
+        if (x == 'X' || x == 'x' || x == 'B') break;
+        if (breakable(x)) {
+          if (w_.p.pierce) continue;
+          break;
+        }
+        if (x == 'g' && !w_.gateOpen) break;
+        if (!blastPasses(x)) break;
+      }
+    return h;
+  }
+
   // A bomb at (c,r) also does every static task its blast reaches: soft
   // blocks, panels, crystals (blast rules as in blast.cpp). Enemies move, so
   // they count only when targeted.
   void blastMarks(const Node& n, int c, int r, std::vector<uint8_t>& done) const {
     auto mark = [&](int cc, int rr) {
-      for (int t : staticAt_[size_t(cellIdx(cc, rr))]) done[size_t(t)] = 1;
+      for (int t : staticAt_[size_t(cellIdx(cc, rr))]) {
+        const Task& k = tasks_[size_t(t)];
+        // (a mode 1 panel done earlier in the plan toggles back)
+        bool back = k.kind == TaskKind::TogglePanel && k.ref >= 0 && w_.panels[size_t(k.ref)].mode == 1 && n.done[size_t(t)];
+        done[size_t(t)] = !back;
+      }
     };
     for (auto& dd : kDirs)
       for (int k = 1; k <= std::max(1, w_.p.fire); k++) {
@@ -370,7 +435,10 @@ class Search {
           }
         }
       std::reverse(s.via.begin(), s.via.end());
-      if (isBombTask(t.kind)) blastMarks(n, c, r, s.done);
+      if (isBombTask(t.kind)) {
+        blastMarks(n, c, r, s.done);
+        for (int b : harm(n, c, r).burnt) s.done[size_t(b)] = 1;  // (gone: its cost is in dist)
+      }
       if (allDone(s, TaskKind::LightCrystal))
         for (size_t j = 0; j < tasks_.size(); j++)
           if (tasks_[j].needsCrystals) s.done[j] = 1;  // Check8FPanels -> KillAllType8F
@@ -445,6 +513,8 @@ class Search {
   std::vector<Task> tasks_;
   std::vector<int> softAt_;
   std::unordered_map<int, std::vector<int>> blockTasks_, holeTasks_;  // push tasks by block / hole cell
+  std::unordered_map<int, std::vector<int>> itemAt_;                  // item tasks by cell
+  std::set<int> donePanel_;  // cells of mode 1 panels done (a blast over one undoes it)
   std::vector<int> buttons_;
   std::vector<std::vector<int>> staticAt_;  // static bomb tasks per cell
   bool hasPanels_ = false;
@@ -517,7 +587,7 @@ std::string Plan::str() const {
 // water, magnets, barrels, furnaces, track blocks, springs (they throw P1:
 // a jump edge, not a step; TODO model the landing cells) and unknowns.
 bool blocksExit(const Enemy& e) {
-  if (!e.type || (e.type & 0x40) || (e.f4 & 0x2000) || e.type == 0x96) return false;
+  if (!e.type || (e.type & 0x40) || (e.f4 & 0x2000) || e.type == 0x96 || isThrower(e.type)) return false;
   if (e.type == 0x90 || e.type == 0x98) return !(e.be & 0x8000);
   return true;
 }
@@ -531,15 +601,63 @@ bool wantedItem(int kind) {
 bool unwantedItem(int kind, const Player& p) {
   return p.remote && (kind == kItemPierce || kind == kItemBomb9 || kind == kItemBomb10);
 }
+bool springLanding(const World& w, int c, int r, int dc, int dr, int& lc, int& lr) {
+  for (int j = 3; j <= 9; j++) {
+    int cc = c + j * dc, rr = r + j * dr;
+    if (!w.inside(cc, rr)) return false;
+    char t = w.at(cc, rr);
+    if (t == 'w' || breakable(t) || w.bombAt(cc, rr)) return false;
+    if (t == 'S' || walkableClass(t)) {
+      lc = cc, lr = rr;
+      return true;
+    }
+  }
+  return false;
+}
+
+int throwerAt(const World& w, int c, int r) {
+  for (const Enemy& e : w.enemies)
+    if (isThrower(e.type) && e.col() == c && e.row() == r) return e.type == 0xE0 ? 1 : -1;
+  return 0;
+}
+
+int jumps(const World& w, int c, int r, int out[4][2]) {
+  if (!w.inside(c, r)) return -1;
+  int n = 0;
+  if (w.at(c, r) == 'S') {
+    for (auto& d : kDirs)
+      if (springLanding(w, c, r, d[0], d[1], out[n][0], out[n][1])) n++;
+    return n;
+  }
+  if (int dx = throwerAt(w, c, r)) {
+    int lc = c + 8 * dx;
+    if (w.inside(lc, r) && (w.at(lc, r) == 'S' || walkableClass(w.at(lc, r))) && !w.bombAt(lc, r))
+      out[n][0] = lc, out[n][1] = r, n++;
+    return n;
+  }
+  return -1;
+}
+
 bool canPlaceOn(char c) { return walkableClass(c) && std::string("Py^sbgv").find(c) == std::string::npos; }
 
 bool walkableClass(char c) { return std::string(".i^Pyspf=ktTcCg*v").find(c) != std::string::npos; }
+
+std::vector<uint8_t> panelsDone(const World& w) {
+  std::vector<uint8_t> hits(w.panels.size(), 0), out(w.panels.size(), 0);
+  for (const Bomb& b : w.bombs)
+    for (const Cell& x : blastCells(w, b.c, b.r, b.range, b.pierce))
+      for (size_t i = 0; i < w.panels.size(); i++)
+        if (w.panels[i].c == x.c && w.panels[i].r == x.r) hits[i]++;
+  for (size_t i = 0; i < w.panels.size(); i++)
+    out[i] = w.panels[i].mode == 1 ? (w.panels[i].done ^ (hits[i] & 1)) : (w.panels[i].done || hits[i]);
+  return out;
+}
 
 std::vector<Task> worldTasks(const World& w) {
   std::vector<Task> out;
   for (size_t i = 0; i < w.enemies.size(); i++) {
     const Enemy& e = w.enemies[i];
-    if (!e.type || (e.type & 0x40)) continue;  // not enemies: shots, effects
+    if (!e.type || (e.type & 0x40) || isThrower(e.type)) continue;  // not enemies: shots, effects, jump pads
     Task t{TaskKind::KillEnemy, e.col(), e.row(), int(i), e.type == 0x8F, blocksExit(e)};
     out.push_back(t);
   }
@@ -557,8 +675,9 @@ std::vector<Task> worldTasks(const World& w) {
             out.push_back(t);
           }
     }
+  std::vector<uint8_t> pd = panelsDone(w);
   for (size_t i = 0; i < w.panels.size(); i++)
-    if (!w.panels[i].done) out.push_back({TaskKind::TogglePanel, w.panels[i].c, w.panels[i].r, int(i), false, false});
+    if (!pd[i]) out.push_back({TaskKind::TogglePanel, w.panels[i].c, w.panels[i].r, int(i), false, false});
   for (size_t i = 0; i < w.items.size(); i++)
     out.push_back({TaskKind::PickItem, w.items[i].c, w.items[i].r, int(i), false, false, wantedItem(w.items[i].kind), false});
   // Wanted items still in their blocks: picked up where the block was (the

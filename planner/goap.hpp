@@ -82,6 +82,25 @@ bool walkableClass(char c);  // P1 can stand here (soft blocks excepted)
 bool canPlaceOn(char c);     // ...and drop a bomb here
 // A blast clears it: soft blocks and barrels (a barrel bursts, C1:26AA).
 bool breakable(char c);
+// Spring pads ('S', docs/mechanics.md 5): stepping on one locks P1 ~20
+// frames, then throws it the way held. Let go in the air (the path
+// follower does) P1 lands 3 cells on, or slides on past walls to the next
+// cell it can stand on (or a pad). Water, a soft block, a bomb or the map edge first: no landing
+// (drowned, stuck). A pad is a node P1 leaves only by a jump.
+bool springLanding(const World& w, int c, int r, int dc, int dr, int& lc, int& lr);
+constexpr int kSpringFrames = 90;  // locked + in the air
+// Jump-pad objects ($E0 right, $A0/$E1 left, docs/enemies.md): P1 on the
+// object's cell is caught and thrown 8 cells. The way (+1/-1), or 0.
+int throwerAt(const World& w, int c, int r);
+inline bool isThrower(int type) { return type == 0xE0 || type == 0xA0 || type == 0xE1; }
+// Where P1 stepping on (c,r) is thrown to: a spring pad's landings, or a
+// jump-pad object's. -1: (c,r) throws nothing (P1 walks on); else how many
+// landings are in out.
+int jumps(const World& w, int c, int r, int out[4][2]);
+// Each panel's state once the bombs already out have gone off (docs/
+// mechanics.md 4): mode 1 toggles once per blast over it (parity), mode 0
+// is done by any.
+std::vector<uint8_t> panelsDone(const World& w);
 std::vector<Task> worldTasks(const World& w);
 
 Plan plan(const World& w, const Goal& g, const PlanOptions& o = {});

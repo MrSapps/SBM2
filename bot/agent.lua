@@ -62,7 +62,7 @@ local function onNextInstruction(fn)
   end, emu.callbackType.exec, 0, 0xFFFFFF)
 end
 
-local frame, loaded, stage, deadAt = FRAME0, LOAD == nil, nil, nil
+local frame, loaded, stage, deadAt, lockAt = FRAME0, LOAD == nil, nil, nil, nil
 local deaths = 0
 local T0 = emu.now()
 if loaded then inputlog.start(nil) end
@@ -98,13 +98,17 @@ emu.addEventCallback(function()
     log(string.format("%6d STAGE %02X hearts %02X", frame, st, emu.read(0x80EF, WRAM, false)))
   end
   -- A death: P1 locked as C0:A675 leaves it ($52 & $F809 == $0801), not
-  -- on the exit.
+  -- on the exit, and still locked 90 frames on: a spring pad, a jump pad's
+  -- throw or a carry locks it the same way but lets go sooner (the
+  -- oracle's rule, port/botrun.c sim_run).
   local lock = r16(0x8052)
-  if (lock & 0xF809) == 0x0801 and r16(0x80A8) ~= r16(0x5D72) then
+  if (lock & 0xF809) == 0x0801 and r16(0x80A8) ~= r16(0x5D72) then lockAt = lockAt or frame
+  elseif (lock & 1) == 0 then lockAt = nil end
+  if lockAt and frame - lockAt >= 90 then
     if not deadAt then
       deadAt = frame
       deaths = deaths + 1
-      log(string.format("%6d DEATH at px(%d,%d)", frame, r16(0x8010), r16(0x8018)))
+      log(string.format("%6d DEATH at px(%d,%d) (locked since %d)", frame, r16(0x8010), r16(0x8018), lockAt))
       writeFile(string.format("%s/wv_death_%06d.txt", OUT, frame), emu.agentWorld())
       if STOPEARLY then return finish(1, "death") end
     end

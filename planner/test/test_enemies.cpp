@@ -181,3 +181,20 @@ TEST("enemies: $86 goes at most 4 cells, rests 128, then heads for P1 in sight")
   auto r2 = m2.roll(nullptr, 9, 1, 16);
   CHECK(EnemyModel::nearOdds(r2, 5, 1, 190, 240) > 0.95);
 }
+
+// $90/$98 (docs/enemies.md) walk as generic enemies; +$BE bit 15 is a
+// mount ($90) or hidden ($98): not an enemy to model then.
+TEST("enemies: $90/$98 modelled unless a mount or hidden") {
+  Enemy e;
+  e.type = 0x98, e.hp = 1;
+  CHECK(EnemyModel::modelled(e));
+  e.be = 0x8000;
+  CHECK(!EnemyModel::modelled(e));
+  e.type = 0x90, e.be = 0;
+  CHECK(EnemyModel::modelled(e));
+  e.hp = 0xFF;  // (firing: hp $FF)
+  CHECK(!EnemyModel::modelled(e));
+  Enemy a0;
+  a0.type = 0xA0, a0.hp = 1;  // (a jump pad)
+  CHECK(!EnemyModel::modelled(a0));
+}

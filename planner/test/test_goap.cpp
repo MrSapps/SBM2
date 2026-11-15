@@ -71,7 +71,7 @@ TEST("goap: closed gate: kill the enemy behind a soft block first") {
                 "#########"}, 1, 1, "gate 2 1 closed\n" + enemy(6, 1));
   Plan p = run(w, "exit");
   CHECK(p.ok);
-  CHECK_EQ(p.str(), std::string("kill 6,1 from 4,1 via 4,1\ngate 2,1 from 2,1\n"));
+  CHECK_EQ(p.str(), std::string("kill 6,1 from 5,1 via 4,1\ngate 2,1 from 2,1\n"));  // (from 4,1 the blast reaches the gate)
 }
 
 TEST("goap: exit does not bomb blocks it doesn't need") {
@@ -340,16 +340,158 @@ TEST("goap: greedy finish: a chain of pushes and the button that opens the way")
   // Fill (5,1) then (7,1) in that order, press the button (9,1), then push
   // the woken block (8,2) down into (8,3): the panel (8,4) comes in reach.
   World w = mk({"###########",
-                "#g..XOXO.v#",
-                "########x##",
+                "#...XOXO.v#",
+                "#g######x##",
                 "########O##",
                 "########P##",
-                "###########"}, 2, 1, "gate 1 1 closed\npanel 8 4 mode=0");
+                "###########"}, 2, 1, "gate 1 2 closed\npanel 8 4 mode=0");
   PlanOptions o;
   o.maxNodes = 1;
   Goal g;
   g.exit = true;
   Plan p = plan(w, g, o);
   CHECK(p.ok);
-  CHECK_EQ(tasksOf(p), std::string("push 4,1; push 6,1; button 9,1; push 8,2; panel 8,4; gate 1,1"));
+  CHECK_EQ(tasksOf(p), std::string("push 4,1; push 6,1; button 9,1; push 8,2; panel 8,4; gate 1,2"));
+}
+
+// A flame burns an item it reaches (the user saw a heart blown up): the
+// bomb for the block goes where its blast misses the item, or the item is
+// picked up first.
+TEST("goap: a bomb's blast never burns a wanted item") {
+  World w = mk({"#######",
+                "#....%#",
+                "###i###",
+                "#######"}, 1, 1, "item 3 2 heart kind=11");
+  Plan p = run(w, "blocks+powerups");
+  CHECK(p.ok);
+  CHECK_EQ(p.str(), std::string("item 3,2 from 3,2\nsoft 5,1 from 3,1\n"));
+  // ...and an item still in its block is uncovered by the blast that breaks
+  // it; the next blast over it burns it.
+  World h = mk({"#######",
+                "#.%...#",
+                "#.##%##",
+                "#######"}, 1, 1, "hidden 2 1 kind=11");
+  p = run(h, "blocks+powerups");
+  CHECK(p.ok);
+  CHECK_EQ(tasksOf(p), std::string("soft 2,1; item 2,1; soft 4,2"));
+}
+
+// A flame on the exit brings enemies back (seen in world 2): no bomb
+// whose blast reaches the gate cell.
+TEST("goap: no bomb's blast reaches the gate") {
+  World w = mk({"#######",
+                "#g...%#",
+                "#######"}, 3, 1, "gate 1 1 closed");
+  Plan p = run(w, "blocks");
+  CHECK(p.ok);
+  CHECK_EQ(p.str(), std::string("soft 5,1 from 4,1\n"));
+}
+
+// Spring pads (docs/mechanics.md 5): held through the flight P1 lands 4
+// cells on, sliding past walls to the next cell it can stand on; water or
+// a soft block there is no landing. A pad is passed, never stood on.
+TEST("goap: spring pads: landings, and a room reached only by a jump") {
+  World w = mk({"###########",
+                "#...S..##.#",
+                "###########",
+                "#.........#",
+                "#.........#",
+                "#...i.....#",
+                "###########"}, 1, 1, "item 4 5 item kind=2");
+  int c, r;
+  CHECK(springLanding(w, 4, 1, 0, 1, c, r));
+  CHECK_EQ(c, 4);
+  CHECK_EQ(r, 4);
+  CHECK(!springLanding(w, 4, 1, 0, -1, c, r));  // (off the map)
+  CHECK(springLanding(w, 4, 1, -1, 0, c, r));
+  CHECK_EQ(c, 1);
+  CHECK(springLanding(w, 4, 1, 1, 0, c, r));    // (3 on is a wall: slides to the next cell)
+  CHECK_EQ(c, 9);
+  World wet = w;
+  wet.map[size_t(4 * w.cols + 4)] = 'w';
+  CHECK(!springLanding(wet, 4, 1, 0, 1, c, r));
+  Plan p = run(w, "items");
+  CHECK(p.ok);
+  CHECK_EQ(tasksOf(p), std::string("item 4,5"));
+  World flat = w;
+  flat.map[size_t(1 * w.cols + 4)] = '.';
+  CHECK(!run(flat, "items").ok);
+}
+
+// Jump-pad objects (docs/enemies.md): $E0 throws P1 8 cells right, $A0/$E1
+// 8 left; its cell is left only that way.
+TEST("goap: jump-pad objects throw P1 8 cells") {
+  World w = mk({"#############",
+                "#...#.......#",
+                "#############"}, 1, 1, enemy(2, 1, "E0") + "item 10 1 item kind=2");
+  CHECK_EQ(throwerAt(w, 2, 1), 1);
+  int l[4][2];
+  CHECK_EQ(jumps(w, 2, 1, l), 1);
+  CHECK_EQ(l[0][0], 10);
+  CHECK_EQ(jumps(w, 1, 1, l), -1);
+  CHECK(run(w, "items").ok);
+  World none = mk({"#############",
+                   "#...#.......#",
+                   "#############"}, 1, 1, "item 10 1 item kind=2");
+  CHECK(!run(none, "items").ok);
+  World back = mk({"#############",
+                   "#...#.......#",
+                   "#############"}, 10, 1, enemy(10, 1, "E1") + "item 2 1 item kind=2");
+  CHECK_EQ(throwerAt(back, 10, 1), -1);
+  CHECK(run(back, "items").ok);
+  // ($A0 too; none of them is an enemy to kill, nor keeps the gate shut)
+  World a0 = mk({"#############",
+                 "#...#.......#",
+                 "#############"}, 10, 1, enemy(10, 1, "A0") + "gate 1 1 closed");
+  CHECK_EQ(throwerAt(a0, 10, 1), -1);
+  CHECK(!blocksExit(a0.enemies[0]));
+  for (const Task& t : worldTasks(a0)) CHECK(t.kind != TaskKind::KillEnemy);
+}
+
+// Mode 1 panels (docs/mechanics.md 4) toggle once per blast: a bomb out
+// whose blast covers one is about to flip it (3-1: bombed (9,9) from (9,8),
+// the move ended before it went off, then from (8,9) too: undone, forever).
+TEST("goap: mode 1 panels: bombs out count, and a done one is not bombed again") {
+  World w = mk({"#######",
+                "#.....#",
+                "#.#P#.#",
+                "#.....#",
+                "#######"}, 1, 1, "panel 3 2 todo mode=1\nbomb c=3 r=1 fuse=100 range=1 owner=p1");
+  CHECK(panelsDone(w)[0]);
+  for (const Task& t : worldTasks(w)) CHECK(t.kind != TaskKind::TogglePanel);
+  World two = w;  // (two blasts: back to todo)
+  two.bombs.push_back(two.bombs[0]);
+  two.bombs.back().r = 3;
+  CHECK(!panelsDone(two)[0]);
+  World m0 = w;  // (mode 0: any blast does it)
+  m0.panels[0].mode = 0;
+  m0.bombs = two.bombs;
+  CHECK(panelsDone(m0)[0]);
+  // A done panel: the soft block below it is bombed from a side, not from
+  // P1's own cell (3,1), whose blast passes the panel (undoing it).
+  World d = mk({"#######",
+                "#.....#",
+                "#.#P#.#",
+                "#..%..#",
+                "#######"}, 3, 1, "panel 3 2 done mode=1");
+  Plan p = run(d, "blocks");
+  CHECK(p.ok);
+  CHECK(!p.steps.empty() && p.steps[0].standR == 3);
+  // Todo: from (3,1) both at once.
+  World t = d;
+  t.panels[0].done = false;
+  Plan q = run(t, "blocks");
+  CHECK(q.ok && q.steps.size() == 1 && q.steps[0].standR == 1);
+  // Two planned blasts over a todo panel: done, then undone again.
+  World v = mk({"###",
+                "#.#",
+                "#P#",
+                "#%#",
+                "#%#",
+                "###"}, 1, 1, "panel 1 2 todo mode=1");
+  Plan b = run(v, "blocks");
+  CHECK(b.ok);
+  CHECK_EQ(b.steps.size(), size_t(2));
+  for (size_t i = 0; i < b.tasks.size(); i++)
+    if (b.tasks[i].kind == TaskKind::TogglePanel) CHECK(!b.done[i]);
 }

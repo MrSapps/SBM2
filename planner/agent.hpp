@@ -31,7 +31,7 @@ struct SimReq {
   std::vector<int16_t> path;  // x, y world pixels
   std::vector<uint16_t> post;
   std::vector<int16_t> path2;
-  bool detEnd = false;
+  int detEnd = 0;  // B presses once path2 is done (each sets off the oldest remote bomb)
   int frames = 0;
   bool wantEnemies = false;  // fill SimOut::etrace
   std::vector<uint16_t> bossBase;  // boss objects: SimOut::bossHp sums their HP
@@ -71,6 +71,19 @@ struct Live {  // what the agent reads from WRAM besides the world view
 };
 Live readLive(const uint8_t* wram);
 
+// Remote traps. order: P1's remote bomb cells (r * cols + c), oldest first
+// (B sets off the oldest, docs/mechanics.md 10). True when one press now
+// catches an enemy in that bomb's blast (with the chain it sets off), P1 is
+// out of it, and it reaches neither the gate (enemies come back) nor a
+// wanted item (burnt). blast: those cells, if wanted.
+// needEnemy false: only P1, the gate and items out of it (a stale trap).
+bool remoteTrigger(const World& w, const std::vector<int>& order, std::vector<uint8_t>* blast = nullptr,
+                   bool needEnemy = true);
+// Traps out and no enemy for this long (frames): they go off once P1 is clear.
+constexpr int kTrapWait = 600;
+// Keep order in step with the world: gone bombs out, new ones at the end.
+void noteRemotes(const World& w, std::vector<int>& order);
+
 class Agent {
  public:
   explicit Agent(const Goal& g) : goal_(g) {}
@@ -88,6 +101,12 @@ class Agent {
   int pending() const { return int(pads_.size()) - at_; }  // frames of the move left to play
   const std::string& what() const { return what_; }
   bool verbose = false;  // log every oracle answer
+  // Set off the oldest remote bomb now? 1: an enemy is in its blast; 2: it
+  // is stale (kTrapWait) or in the way (decide found only survive), P1,
+  // the gate and items clear. 0: no. (frame() each
+  // frame while P1 holds the remote.)
+  int trapCheck(const World& tw);
+  bool trapStuck() const { return trapStuck_; }
 
  private:
   struct Cand {
@@ -97,6 +116,11 @@ class Agent {
     int endC = -1, endR = -1;
     enum Want { Live, Exit, Change, Kill, BossHit } want = Live;
     int drop = 1;     // BossHit: boss HP lost in the run (its bombs already out count too)
+    // Play only this many frames past the run's first A press (the bomb's
+    // own fuse and flames), or past its last B press (a remote set off): the
+    // walk budget is pessimistic, and world 2's blocks grow back ~190 frames
+    // after they break. 0: the whole commit.
+    int afterA = 0, afterB = 0;
   };
   bool tryCands(std::vector<Cand>& cs, const Live& live, Oracle& o, size_t maxRuns);
   void survive(const World& w, const Live& live, Oracle& o, const char* why);
@@ -114,6 +138,7 @@ class Agent {
   std::set<int> badSoft_;
   // Power-ups (optional) whose moves failed: given up after 3 (cell -> fails).
   std::map<int, int> itemFails_;
+  std::set<int> softSeen_;  // cells that held a soft block this stage (gaps now, if open)
   bool senseStale_ = false;  // this frame's boss senses nothing (points remembered)
   std::vector<uint16_t> bossBase_;  // this decision's boss objects (every run reports their HP)
   std::vector<uint16_t> pads_;
@@ -129,6 +154,13 @@ class Agent {
   double lagReal_ = 0, lagLogic_ = 0, eScale_ = 1;
   void watchLag(const uint8_t* wram);
   std::string what_, log_, logOut_, worldText_;
+  // Remote traps: P1's remote bombs oldest first, B frames left to press,
+  // frames before the next look, and when the last trap went down or an
+  // enemy last died (traps out: wait this long for them to work).
+  bool holdsRemote_ = false;
+  std::vector<int> remoteOrder_;
+  int trapB_ = 0, trapCool_ = 0, trapSince_ = -100000, lastEnemies_ = -1;
+  bool trapStuck_ = false;  // the last decision was a survive with traps out
 };
 
 }  // namespace sbm2

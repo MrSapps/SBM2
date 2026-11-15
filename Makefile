@@ -76,7 +76,7 @@ build/tools/lua: tools/lua/main.c $(LUA_CORE:%=$(LUA_SRC)/%.c)
 # The bot on the port (frame-step, no Mesen): bot/drive.py --port.
 # (the core as one unit, port/core_unity.c: the CPU's bus calls inline)
 BOTRUN_SRC := port/botrun.c port/core_unity.c
-build/port/botrun: $(BOTRUN_SRC) port/snes.c port/cpu.c port/ppu.c port/snes.h port/cpu.h port/ppu.h $(LUA_CORE:%=$(LUA_SRC)/%.c)
+build/port/botrun: $(BOTRUN_SRC) port/snes.c port/cpu.c port/ppu.c port/snes.h port/cpu.h port/ppu.h port/path_pad.h $(LUA_CORE:%=$(LUA_SRC)/%.c)
 	@mkdir -p build/port
 	$(CC) -O2 -std=gnu99 -DLUA_USE_LINUX -I$(LUA_SRC) -Iport -o $@ $(BOTRUN_SRC) $(LUA_CORE:%=$(LUA_SRC)/%.c) -lm -ldl -lpthread
 
@@ -97,9 +97,9 @@ build/port/agentrun: $(BOTRUN_SRC) port/snes.c port/cpu.c port/ppu.c port/*.h pl
 # New C++ planner (planner/): unit tests on world view snapshots
 # (docs/worldview.md), no emulator.
 PLANNER_SRC := $(wildcard planner/*.cpp)
-build/planner/test: $(PLANNER_SRC) planner/*.hpp planner/test/*.cpp
+build/planner/test: $(PLANNER_SRC) planner/*.hpp planner/test/*.cpp port/path_pad.h
 	@mkdir -p build/planner
-	$(CXX) -O2 -g -std=c++17 -Wall -Wextra -Iplanner -o $@ $(PLANNER_SRC) planner/test/*.cpp
+	$(CXX) -O2 -g -std=c++17 -Wall -Wextra -Iplanner -Iport -o $@ $(PLANNER_SRC) planner/test/*.cpp
 
 planner-test: build/planner/test build/planner/plan
 	build/planner/test planner/test/worlds

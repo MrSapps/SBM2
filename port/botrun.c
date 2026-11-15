@@ -26,6 +26,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <time.h>
+#include "path_pad.h"
 #include "snes.h"
 #include "lua.h"
 #include "lauxlib.h"
@@ -395,7 +396,7 @@ typedef struct SimJob {
     int16_t *wp2;
     int nwp2;
     int ph, p0, at2;  /* phase: 1 path, 2 post, 3 path2, 4 B (remote) */
-    int detEnd;       /* press B for 4 frames once path2 is done */
+    int detEnd;       /* press B (4 frames, every 20) this many times once path2 is done */
     int detWait;      /* ... after standing this many frames in cover */
     int sx, sy, still; /* path_pad: closest to the waypoint so far, frames since, waypoint */
     uint64_t map0;     /* TileMap hash at the start ... */
@@ -414,44 +415,10 @@ typedef struct SimJob {
     int nboss;
 } SimJob;
 
-/* The path controller (the same rule as bot.lua's pathPad; waypoints are
- * world pixels, cell * 16 + 8, so a scrolling stage doesn't move them): skip
- * waypoints reached (within 1 px), then press toward the next one along
- * the axis with the larger distance (Down/Up on a tie); 0 once at the end.
- * No closer to the waypoint for 12 frames: within 4 px it counts as
- * reached, else the other axis for a while. (1-2, off the stairs: P1 rests
- * at y 86 in (6,5), centre (104,88); Down slides it left onto the stairs,
- * Right brings it back, forever. Up, to the next waypoint, goes.) */
+/* The path controller: port/path_pad.h (unit tested from planner/test). */
 static uint16_t path_pad(const Snes *s, const int16_t *wp, int n, int *at, int *mem)
 {
-    /* world pixels: P1's position plus the scroll origin ($5F01, $5EFB) */
-    int x = (uint16_t)((s->wram[0x8010] | s->wram[0x8011] << 8) + (s->wram[0x5F01] | s->wram[0x5F02] << 8));
-    int y = (uint16_t)((s->wram[0x8018] | s->wram[0x8019] << 8) + (s->wram[0x5EFB] | s->wram[0x5EFC] << 8));
-    /* The start cell's centre is only there to line P1 up for its turn: if
-     * the first leg runs along the axis P1 is already lined up on, go
-     * straight (back to the centre first is a step the wrong way when P1
-     * sits off it toward the next cell: 2-8, a drop dodge walked up into
-     * the blast's row). */
-    if (*at == 0 && n >= 2 && ((wp[2] == wp[0] && abs(x - wp[0]) <= 1 && wp[3] != wp[1]) ||
-                               (wp[3] == wp[1] && abs(y - wp[1]) <= 1 && wp[2] != wp[0])))
-        *at = 1;
-    while (*at < n && abs(wp[2 * *at] - x) <= 1 && abs(wp[2 * *at + 1] - y) <= 1) (*at)++;
-    if (*at >= n) return 0;
-    int dx = wp[2 * *at] - x, dy = wp[2 * *at + 1] - y;
-    if (mem) {  /* mem: best distance, frames since it got better, waypoint index */
-        int d = abs(dx) + abs(dy);
-        if (mem[2] != *at || d < mem[0]) mem[0] = d, mem[1] = 0, mem[2] = *at;
-        else mem[1]++;
-        if (mem[1] >= 12 && abs(dx) <= 4 && abs(dy) <= 4 && *at + 1 < n) {
-            (*at)++;
-            dx = wp[2 * *at] - x, dy = wp[2 * *at + 1] - y;
-            mem[0] = abs(dx) + abs(dy), mem[1] = 0, mem[2] = *at;
-        }
-    }
-    int horiz = abs(dx) > abs(dy);
-    if (mem && mem[1] >= 12 && (horiz ? dy : dx) != 0 && (mem[1] / 12) % 2 == 1) horiz = !horiz;
-    if (horiz) return dx > 0 ? PAD_RIGHT : PAD_LEFT;
-    return dy > 0 ? PAD_DOWN : PAD_UP;
+    return path_pad_w(s->wram, wp, n, at, mem);
 }
 
 static void sim_setup(SimJob *j, const uint16_t *seq, int np, int frames)
@@ -492,7 +459,8 @@ static uint16_t sim_pad(SimJob *j, const Snes *s, int i, int *at)
 {
     if (j->ph == 1) {
         uint16_t p = path_pad(s, j->wp, j->nwp, at, &j->sx);
-        if (p || !(j->npost || j->nwp2)) return p;
+        /* (0 with waypoints left: let go in a jump's flight, not the end) */
+        if (p || *at < j->nwp || !(j->npost || j->nwp2)) return p;
         j->ph = 2; j->p0 = i;
     }
     if (j->ph == 2) {
@@ -501,10 +469,12 @@ static uint16_t sim_pad(SimJob *j, const Snes *s, int i, int *at)
     }
     if (j->ph == 3) {
         uint16_t p = path_pad(s, j->wp2, j->nwp2, &j->at2, &j->sx);
-        if (p || !j->detEnd) return p;
+        if (p || j->at2 < j->nwp2 || !j->detEnd) return p;
         j->ph = 4; j->p0 = i + j->detWait;
     }
-    return i >= j->p0 && i - j->p0 < 4 ? PAD_B : 0;
+    /* detEnd presses, 20 frames apart: each sets off the oldest remote
+     * bomb (docs/mechanics.md 10), so older ones (traps) go first */
+    { int k = i - j->p0; return k >= 0 && k < 20 * j->detEnd && k % 20 < 4 ? PAD_B : 0; }
 }
 
 /* A hit that costs a heart (P1 +$EF down) counts as a death in the sim:

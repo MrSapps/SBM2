@@ -102,7 +102,7 @@ bool parseWorld(const std::string& text, World& w, std::string* err) {
     } else if (k == "player") {
       Player& p = w.p;
       p.x = dec(f, "x"); p.y = dec(f, "y"); p.dir = ch(f, "dir", '-');
-      p.hearts = dec(f, "hearts"); p.flash = dec(f, "flash"); p.bombs = dec(f, "bombs");
+      p.hearts = dec(f, "hearts"); p.flash = dec(f, "flash"); p.bombs = dec(f, "bombs"); p.maxbombs = dec(f, "maxbombs");
       p.e0 = dec(f, "e0"); p.fire = dec(f, "fire", 1);
       p.pierce = dec(f, "pierce"); p.remote = dec(f, "remote"); p.ride = dec(f, "ride");
       p.glove = dec(f, "glove"); p.softpass = dec(f, "softpass");
@@ -135,7 +135,10 @@ bool parseWorld(const std::string& text, World& w, std::string* err) {
     } else if (k == "switch") {
       w.lightSwitch = std::make_pair(std::atoi(arg(1).c_str()), std::atoi(arg(2).c_str()));
     } else if (k == "item") {
-      w.items.push_back({std::atoi(arg(1).c_str()), std::atoi(arg(2).c_str()), arg(3) == "heart"});
+      w.items.push_back({std::atoi(arg(1).c_str()), std::atoi(arg(2).c_str()), arg(3) == "heart", dec(f, "kind", -1)});
+    } else if (k == "hidden") {
+      int kind = dec(f, "kind", -1);
+      w.hidden.push_back({std::atoi(arg(1).c_str()), std::atoi(arg(2).c_str()), kind == kItemHeart, kind});
     } else if (k == "magnet") {
       w.magnets.push_back({std::atoi(arg(1).c_str()), std::atoi(arg(2).c_str()), ch(f, "dir", 'u')});
     } else if (k == "boss") {

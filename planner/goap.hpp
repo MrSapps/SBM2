@@ -28,7 +28,11 @@ struct Task {
   int ref = -1;       // index into world.enemies / panels / items / bosses, else -1
   bool needsCrystals = false;  // $8F: immune until every crystal is lit
   bool blocksExit = false;     // KillEnemy: keeps the gate shut while alive
+  bool powerup = false;        // PickItem: a bomb up, fire up or heart (the "powerups" goal)
+  bool hidden = false;         // PickItem: still inside the soft block at (c,r)
 };
+// Items worth a detour: bomb up, fire up, heart.
+bool wantedItem(int kind);
 
 // UpdateExitBlocked C1:531D: does this object keep the exit shut?
 bool blocksExit(const Enemy& e);
@@ -39,6 +43,7 @@ struct Goal {
   bool blocks = false;   // no soft blocks left
   bool enemies = false;  // no killable enemies left
   bool items = false;    // no items left
+  bool powerups = false; // no wanted items left (bomb up, fire up, heart; hidden ones too)
   // "exit", "blocks+exit", ... Returns false on an unknown word.
   static bool parse(const std::string& s, Goal& g, std::string* err = nullptr);
   std::string str() const;

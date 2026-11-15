@@ -4,7 +4,7 @@
 --
 -- Env (as bot.lua): SBM2_OUT, SBM2_LOAD, SBM2_PREFIX, SBM2_FRAMES,
 -- SBM2_FRAME0, SBM2_STOPEARLY (stop at a death, and at the next stage),
--- SBM2_STOPAT, SBM2_GOAL (default "exit").
+-- SBM2_STOPAT, SBM2_GOAL (default "powerups+exit").
 -- Log lines (scenario.py greps them): "STAGE XX", "DEATH ...", "END ...".
 assert(emu.agent, "bot/agent.lua needs build/port/agentrun")
 local BOT_DIR = debug.getinfo(1, "S").source:match("^@(.*)/[^/]*$") or "."
@@ -14,7 +14,7 @@ local OUT = os.getenv("SBM2_OUT") or "build/agent"
 local FRAMES = tonumber(os.getenv("SBM2_FRAMES") or "3600")
 local FRAME0 = tonumber(os.getenv("SBM2_FRAME0") or "0")
 local LOAD = os.getenv("SBM2_LOAD"); if LOAD == "" then LOAD = nil end
-local GOAL = os.getenv("SBM2_GOAL") or "exit"
+local GOAL = os.getenv("SBM2_GOAL") or "powerups+exit"
 local STOPEARLY = os.getenv("SBM2_STOPEARLY") == "1"
 local VERBOSE = (os.getenv("SBM2_AGVERBOSE") or "0") ~= "0"
 -- SBM2_STOPAT=XX: stop on entering stage XX (hex); else with STOPEARLY on

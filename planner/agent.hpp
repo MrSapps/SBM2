@@ -111,6 +111,8 @@ class Agent {
   int stage_ = -1;
   std::map<int, int> bombFails_;
   std::set<int> badSoft_;
+  // Power-ups (optional) whose moves failed: given up after 3 (cell -> fails).
+  std::map<int, int> itemFails_;
   bool senseStale_ = false;  // this frame's boss senses nothing (points remembered)
   std::vector<uint16_t> bossBase_;  // this decision's boss objects (every run reports their HP)
   std::vector<uint16_t> pads_;

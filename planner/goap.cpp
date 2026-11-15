@@ -142,6 +142,13 @@ class Search {
     if (goal_.blocks && !allDone(n, TaskKind::BombSoft)) return false;
     if (goal_.enemies && !allDone(n, TaskKind::KillEnemy)) return false;
     if (goal_.items && !allDone(n, TaskKind::PickItem)) return false;
+    if (goal_.powerups && !powerupsDone(n)) return false;
+    return true;
+  }
+
+  bool powerupsDone(const Node& n) const {
+    for (size_t i = 0; i < tasks_.size(); i++)
+      if (tasks_[i].powerup && !n.done[i]) return false;
     return true;
   }
 
@@ -149,6 +156,7 @@ class Search {
     if (goal_.blocks && !allDone(n, TaskKind::BombSoft)) return false;
     if (goal_.enemies && !allDone(n, TaskKind::KillEnemy)) return false;
     if (goal_.items && !allDone(n, TaskKind::PickItem)) return false;
+    if (goal_.powerups && !powerupsDone(n)) return false;
     if (goal_.exit && !exited(n)) return false;
     return true;
   }
@@ -157,7 +165,7 @@ class Search {
   bool required(const Node& n, const Task& t) const {
     switch (t.kind) {
       case TaskKind::BombSoft: return goal_.blocks;
-      case TaskKind::PickItem: return goal_.items;
+      case TaskKind::PickItem: return goal_.items || (goal_.powerups && t.powerup);
       case TaskKind::EnterGate: return goal_.exit;
       case TaskKind::KillEnemy: return goal_.enemies || (goal_.exit && t.blocksExit && !gateOpen(n));
       case TaskKind::HurtBoss: return goal_.exit || goal_.enemies;
@@ -404,6 +412,7 @@ bool Goal::parse(const std::string& s, Goal& g, std::string* err) {
     else if (w == "blocks") g.blocks = true;
     else if (w == "enemies") g.enemies = true;
     else if (w == "items") g.items = true;
+    else if (w == "powerups") g.powerups = true;
     else {
       if (err) *err = "unknown goal '" + w + "'";
       return false;
@@ -420,6 +429,7 @@ std::string Goal::str() const {
   add(blocks, "blocks");
   add(enemies, "enemies");
   add(items, "items");
+  add(powerups, "powerups");
   add(exit, "exit");
   return s;
 }
@@ -451,6 +461,7 @@ bool blocksExit(const Enemy& e) {
 // A bomb can't be placed on tiles with bit 6 set: panels, crystals, stairs,
 // switches, bombs (docs/mechanics.md, "button places nothing").
 bool breakable(char c) { return c == '%' || c == 'B'; }
+bool wantedItem(int kind) { return kind == kItemBomb || kind == kItemFire || kind == kItemHeart; }
 bool canPlaceOn(char c) { return walkableClass(c) && std::string("Py^sbg").find(c) == std::string::npos; }
 
 bool walkableClass(char c) { return std::string(".i^Pyspf=ktTcCg*").find(c) != std::string::npos; }
@@ -471,7 +482,12 @@ std::vector<Task> worldTasks(const World& w) {
     }
   for (size_t i = 0; i < w.panels.size(); i++)
     if (!w.panels[i].done) out.push_back({TaskKind::TogglePanel, w.panels[i].c, w.panels[i].r, int(i), false, false});
-  for (size_t i = 0; i < w.items.size(); i++) out.push_back({TaskKind::PickItem, w.items[i].c, w.items[i].r, int(i), false, false});
+  for (size_t i = 0; i < w.items.size(); i++)
+    out.push_back({TaskKind::PickItem, w.items[i].c, w.items[i].r, int(i), false, false, wantedItem(w.items[i].kind), false});
+  // Wanted items still in their blocks: picked up where the block was (the
+  // route bombs it first). Unwanted hidden ones are no task.
+  for (const Item& it : w.hidden)
+    if (wantedItem(it.kind)) out.push_back({TaskKind::PickItem, it.c, it.r, -1, false, false, true, true});
   // A boss part that senses flames: hurt it where its sense points are.
   for (size_t i = 0; i < w.bosses.size(); i++) {
     const BossObj& b = w.bosses[i];

@@ -105,7 +105,7 @@ function WV.capture(rd8, frame)
     x = signed(rd16(P1 + 0x10)) + ox, y = signed(rd16(P1 + 0x18)) + oy,
     dir = (d & 8) ~= 0 and "u" or (d & 4) ~= 0 and "d" or (d & 2) ~= 0 and "l" or (d & 1) ~= 0 and "r" or "-",
     hearts = rd8(P1 + 0xEF), flash = (f4 & 0x20) ~= 0 and rd8(P1 + 0xB9) or 0,
-    bombs = rd8(P1 + 0xF1), e0 = rd8(P1 + 0xE0), fire = rd8(P1 + 0xE2) + 1,
+    bombs = rd8(P1 + 0xF1), maxbombs = rd8(P1 + 0xE1), e0 = rd8(P1 + 0xE0), fire = rd8(P1 + 0xE2) + 1,
     pierce = (stats & 4) ~= 0 and 1 or 0, remote = (stats & 1) ~= 0 and 1 or 0,
     glove = rd8(P1 + 0xFE), softpass = rd8(P1 + 0xFB),
     lock = rd16(P1 + 0x52), ride = (rd16(P1 + 2) & 0x8000) ~= 0 and 1 or 0,
@@ -173,18 +173,26 @@ function WV.capture(rd8, frame)
     w.switch = { (cell & 0x7F) // 2, cell >> 7 }
   end
 
-  -- Visible items: $44 tiles (heart = item kind 11 in the $3C48 list)
-  w.items = {}
-  local hearts = {}
+  -- Items: the $3C48 list {cell, kind} (kind bit 14: its block broke;
+  -- 0 bomb up, 2 fire up, 11 heart). Visible ones are $44 tiles; hidden
+  -- ones still sit in an unbroken soft block.
+  w.items, w.hidden = {}, {}
+  local kinds = {}
   for i = 0, 63 do
     local cell = rd16(0x3C48 + 4 * i)
     if cell >= 0x8000 then break end
-    if (rd16(0x3C48 + 4 * i + 2) & 0x3FFF) == 11 then hearts[cell] = true end
+    local kind = rd16(0x3C48 + 4 * i + 2)
+    local c, r = (cell & 0x7F) // 2, cell >> 7
+    if r < MAP_H then
+      kinds[cell] = kind & 0x3FFF
+      if (kind & 0x4000) == 0 and CLASS[w.raw[r][c]] == "%" then w.hidden[#w.hidden + 1] = { c, r, kind & 0x3FFF } end
+    end
   end
   for r = 0, MAP_H - 1 do
     for c = 0, MAP_W - 1 do
       if w.raw[r][c] == 0x44 then
-        w.items[#w.items + 1] = { c, r, hearts[r * ROW + c * 2] and "heart" or "item" }
+        local k = kinds[r * ROW + c * 2] or -1
+        w.items[#w.items + 1] = { c, r, k == 11 and "heart" or "item", k }
       end
     end
   end
@@ -222,8 +230,8 @@ function WV.encode(w)
   add("light " .. w.light)
   if w.gate then add(string.format("gate %d %d %s", w.gate[1], w.gate[2], w.gate[3])) end
   local p = w.player
-  add(string.format("player x=%d y=%d dir=%s hearts=%d flash=%d bombs=%d e0=%d fire=%d pierce=%d remote=%d glove=%d softpass=%d lock=%04X ride=%d f4=%04X f60=%04X",
-    p.x, p.y, p.dir, p.hearts, p.flash, p.bombs, p.e0, p.fire, p.pierce, p.remote, p.glove, p.softpass, p.lock, p.ride, p.f4, p.f60))
+  add(string.format("player x=%d y=%d dir=%s hearts=%d flash=%d bombs=%d maxbombs=%d e0=%d fire=%d pierce=%d remote=%d glove=%d softpass=%d lock=%04X ride=%d f4=%04X f60=%04X",
+    p.x, p.y, p.dir, p.hearts, p.flash, p.bombs, p.maxbombs, p.e0, p.fire, p.pierce, p.remote, p.glove, p.softpass, p.lock, p.ride, p.f4, p.f60))
   for _, b in ipairs(w.bombs) do
     add(string.format("bomb c=%d r=%d fuse=%d range=%d owner=%s remote=%d pierce=%d magnet=%d slot=%d flags=%02X",
       b.c, b.r, b.fuse, b.range, b.owner, b.remote, b.pierce, b.magnet, b.slot, b.flags))
@@ -235,7 +243,8 @@ function WV.encode(w)
   end
   for _, pn in ipairs(w.panels) do add(string.format("panel %d %d %s mode=%d", pn[1], pn[2], pn[3], pn[4])) end
   if w.switch then add(string.format("switch %d %d", w.switch[1], w.switch[2])) end
-  for _, it in ipairs(w.items) do add(string.format("item %d %d %s", it[1], it[2], it[3])) end
+  for _, it in ipairs(w.items) do add(string.format("item %d %d %s kind=%d", it[1], it[2], it[3], it[4])) end
+  for _, it in ipairs(w.hidden) do add(string.format("hidden %d %d kind=%d", it[1], it[2], it[3])) end
   for _, m in ipairs(w.magnets) do add(string.format("magnet %d %d dir=%s", m[1], m[2], m[3])) end
   local function layer(name, src, f)
     add(name)

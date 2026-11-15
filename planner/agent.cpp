@@ -248,6 +248,20 @@ bool Agent::tryCands(std::vector<Cand>& cs, const Live& live, Oracle& o, size_t 
                       c.what.c_str(), r.dead, r.enemies, live.enemies, r.hp, live.hp, r.bossHp, live.bossHp, r.px, r.py,
                       r.mapSig != live.mapSig ? " map" : "", aAt, c.req.path.size() / 2 - 1);
         log(vb);
+        {  // where P1 stopped for good, and the waypoints it was given
+          size_t nf = r.trace.size() / 2, still = nf;
+          while (still > 1 && r.trace[2 * (still - 1)] == r.trace[2 * (still - 2)] &&
+                 r.trace[2 * (still - 1) + 1] == r.trace[2 * (still - 2) + 1])
+            still--;
+          std::string wp;
+          for (size_t k = 0; k + 1 < c.req.path.size(); k += 2)
+            wp += " " + std::to_string(c.req.path[k] / 16) + "," + std::to_string(c.req.path[k + 1] / 16);
+          std::string tr;
+          for (size_t k = 0; k < nf; k += 24) tr += " " + std::to_string(r.trace[2 * k]) + "," + std::to_string(r.trace[2 * k + 1]);
+          log("    trace/24:" + tr);
+          if (nf) log("    still from " + std::to_string(still ? still - 1 : 0) + " at (" + std::to_string(r.trace[2 * (nf - 1)]) + "," +
+                      std::to_string(r.trace[2 * (nf - 1) + 1]) + "); path" + wp);
+        }
         if (!r.etrace.empty()) {
           for (int sl = 0; sl < kEnemySlots; sl++) {
             std::string t;
@@ -363,7 +377,7 @@ void Agent::survive(const World& w, const Live& live, Oracle& o, const char* why
 void Agent::decide(const World& w, const Live& live, Oracle& o) {
   decisions_++;
   frame_ = w.frame;
-  if (w.stage != stage_) stage_ = w.stage, bombFails_.clear(), badSoft_.clear();
+  if (w.stage != stage_) stage_ = w.stage, bombFails_.clear(), badSoft_.clear(), itemFails_.clear();
   worldText_ = encodeWorld(w);
   bossBase_.clear();
   for (const BossObj& b : w.bosses) bossBase_.push_back(uint16_t(b.base));
@@ -374,15 +388,51 @@ void Agent::decide(const World& w, const Live& live, Oracle& o) {
   std::vector<int> dist, prev;
   g.bfs(g.pc, g.pr, dist, prev);
 
-  Plan gp = plan(w, goal_);
+  // Soft blocks a bomb already out will break are done as far as the plan
+  // goes: with bombs to spare P1 doesn't wait for one blast before the next.
+  std::set<int> pending;
+  for (const Bomb& b : w.bombs)
+    for (const Cell& x : blastCells(w, b.c, b.r, b.range, b.pierce))
+      if (breakable(w.at(x.c, x.r))) pending.insert(g.idx(x.c, x.r));
+  World pw = w;
+  for (int k : pending) pw.map[size_t(k)] = '.';
+  // Power-ups are optional: one that failed 3 times is left (P1 can't get
+  // there, e.g. a route the map model gets wrong) rather than stall on it.
+  auto given = [&](const Item& it) {
+    auto f = itemFails_.find(g.idx(it.c, it.r));
+    return f != itemFails_.end() && f->second >= 3;
+  };
+  pw.hidden.erase(std::remove_if(pw.hidden.begin(), pw.hidden.end(), given), pw.hidden.end());
+  for (Item& it : pw.items)
+    if (given(it)) it.kind = -1;
+  Plan gp = plan(pw, goal_);
   if (!gp.ok || gp.steps.empty()) {
     Goal more;
     more.blocks = true;
-    gp = plan(w, more);
-    if (!gp.ok || gp.steps.empty()) return survive(w, live, o, "no plan");
+    gp = plan(pw, more);
+    if (!gp.ok || gp.steps.empty()) return survive(w, live, o, pending.empty() ? "no plan" : "waiting for a blast");
   }
-  const Step& st = gp.steps[0];
+  // The first step not stuck behind a pending blast (its route's first soft
+  // block is one a bomb out will break: wait for it, or do a later step).
+  size_t si = 0;
+  for (; si < gp.steps.size() && si < 4; si++) {
+    const Step& s = gp.steps[si];
+    if (pending.empty() || dist[size_t(g.idx(s.standC, s.standR))] >= 0) break;
+    auto route = g.softRoute(s.standC, s.standR, badSoft_);
+    size_t i = 1;
+    while (i < route.size() && !breakable(w.at(route[i] % w.cols, route[i] / w.cols))) i++;
+    if (i >= route.size() || !pending.count(route[i])) break;
+  }
+  if (si >= gp.steps.size() || si >= 4) return survive(w, live, o, "waiting for a blast");
+  const Step& st = gp.steps[si];
   const Task& task = gp.tasks[size_t(st.task)];
+  auto itemFailed = [&] {
+    if (task.kind == TaskKind::PickItem && task.powerup) itemFails_[g.idx(task.c, task.r)]++;
+  };
+  // Every bomb is out: a bomb task waits for one to come back.
+  bool needsBomb = (task.kind != TaskKind::PickItem && task.kind != TaskKind::EnterGate) ||
+                   dist[size_t(g.idx(st.standC, st.standR))] < 0;
+  if (needsBomb && w.p.bombs <= 0 && !w.bombs.empty()) return survive(w, live, o, "no bomb left");
   char tb[96];
   std::snprintf(tb, sizeof tb, "%s %d,%d", taskName(task.kind), task.c, task.r);
   std::string tname = tb;
@@ -429,6 +479,9 @@ void Agent::decide(const World& w, const Live& live, Oracle& o) {
       int wait = int((w.p.remote ? 30 + kFlameFrames : kNewFuse + kFlameFrames) * eScale_ + 0.5);  // (logic frames: lag stretches them)
       c.commit = t1 + 2 + t2 + wait;
       c.req.frames = c.commit + kTail;
+      // A bomb to spare: once in cover P1 is free to plan the next (the run
+      // still covers the whole blast).
+      if (!w.p.remote && w.p.bombs >= 2 && want == Cand::Change) c.commit = t1 + 2 + t2 + kSettle;
       c.endC = k % w.cols;
       c.endR = k / w.cols;
       c.want = want;
@@ -482,6 +535,7 @@ void Agent::decide(const World& w, const Live& live, Oracle& o) {
     }
     if (!cs.empty() && tryCands(cs, live, o, 8)) return;
     for (int x : tried) bombFails_[x]++;
+    itemFailed();
     return survive(w, live, o, ("way to " + tname).c_str());
   }
   switch (task.kind) {
@@ -775,7 +829,10 @@ void Agent::decide(const World& w, const Live& live, Oracle& o) {
       return survive(w, live, o, tname.c_str());
     }
   }
-  if (cs.empty() || !tryCands(cs, live, o, 12)) survive(w, live, o, tname.c_str());
+  if (cs.empty() || !tryCands(cs, live, o, 12)) {
+    itemFailed();
+    survive(w, live, o, tname.c_str());
+  }
 }
 
 static_assert(kEnemySlots == AG_ESLOTS, "enemy slots");

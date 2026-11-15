@@ -360,3 +360,69 @@ TEST("agent: a bomb cell the game refuses: dropped after 3 tries, routed around"
   CHECK(a.committed());
   CHECK(a.what().find("bomb at (2,3)") != std::string::npos);
 }
+
+// Bomb (1,2) is out and will break (1,1). With a bomb to spare P1 goes on
+// to the next block at once (not (1,1) again) and plays only up to cover;
+// with none left it waits.
+TEST("agent: a bomb out, one to spare: the next block, played to cover only; none left: wait") {
+  World w = mk({"###########",
+                "#%........#",
+                "#b#.#.#.#.#",
+                "#.....%...#",
+                "###########"}, 3, 1, "bomb c=1 r=2 fuse=100 range=2 owner=p1");
+  w.p.bombs = 2;
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 2; };
+  Agent a = agentFor("blocks");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.committed());
+  CHECK(a.what().find("soft 6,3") == 0);
+  CHECK(a.pending() < o.seen.back().frames - 150);  // not the fuse and flames
+  // No spare bomb: the whole blast is played.
+  w.p.bombs = 1;
+  Agent b = agentFor("blocks");
+  b.decide(w, liveOf(w), o);
+  CHECK(b.what().find("soft 6,3") == 0);
+  CHECK(b.pending() > 150);
+  // None left: wait, no bomb pressed.
+  w.p.bombs = 0;
+  o.seen.clear();
+  Agent c = agentFor("blocks");
+  c.decide(w, liveOf(w), o);
+  CHECK_EQ(c.what(), std::string("survive"));
+  for (const SimReq& r : o.seen) CHECK(r.post.empty());
+}
+
+// A hidden bomb up: the agent bombs its block open (powerups goal).
+TEST("agent: powerups: bomb open the block hiding a bomb up") {
+  World w = mk({"#######",
+                "#..%..#",
+                "#.#.#.#",
+                "#######"}, 1, 1, "hidden 3 1 kind=0");
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 2; };
+  Agent a = agentFor("powerups");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.committed());
+  CHECK(a.what().find("clear the way to item 3,1") == 0);
+}
+
+// A power-up whose moves keep failing (P1 can't get there) is optional:
+// after 3 failed decisions it is left and the goal goes on (1-2: before,
+// P1 waited out the whole clock for a bomb up behind (8,3)).
+TEST("agent: a power-up it can't get: left after 3 tries") {
+  World w = mk({"#######",
+                "#..%..#",
+                "#.#.#.#",
+                "#.....g",
+                "#######"}, 1, 1, "hidden 3 1 kind=0\ngate 6 3 open");
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -2; };  // walks still end by the gate; bombs change nothing
+  Agent a = agentFor("powerups+exit");
+  for (int i = 0; i < 3; i++) {
+    a.decide(w, liveOf(w), o);
+    CHECK(a.what() == "survive");
+  }
+  a.decide(w, liveOf(w), o);
+  CHECK_EQ(a.what(), std::string("gate 6,3: walk to (6,3)"));
+}

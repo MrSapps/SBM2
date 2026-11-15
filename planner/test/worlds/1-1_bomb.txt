@@ -6,7 +6,7 @@ origin 8 0
 size 17 14
 light none
 gate 12 4 closed
-player x=136 y=168 dir=- hearts=0 flash=0 bombs=0 e0=1 fire=1 pierce=0 remote=0 glove=0 softpass=0 lock=0000 ride=0 f4=0600 f60=0000
+player x=136 y=168 dir=- hearts=0 flash=0 bombs=0 maxbombs=0 e0=1 fire=1 pierce=0 remote=0 glove=0 softpass=0 lock=0000 ride=0 f4=0600 f60=0000
 bomb c=8 r=10 fuse=134 range=1 owner=p1 remote=0 pierce=0 magnet=0 slot=0 flags=80
 enemy slot=4 type=C0 x=200 y=71 vx=0 vy=0 step=- target=0,0 wait=0 hp=0 f4=0C00 c0=0000 d0=0000 be=0000 bc=0000 ba=0000 off=0
 enemy slot=5 type=94 x=40 y=103 vx=0 vy=0 step=d target=2,6 wait=23 hp=1 f4=0C00 c0=0000 d0=0000 be=0000 bc=0000 ba=0000 off=0

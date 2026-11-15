@@ -6,7 +6,7 @@ origin 0 240
 size 16 29
 light none
 gate 5 2 open
-player x=88 y=439 dir=- hearts=3 flash=0 bombs=9 e0=4 fire=10 pierce=0 remote=1 glove=2 softpass=0 lock=0801 ride=0 f4=0600 f60=0000
+player x=88 y=439 dir=- hearts=3 flash=0 bombs=9 maxbombs=0 e0=4 fire=10 pierce=0 remote=1 glove=2 softpass=0 lock=0801 ride=0 f4=0600 f60=0000
 enemy slot=4 type=C0 x=88 y=551 vx=0 vy=0 step=- target=0,0 wait=0 hp=0 f4=0C00 c0=8000 d0=0000 be=0000 bc=0000 ba=0000 off=1
 enemy slot=5 type=96 x=56 y=656 vx=0 vy=-0.5 step=u target=3,8 wait=1 hp=1 f4=0C00 c0=8000 d0=0000 be=0000 bc=0000 ba=0000 off=1
 enemy slot=6 type=8B x=200 y=240 vx=0 vy=0 step=r target=12,6 wait=1260 hp=1 f4=AC00 c0=1000 d0=0000 be=0000 bc=0000 ba=0000 off=0

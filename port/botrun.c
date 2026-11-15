@@ -397,6 +397,7 @@ typedef struct SimJob {
     int ph, p0, at2;  /* phase: 1 path, 2 post, 3 path2, 4 B (remote) */
     int detEnd;       /* press B for 4 frames once path2 is done */
     int detWait;      /* ... after standing this many frames in cover */
+    int sx, sy, still; /* path_pad: closest to the waypoint so far, frames since, waypoint */
     /* the result cache (sim_cache_*): resume from a cached end state */
     int resume, done;
     uint32_t f0;
@@ -414,8 +415,12 @@ typedef struct SimJob {
 /* The path controller (the same rule as bot.lua's pathPad; waypoints are
  * world pixels, cell * 16 + 8, so a scrolling stage doesn't move them): skip
  * waypoints reached (within 1 px), then press toward the next one along
- * the axis with the larger distance; 0 once at the end. */
-static uint16_t path_pad(const Snes *s, const int16_t *wp, int n, int *at)
+ * the axis with the larger distance (Down/Up on a tie); 0 once at the end.
+ * No closer to the waypoint for 12 frames: within 4 px it counts as
+ * reached, else the other axis for a while. (1-2, off the stairs: P1 rests
+ * at y 86 in (6,5), centre (104,88); Down slides it left onto the stairs,
+ * Right brings it back, forever. Up, to the next waypoint, goes.) */
+static uint16_t path_pad(const Snes *s, const int16_t *wp, int n, int *at, int *mem)
 {
     /* world pixels: P1's position plus the scroll origin ($5F01, $5EFB) */
     int x = (uint16_t)((s->wram[0x8010] | s->wram[0x8011] << 8) + (s->wram[0x5F01] | s->wram[0x5F02] << 8));
@@ -423,7 +428,19 @@ static uint16_t path_pad(const Snes *s, const int16_t *wp, int n, int *at)
     while (*at < n && abs(wp[2 * *at] - x) <= 1 && abs(wp[2 * *at + 1] - y) <= 1) (*at)++;
     if (*at >= n) return 0;
     int dx = wp[2 * *at] - x, dy = wp[2 * *at + 1] - y;
-    if (abs(dx) > abs(dy)) return dx > 0 ? PAD_RIGHT : PAD_LEFT;
+    if (mem) {  /* mem: best distance, frames since it got better, waypoint index */
+        int d = abs(dx) + abs(dy);
+        if (mem[2] != *at || d < mem[0]) mem[0] = d, mem[1] = 0, mem[2] = *at;
+        else mem[1]++;
+        if (mem[1] >= 12 && abs(dx) <= 4 && abs(dy) <= 4 && *at + 1 < n) {
+            (*at)++;
+            dx = wp[2 * *at] - x, dy = wp[2 * *at + 1] - y;
+            mem[0] = abs(dx) + abs(dy), mem[1] = 0, mem[2] = *at;
+        }
+    }
+    int horiz = abs(dx) > abs(dy);
+    if (mem && mem[1] >= 12 && (horiz ? dy : dx) != 0 && (mem[1] / 12) % 2 == 1) horiz = !horiz;
+    if (horiz) return dx > 0 ? PAD_RIGHT : PAD_LEFT;
     return dy > 0 ? PAD_DOWN : PAD_UP;
 }
 
@@ -464,7 +481,7 @@ static void sim_setup(SimJob *j, const uint16_t *seq, int np, int frames)
 static uint16_t sim_pad(SimJob *j, const Snes *s, int i, int *at)
 {
     if (j->ph == 1) {
-        uint16_t p = path_pad(s, j->wp, j->nwp, at);
+        uint16_t p = path_pad(s, j->wp, j->nwp, at, &j->sx);
         if (p || !(j->npost || j->nwp2)) return p;
         j->ph = 2; j->p0 = i;
     }
@@ -473,7 +490,7 @@ static uint16_t sim_pad(SimJob *j, const Snes *s, int i, int *at)
         j->ph = 3;
     }
     if (j->ph == 3) {
-        uint16_t p = path_pad(s, j->wp2, j->nwp2, &j->at2);
+        uint16_t p = path_pad(s, j->wp2, j->nwp2, &j->at2, &j->sx);
         if (p || !j->detEnd) return p;
         j->ph = 4; j->p0 = i + j->detWait;
     }
@@ -528,6 +545,7 @@ static void *sim_run(void *arg)
     long guard = 0;
     int at = 0;
     j->ph = 1; j->at2 = 0;
+    j->sx = 1 << 20; j->sy = 0; j->still = -1;
     if (!j->resume) {
         memset(j->hash, 0, sizeof j->hash);
         if (j->nwp && j->npre == 0) j->buf[0] = sim_pad(j, s, 0, &at);

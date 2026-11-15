@@ -1,6 +1,7 @@
 // World view parsing (docs/worldview.md).
 #include <dirent.h>
 
+#include "capture.hpp"
 #include "test.hpp"
 #include "world.hpp"
 
@@ -99,4 +100,41 @@ TEST("world: committed snapshots load") {
   }
   closedir(d);
   CHECK(n > 0);
+}
+
+// The item list $7E3C48 ({cell, kind}, $FFFF ends; kind bit 14: its block
+// broke): a hidden item sits in an unbroken soft block, a visible one is a
+// $44 tile; both carry their kind. maxbombs is +$E1.
+TEST("capture: items keep their kind; ones still in a block are hidden") {
+  std::vector<uint8_t> wram(0x20000, 0);
+  auto tile = [&](int c, int r, uint8_t t) { wram[size_t(0x1C000 + r * 0x80 + c * 2)] = t; };
+  for (int r = 0; r < 32; r++)
+    for (int c = 0; c < 32; c++) tile(c, r, 0xC3);
+  for (int c = 1; c <= 6; c++) tile(c, 2, 0x00);
+  tile(3, 2, 0xC2);  // soft block, bomb up inside
+  tile(5, 2, 0x44);  // fire up, out
+  tile(6, 2, 0xC2);  // soft block, nothing listed
+  auto entry = [&](int i, int c, int r, int kind) {
+    int a = 0x3C48 + 4 * i, cell = r * 0x80 + c * 2;
+    wram[size_t(a)] = uint8_t(cell), wram[size_t(a + 1)] = uint8_t(cell >> 8);
+    wram[size_t(a + 2)] = uint8_t(kind), wram[size_t(a + 3)] = uint8_t(kind >> 8);
+  };
+  entry(0, 3, 2, 0);
+  entry(1, 5, 2, 2 | 0x4000);
+  entry(2, 4, 9, 11 | 0x4000);  // (broke, picked up: no tile there now)
+  wram[0x3C48 + 12] = wram[0x3C48 + 13] = 0xFF;
+  wram[0x8000 + 0xE1] = 3;
+  wram[0x8000 + 0xF1] = 2;
+  World w = captureWorld(wram.data(), 0);
+  CHECK_EQ(w.p.maxbombs, 3);
+  CHECK_EQ(w.p.bombs, 2);
+  CHECK_EQ(w.hidden.size(), size_t(1));
+  CHECK(w.hidden.size() == 1 && w.hidden[0].c == 3 && w.hidden[0].r == 2 && w.hidden[0].kind == kItemBomb);
+  CHECK_EQ(w.items.size(), size_t(1));
+  CHECK(w.items.size() == 1 && w.items[0].c == 5 && w.items[0].kind == kItemFire && !w.items[0].heart);
+  // ...and the text form keeps them.
+  World x;
+  CHECK(parseWorld(encodeWorld(w), x));
+  CHECK(x.hidden.size() == 1 && x.hidden[0].kind == kItemBomb && x.items.size() == 1 && x.items[0].kind == kItemFire);
+  CHECK_EQ(x.p.maxbombs, 3);
 }

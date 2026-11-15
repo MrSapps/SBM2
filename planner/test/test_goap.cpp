@@ -220,3 +220,36 @@ TEST("goap: 1-1: kill the three, light the panel, then the gate") {
   CHECK(!p.steps.empty() && p.tasks[size_t(p.steps.back().task)].kind == TaskKind::EnterGate);
   CHECK(p.expanded < 500);
 }
+
+// Items: kind from the $3C48 list. Bomb ups, fire ups and hearts are worth
+// a detour, even still inside their block (the route bombs it open); other
+// kinds (score) are not.
+TEST("goap: powerups: open the block hiding a bomb up, pick up a fire up, then the exit") {
+  World w = mk({"#########",
+                "#...%.%.#",
+                "#.......#",
+                "#.i.i...#",
+                "#########"}, 1, 2,
+               "gate 7 2 open\nhidden 4 1 kind=0\nhidden 6 1 kind=14\nitem 2 3 item kind=2\nitem 4 3 item kind=15");
+  CHECK_EQ(w.hidden.size(), size_t(2));
+  Plan p = run(w, "powerups+exit");
+  CHECK(p.ok);
+  std::string s = tasksOf(p);
+  CHECK(s.find("item 4,1") != std::string::npos);
+  CHECK(s.find("item 2,3") != std::string::npos);
+  CHECK(s.find("4,3") == std::string::npos);  // score: no detour
+  CHECK(s.find("6,1") == std::string::npos);
+  CHECK(s.rfind("gate 7,2") == s.size() - 8);  // last
+  // The hidden one: its own block is bombed on the way.
+  for (auto& st : p.steps)
+    if (p.tasks[size_t(st.task)].kind == TaskKind::PickItem && p.tasks[size_t(st.task)].c == 4 && p.tasks[size_t(st.task)].r == 1) {
+      CHECK(p.tasks[size_t(st.task)].hidden);
+      bool bombed = false;
+      for (auto& v : st.via) bombed |= v.first == 4 && v.second == 1;
+      CHECK(bombed);
+    }
+  // Exit only: straight to the gate.
+  CHECK_EQ(tasksOf(run(w, "exit")), std::string("gate 7,2"));
+  Goal g;
+  CHECK(Goal::parse("powerups+exit", g) && g.powerups && g.str() == "powerups+exit");
+}

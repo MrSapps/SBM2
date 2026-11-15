@@ -1,5 +1,6 @@
 #include "capture.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 
@@ -118,6 +119,7 @@ World captureWorld(const uint8_t* wram, int frame) {
   p.hearts = rd.b(kP1 + 0xEF);
   p.flash = (f4 & 0x20) ? rd.b(kP1 + 0xB9) : 0;
   p.bombs = rd.b(kP1 + 0xF1);
+  p.maxbombs = rd.b(kP1 + 0xE1);
   p.e0 = rd.b(kP1 + 0xE0);
   p.fire = rd.b(kP1 + 0xE2) + 1;
   p.pierce = stats & 4;
@@ -191,15 +193,20 @@ World captureWorld(const uint8_t* wram, int frame) {
     w.lightSwitch = std::make_pair((cell & 0x7F) / 2, cell >> 7);
   }
 
-  bool heartAt[kMapH * kRow] = {};
+  // The item list: {cell, kind}; kind bit 14 is set once its block broke.
+  int kindAt[kMapH * kRow];
+  std::fill(kindAt, kindAt + kMapH * kRow, -1);
   for (int i = 0; i < 64; i++) {
-    int cell = rd.h(0x3C48 + 4 * i);
+    int cell = rd.h(0x3C48 + 4 * i), kind = rd.h(0x3C48 + 4 * i + 2);
     if (cell >= 0x8000) break;
-    if ((rd.h(0x3C48 + 4 * i + 2) & 0x3FFF) == 11 && cell < kMapH * kRow) heartAt[cell] = true;
+    int c = (cell & 0x7F) / 2, r = cell >> 7;
+    if (r >= kMapH) continue;
+    kindAt[cell] = kind & 0x3FFF;
+    if (!(kind & 0x4000) && kClass.t[raw(c, r)] == '%') w.hidden.push_back({c, r, (kind & 0x3FFF) == kItemHeart, kind & 0x3FFF});
   }
   for (int r = 0; r < kMapH; r++)
     for (int c = 0; c < kMapW; c++)
-      if (raw(c, r) == 0x44) w.items.push_back({c, r, heartAt[r * kRow + c * 2]});
+      if (raw(c, r) == 0x44) w.items.push_back({c, r, kindAt[r * kRow + c * 2] == kItemHeart, kindAt[r * kRow + c * 2]});
 
   static const char kMd[8] = {'u', 0, 'r', 0, 'd', 0, 'l', 0};
   for (int i = 0; i < 4; i++) {
@@ -245,9 +252,9 @@ std::string encodeWorld(const World& w) {
   }
   const Player& p = w.p;
   std::snprintf(b, sizeof b,
-                "player x=%d y=%d dir=%c hearts=%d flash=%d bombs=%d e0=%d fire=%d pierce=%d remote=%d glove=%d "
+                "player x=%d y=%d dir=%c hearts=%d flash=%d bombs=%d maxbombs=%d e0=%d fire=%d pierce=%d remote=%d glove=%d "
                 "softpass=%d lock=%04X ride=%d f4=%04X f60=%04X",
-                p.x, p.y, p.dir, p.hearts, p.flash, p.bombs, p.e0, p.fire, int(p.pierce), int(p.remote), p.glove,
+                p.x, p.y, p.dir, p.hearts, p.flash, p.bombs, p.maxbombs, p.e0, p.fire, int(p.pierce), int(p.remote), p.glove,
                 p.softpass, p.lock, int(p.ride), p.f4, p.f60);
   add(b);
   for (const Bomb& m : w.bombs) {
@@ -274,7 +281,11 @@ std::string encodeWorld(const World& w) {
     add(b);
   }
   for (const Item& it : w.items) {
-    std::snprintf(b, sizeof b, "item %d %d %s", it.c, it.r, it.heart ? "heart" : "item");
+    std::snprintf(b, sizeof b, "item %d %d %s kind=%d", it.c, it.r, it.heart ? "heart" : "item", it.kind);
+    add(b);
+  }
+  for (const Item& it : w.hidden) {
+    std::snprintf(b, sizeof b, "hidden %d %d kind=%d", it.c, it.r, it.kind);
     add(b);
   }
   for (const Magnet& m : w.magnets) {

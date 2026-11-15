@@ -8,6 +8,12 @@
  *               bot/drive.py) in frame-step mode, as the verifier does: the
  *               bot's run plays back exactly. A frame is then a logic frame,
  *               drawn whole at its end (no HDMA effects). Runs uncapped
+ *   -t FILE     with -r: the log was recorded by botrun/agentrun in timed
+ *               mode from a start state whose pad log is FILE (e.g.
+ *               build/lib/stage_10.inputs): that prefix replays in
+ *               frame-step (not shown), the rest timed, as botrun's
+ *               SBM2_REPLAY_START does
+ *   -f FPS      pace at FPS video frames a second (implies -p)
  *   -p          pace a replay at 60 frames a second
  *   -u          run uncapped (the default for -r)
  *   -n N        stop after N video frames
@@ -82,14 +88,21 @@ static int run_frame(void)
         snes_step(&m);
         if (++n > 50000000) return -1;
     }
+    static uint8_t last = 0xFF;
+    if (m.wram[0x1A] != last && m.wram[0xBC]) {
+        last = m.wram[0x1A];
+        fprintf(stderr, "frame %u stage %02X (pad log %u/%u)\n", m.frame, last, m.pad_pos, m.npads);
+    }
+    if (m.pads && m.pad_pos >= m.npads) return 1;
     return 0;
 }
 
 int main(int argc, char **argv)
 {
     if (argc < 2) { fprintf(stderr, "usage: play <rom> [-i input] [-n frames] [-s f1,f2 -o dir] [-N] [-x hook]\n"); return 2; }
-    const char *input = NULL, *replay = NULL, *outdir = ".", *shots = NULL;
+    const char *input = NULL, *replay = NULL, *outdir = ".", *shots = NULL, *timed = NULL;
     long frames = -1;
+    double fps = 60;
     int hooks = 1, uncapped = -1;
     uint8_t *enable = NULL;
     if (snes_load(&m, argv[1])) { fprintf(stderr, "can't load %s\n", argv[1]); return 2; }
@@ -100,6 +113,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-s") && i + 1 < argc) shots = argv[++i];
         else if (!strcmp(argv[i], "-o") && i + 1 < argc) outdir = argv[++i];
         else if (!strcmp(argv[i], "-N")) hooks = 0;
+        else if (!strcmp(argv[i], "-t") && i + 1 < argc) timed = argv[++i];
+        else if (!strcmp(argv[i], "-f") && i + 1 < argc) { fps = atof(argv[++i]); uncapped = 0; }
         else if (!strcmp(argv[i], "-p")) uncapped = 0;
         else if (!strcmp(argv[i], "-u")) uncapped = 1;
         else if (!strcmp(argv[i], "-x") && i + 1 < argc) {
@@ -134,6 +149,33 @@ int main(int argc, char **argv)
     }
     if (uncapped < 0) uncapped = replay != NULL;
     if (hooks) hook_install(&m, enable);
+    if (replay && timed) {
+        /* The start state's pad log in frame-step (botrun's replay_words),
+         * then the rest timed: a timed run plays back exactly. */
+        uint32_t sn;
+        uint16_t *sl = load_log(timed, &sn);
+        if (!sl || sn > m.npads || memcmp(sl, m.pads, sn * 2)) { fprintf(stderr, "%s is not a prefix of %s\n", timed, replay); return 2; }
+        uint16_t *log = (uint16_t *)m.pads;
+        uint32_t n = m.npads;
+        m.npads = sn;
+        m.pad_pos = 0;
+        m.pad_markers = 0;
+        for (uint32_t i = 0; i < sn; i++) if (sl[i] & 0xF) { m.pad_markers = 1; break; }
+        for (long steps = 0;; steps++) {
+            uint32_t pc = (uint32_t)m.cpu.pb << 16 | m.cpu.pc;
+            if (m.pad_pos >= m.npads && !m.fs_raised && !m.fs_in_nmi && !m.cpu.nmi &&
+                m.wait_at[pc & 0xFFFF] && snes_wait_point(&m, pc) == WAIT_CMP)
+                break;
+            if (steps > 4000000000L) { fprintf(stderr, "replay of %s did not end\n", timed); return 2; }
+            snes_step(&m);
+        }
+        m.framestep = 0;
+        m.pads = log + sn;
+        m.npads = n - sn;
+        m.pad_pos = 0;
+        m.pad_markers = 0;
+        free(sl);
+    }
 
     int headless = shots != NULL;
 #ifndef HAVE_SDL
@@ -190,10 +232,10 @@ int main(int argc, char **argv)
         SDL_RenderCopy(ren, tex, NULL, NULL);
         SDL_RenderPresent(ren);
         if (uncapped) continue;
-        static uint64_t next;
-        uint64_t now = SDL_GetTicks64();
-        next = next && next > now - 100 ? next + 1000 / 60 : now + 1000 / 60;
-        if (next > now) SDL_Delay((uint32_t)(next - now));
+        static double next;
+        double now = (double)SDL_GetTicks64();
+        next = next && next > now - 100 ? next + 1000 / fps : now + 1000 / fps;
+        if (next > now + 1) SDL_Delay((uint32_t)(next - now));
     }
     SDL_Quit();
 #endif

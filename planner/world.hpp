@@ -11,7 +11,7 @@ namespace sbm2 {
 struct Player {
   int x = 0, y = 0;  // map pixels
   char dir = '-';    // u d l r -
-  int hearts = 0, flash = 0, bombs = 0, e0 = 0, fire = 1;
+  int hearts = 0, flash = 0, bombs = 0, maxbombs = 0, e0 = 0, fire = 1;  // bombs: left to place ($F1); maxbombs: $E1
   bool pierce = false, remote = false, ride = false;
   int glove = 0, softpass = 0;
   uint16_t lock = 0, f4 = 0, f60 = 0;
@@ -40,7 +40,10 @@ struct Enemy {
 };
 
 struct Panel { int c = 0, r = 0, mode = 0; bool done = false; };
-struct Item { int c = 0, r = 0; bool heart = false; };
+// kind: the item list's kind ($7E3C48, docs/mechanics.md "Items and
+// hearts"): 0 bomb up (+$E1), 2 fire up (+$E2), 11 heart; -1 not known.
+struct Item { int c = 0, r = 0; bool heart = false; int kind = -1; };
+enum : int { kItemBomb = 0, kItemFire = 2, kItemHeart = 11 };
 struct Magnet { int c = 0, r = 0; char dir = 'u'; };
 
 // A boss-engine object ($1000-$17FF, docs/enemies.md 8) as the boss code
@@ -73,6 +76,7 @@ struct World {
   std::vector<Enemy> enemies;
   std::vector<Panel> panels;
   std::vector<Item> items;
+  std::vector<Item> hidden;  // items still inside an unbroken soft block
   std::vector<Magnet> magnets;
   std::vector<BossObj> bosses;
   std::optional<std::pair<int, int>> lightSwitch;

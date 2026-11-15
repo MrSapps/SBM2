@@ -40,13 +40,14 @@ size 17 14                # cols rows of the playfield (cells outside are '#')
 light off                 # light switch $5AAC: on | off | none
 intro 1                   # mini-boss intro $5E48 on: $A4-$A8 can't be hurt (only when on)
 gate 9 4 open             # exit gate cell, open | closed
-player x=213 y=96 dir=r hearts=1 flash=0 bombs=3 maxbombs=5 fire=9 pierce=0 remote=0 glove=0 softpass=0 lock=0000 ride=0
+player x=213 y=96 dir=r hearts=1 flash=0 bombs=3 maxbombs=5 e0=0 fire=9 pierce=0 remote=0 glove=0 softpass=0 lock=0000 ride=0
 bomb x=11 y=10 fuse=12 range=10 owner=p1 remote=0 pierce=0 magnet=0 slot=3
 enemy slot=5 type=93 x=214 y=96 vx=0.5 vy=0 step=r target=14,6 wait=0 hp=2 f4=0000 c0=8000 d0=0000 be=0000 bc=0000 ba=0000 spd=0.5
                           # (spd: walking speed +$46/+$48, px/f; left out when 0)
 panel 3 12 todo           # todo | done; mode 0 ($69) or 1 (toggle)
 switch 5 5                # light switch cell
-item 4 5 heart            # visible item: heart | item
+item 4 5 heart kind=11    # visible item: heart | item; kind from the $3C48 list (-1 unknown)
+hidden 6 2 kind=0        # an item still inside the soft block there (0 bomb up, 2 fire up, 11 heart)
 magnet 7 3 dir=r          # magnet cell and pull direction
 boss base=1000 state=CC9ABA x=136 y=64 hp=4 hurt=0 box=-32,32,-32,56 sense=-8,8;8,8
 map
@@ -99,7 +100,7 @@ the class, and from the `raw` layer only when a test needs it.
 
 ## Players
 
-`dir` is the facing direction `u d l r`. `flash` = frames of hurt-flash left (`+$B9`
+`dir` is the facing direction `u d l r`. `bombs` = bombs left to place (`+$F1`), `maxbombs` = `+$E1`. `flash` = frames of hurt-flash left (`+$B9`
 while `+4` bit 5 is set, else 0). `lock` = `+$52` in hex. `ride` = `+2` bit 15
 (launched or riding).
 

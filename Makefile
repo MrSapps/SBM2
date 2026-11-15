@@ -97,7 +97,7 @@ build/port/agentrun: $(BOTRUN_SRC) port/snes.c port/cpu.c port/ppu.c port/*.h pl
 # New C++ planner (planner/): unit tests on world view snapshots
 # (docs/worldview.md), no emulator.
 PLANNER_SRC := $(wildcard planner/*.cpp)
-build/planner/test: $(PLANNER_SRC) planner/*.hpp planner/test/*.cpp port/path_pad.h
+build/planner/test: $(PLANNER_SRC) planner/*.hpp planner/*.h planner/test/*.cpp port/path_pad.h
 	@mkdir -p build/planner
 	$(CXX) -O2 -g -std=c++17 -Wall -Wextra -Iplanner -Iport -o $@ $(PLANNER_SRC) planner/test/*.cpp
 

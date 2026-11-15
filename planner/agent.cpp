@@ -21,9 +21,24 @@ constexpr int kWalkFPT = 22;     // frames per cell budgeted for a walk (P1 ~16-
 constexpr int kNewFuse = 150;    // a fresh bomb's fuse (bot.lua NEW_FUSE)
 constexpr int kTail = 60;        // frames past the commit the oracle must also live
 constexpr int kSettle = 20;
+constexpr int kRideProbe = 360;  // frames a ride may take (3-5's subs: ~170-250)
 const int kDirs[4][2] = {{0, -1}, {0, 1}, {-1, 0}, {1, 0}};
 
 int rd16(const uint8_t* w, int a) { return w[a] | w[a + 1] << 8; }
+
+// Walking steps along waypoints (cell centres): a step to a cell further
+// than the next one is a jump or a ride (kSpringFrames, ~4 steps; 3-1:
+// a 40-frame walk over a pad ended in the air, by the $98 it landed on).
+bool hasJump(const std::vector<int16_t>& wp);
+int wpSteps(const std::vector<int16_t>& wp) {
+  int n = 0;
+  for (size_t i = 2; i + 1 < wp.size(); i += 2) {
+    int d = std::abs((wp[i] & ~kWpFlags) - (wp[i - 2] & ~kWpFlags)) / 16 + std::abs(wp[i + 1] - wp[i - 1]) / 16;
+    n += d > 1 ? kSpringFrames / kWalkFPT : 1;
+  }
+  return n;
+}
+bool hasJump(const std::vector<int16_t>& wp) { return wpSteps(wp) > int(wp.size() / 2) - 1; }
 int sx16(int v) { return v >= 0x8000 ? v - 0x10000 : v; }
 
 // Cells P1 can walk now: soft blocks, bombs (but its own cell) and flames
@@ -45,7 +60,7 @@ struct Grid {
   // spring pads), or from a pad only its jumps' landings (goap.hpp).
   template <class F>
   void steps(int c, int r, int c0, int r0, F f) const {
-    int land[4][2], nj = jumps(w, c, r, land);
+    int land[kMaxJumps][2], nj = jumps(w, c, r, land);
     if (nj >= 0) {
       for (int i = 0; i < nj; i++) f(land[i][0], land[i][1], true);
       return;
@@ -55,7 +70,14 @@ struct Grid {
       if (w.inside(nc, nr) && (w.at(nc, nr) == 'S' || open(nc, nr, c0, r0))) f(nc, nr, false);
     }
   }
-  bool throwsP1(int k) const { int l[4][2]; return jumps(w, k % w.cols, k / w.cols, l) >= 0; }
+  // Shorten a cell path to n cells, but never to end on a pad or a jump-pad
+  // object's cell (P1 is thrown on: 3-6, a walk cut on (5,13) bounced
+  // there); up to the next cell P1 can stop on.
+  void cut(std::vector<int>& p, size_t n) const {
+    while (n < p.size() && throwsP1(p[n - 1])) n++;
+    if (p.size() > n) p.resize(n);
+  }
+  bool throwsP1(int k) const { int l[kMaxJumps][2]; return jumps(w, k % w.cols, k / w.cols, l) >= 0; }
   // BFS from (c0,r0): dist (-1 unreachable) and prev cell index. A pad is
   // passed through, never a place to stop: its dist stays -1.
   void bfs(int c0, int r0, std::vector<int>& dist, std::vector<int>& prev) const {
@@ -91,8 +113,11 @@ struct Grid {
   // so P1 lines up before it turns.
   std::vector<int16_t> waypoints(const std::vector<int>& cells) const {
     std::vector<int16_t> wp;
-    for (int k : cells) {
-      wp.push_back(int16_t((k % w.cols) * 16 + 8));
+    for (size_t i = 0; i < cells.size(); i++) {
+      int k = cells[i], p = i ? cells[i - 1] : -1;
+      bool hold = p >= 0 && jumpHeld(w, p % w.cols, p / w.cols, k % w.cols, k / w.cols);
+      bool ride = p >= 0 && (rideableAt(w, p % w.cols, p / w.cols) || rideDock(w, p % w.cols, p / w.cols));
+      wp.push_back(int16_t(((k % w.cols) * 16 + 8) | (hold ? kJumpHold : 0) | (ride ? kRideEnd : 0)));
       wp.push_back(int16_t((k / w.cols) * 16 + 8));
     }
     return wp;
@@ -111,13 +136,12 @@ struct Grid {
       q.pop();
       if (g != d[size_t(k)]) continue;
       int c = k % w.cols, r = k / w.cols;
-      int land[4][2], nj = jumps(w, c, r, land);
-      for (int di = 0; di < 4; di++) {
-        auto& dd = kDirs[di];
+      int land[kMaxJumps][2], nj = jumps(w, c, r, land);
+      for (int di = 0; di < (nj >= 0 ? nj : 4); di++) {
+        auto& dd = kDirs[di % 4];
         int nc = c + dd[0], nr = r + dd[1];
         int cost;
         if (nj >= 0) {
-          if (di >= nj) continue;
           nc = land[di][0], nr = land[di][1];
           cost = kSpringFrames / kWalkFPT;
         }
@@ -163,6 +187,7 @@ Live readLive(const uint8_t* w) {
   int c = (l.px & 0x1FF) / 16, r = (l.py & 0x1FF) / 16;
   if (rd16(w, 0x8052) == 0x0801 && c < 32 && r < 32 && w[0x1C000 + r * 0x80 + c * 2] == 0x4C) l.locked = false;
   agent_enemies(w, &l.enemies, &l.hp);
+  l.enemyMask = agent_enemy_mask(w);
   l.mapSig = agent_map_sig(w);
   return l;
 }
@@ -329,6 +354,22 @@ uint16_t Agent::frame(const uint8_t* wram, int frame, Oracle& o, const char* ext
 // Oracle batch sizes: the first option alone (it is the best guess and
 // usually lives), then wider. Runs in a batch go in parallel, so a lone
 // first run spends no CPU on options that turn out not to be needed.
+int rideEnd(const SimOut& r, int c, int rr) {
+  const int kStill = 20;
+  size_t nf = r.trace.size() / 2;
+  bool on = false, left = false;  // (boarded: on the cell; then carried off it)
+  for (size_t f = 0; f + kStill < nf; f++) {
+    int x = r.trace[2 * f], y = r.trace[2 * f + 1];
+    if (x / 16 == c && y / 16 == rr) on = true;
+    else if (on && std::abs(x / 16 - c) + std::abs(y / 16 - rr) > 1) left = true;
+    if (!left) continue;
+    bool still = true;
+    for (size_t g = f + 1; g <= f + kStill && still; g++) still = r.trace[2 * g] == x && r.trace[2 * g + 1] == y;
+    if (still) return r.dead >= 0 && r.dead <= int(f + kStill) ? -1 : int(f);
+  }
+  return -1;
+}
+
 static size_t batchSize(size_t n) { return n == 0 ? 1 : n == 1 ? 3 : 4; }
 
 bool Agent::tryCands(std::vector<Cand>& cs, const Live& live, Oracle& o, size_t maxRuns) {
@@ -362,7 +403,7 @@ bool Agent::tryCands(std::vector<Cand>& cs, const Live& live, Oracle& o, size_t 
             still--;
           std::string wp;
           for (size_t k = 0; k + 1 < c.req.path.size(); k += 2)
-            wp += " " + std::to_string(c.req.path[k] / 16) + "," + std::to_string(c.req.path[k + 1] / 16);
+            wp += " " + std::to_string((c.req.path[k] & ~kWpFlags) / 16) + "," + std::to_string(c.req.path[k + 1] / 16);
           std::string tr;
           for (size_t k = 0; k < nf; k += 24) tr += " " + std::to_string(r.trace[2 * k]) + "," + std::to_string(r.trace[2 * k + 1]);
           log("    trace/24:" + tr);
@@ -392,12 +433,19 @@ bool Agent::tryCands(std::vector<Cand>& cs, const Live& live, Oracle& o, size_t 
         case Cand::Exit: ok = r.dead == -2; break;
         case Cand::Live: ok = r.dead == -1 && at; break;
         case Cand::Change: ok = r.dead == -1 && at && (r.mapSig != live.mapSig || r.mapChanged); break;
-        case Cand::Kill: ok = r.dead == -1 && at && (r.enemies < live.enemies || r.hp < live.hp); break;
+        case Cand::Kill: {
+          // (or the target's own slot no longer an enemy: a $98 hit is a
+          // mount plus a new $99 rider, the count stays)
+          bool gone = killSlot_ >= 0 && (live.enemyMask >> killSlot_ & 1) && !(r.enemyMask >> killSlot_ & 1);
+          ok = r.dead == -1 && at && (r.enemies < live.enemies || r.hp < live.hp || gone);
+          break;
+        }
         case Cand::BossHit: ok = r.dead == -1 && at && r.bossHp <= live.bossHp - c.drop; break;
       }
       if (ok) {
         pads_ = r.pads;
         trace_ = r.trace;
+        lastPx_ = r.px, lastPy_ = r.py;
         int n = c.want == Cand::Exit ? int(r.pads.size()) : std::min<int>(c.commit, int(r.pads.size()));
         if (c.afterA || c.afterB) {
           int aAt = -1, bAt = -1;
@@ -513,12 +561,23 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
                 w.items.end());
   decisions_++;
   frame_ = w.frame;
+  killSlot_ = -1;
   holdsRemote_ = w.p.remote;
   noteRemotes(w, remoteOrder_);
   int mine = int(remoteOrder_.size());  // P1's remote bombs out
   if (lastEnemies_ >= 0 && live.enemies < lastEnemies_) trapSince_ = w.frame;  // (a kill: the traps work)
   lastEnemies_ = live.enemies;
-  if (w.stage != stage_) stage_ = w.stage, bombFails_.clear(), badSoft_.clear(), itemFails_.clear(), softSeen_.clear();
+  if (w.stage != stage_) stage_ = w.stage, bombFails_.clear(), badSoft_.clear(), itemFails_.clear(), softSeen_.clear(), rides_.clear(),
+                            rideFails_.clear(), dockFor_ = -1;
+  // The ride just probed let P1 off: its object sits next to P1 now, where
+  // it can be boarded back (its dock).
+  if (dockFor_ >= 0 && dockFor_ < int(rides_.size())) {
+    for (const Enemy& e : w.enemies)
+      if (isRideable(e.type) && std::abs(e.col() - w.p.x / 16) + std::abs(e.row() - w.p.y / 16) <= 1)
+        rides_[size_t(dockFor_)].dc = e.col(), rides_[size_t(dockFor_)].dr = e.row();
+    dockFor_ = -1;
+  }
+  w.rides.insert(w.rides.end(), rides_.begin(), rides_.end());  // (a snapshot's own rides kept: repros)
   for (int k = 0; k < w.cols * w.rows; k++)
     if (breakable(w.map[size_t(k)])) softSeen_.insert(k);
   worldText_ = encodeWorld(w);
@@ -553,7 +612,42 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
     Goal more;
     more.blocks = true;
     gp = plan(pw, more);
-    if (!gp.ok || gp.steps.empty()) return survive(w, live, o, pending.empty() ? "no plan" : "waiting for a blast");
+    if (!gp.ok || gp.steps.empty()) {
+      // A ride not tried yet may lead on (3-5: the island is reached by
+      // submarine only): board it and see where it goes.
+      for (const Enemy& e : w.enemies) {
+        int c = e.col(), r = e.row(), k = w.inside(c, r) ? g.idx(c, r) : -1;
+        if (!isRideable(e.type) || k < 0 || rideFails_[k] >= 2 || (prev[size_t(k)] < 0 && k != g.idx(g.pc, g.pr))) continue;
+        bool known = false;
+        for (const Ride& rd : rides_) known |= rd.c == c && rd.r == r;
+        if (known) continue;
+        auto p = g.pathTo(prev, g.pc, g.pr, c, r);
+        SimReq q;
+        q.path = g.waypoints(p);
+        q.frames = kWalkFPT * wpSteps(q.path) + kSettle + kRideProbe;
+        std::vector<SimOut> out;
+        o.run({q}, out);
+        sims_++;
+        int end = out.empty() ? -1 : rideEnd(out[0], c, r);
+        if (end >= 0) {  // (what comes after the landing is the next move's business)
+          const SimOut& ro = out[0];
+          pads_.assign(ro.pads.begin(), ro.pads.begin() + end + 1);
+          trace_.assign(ro.trace.begin(), ro.trace.begin() + 2 * (end + 1));
+          at_ = 0;
+          int tc = ro.trace[size_t(2 * end)] / 16, tr = ro.trace[size_t(2 * end + 1)] / 16;
+          rides_.push_back({c, r, tc, tr});
+          dockFor_ = int(rides_.size()) - 1;
+          what_ = "ride";
+          char b[120];
+          std::snprintf(b, sizeof b, "ride: (%d,%d) carries P1 to (%d,%d) (%d frames)", c, r, tc, tr, end);
+          log(b);
+          return;
+        }
+        pads_.clear();
+        rideFails_[k]++;
+      }
+      return survive(w, live, o, pending.empty() ? "no plan" : "waiting for a blast");
+    }
   }
   // The first step not stuck behind a pending blast (its route's first soft
   // block is one a bomb out will break: wait for it, or do a later step).
@@ -611,7 +705,7 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
     if (dist[size_t(g.idx(xc, xr))] < 0 || !canPlaceOn(w.at(xc, xr)) || w.bombAt(xc, xr) || spoils(xc, xr)) return;
     auto p1 = g.pathTo(prev, g.pc, g.pr, xc, xr);
     int tx = waitPre + int(fpc_ * double(p1.size() - 1) + 0.5) + 2;  // the press, by P1's speed
-    int t1 = kWalkFPT * int(p1.size() - 1) + kSettle;
+    int t1 = kWalkFPT * wpSteps(g.waypoints(p1)) + kSettle;
     std::vector<int> d2, prev2;
     g.bfs(xc, xr, d2, prev2);
     DangerMap dm(w);
@@ -681,7 +775,7 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
     Cand c;
     auto p = g.pathTo(prev, g.pc, g.pr, tc, tr);
     c.req.path = g.waypoints(p);
-    c.commit = kWalkFPT * int(p.size() - 1) + kSettle;
+    c.commit = kWalkFPT * wpSteps(c.req.path) + kSettle;
     c.req.frames = c.commit + kTail;
     c.want = want;
     if (want != Cand::Exit) c.endC = tc, c.endR = tr;
@@ -832,7 +926,7 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
         for (Cand& c : per.back()) {
           c.req.pre.assign(size_t(x.wait), 0);
           c.req.frames += x.wait;
-          int d1 = int(c.req.path.size() / 2) - 1, d2 = int(c.req.path2.size() / 2) - 1;
+          int d1 = wpSteps(c.req.path), d2 = wpSteps(c.req.path2);
           c.commit = x.wait + kWalkFPT * (d1 + d2) + 2 * kSettle;
           c.drop = 1 + out;
           if (out) c.what += " (+" + std::to_string(out) + " out)";
@@ -867,9 +961,9 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
       for (size_t i = 0; i < spots.size() && cs.size() < 3; i++) {
         int k = spots[i].second;
         auto p = g.pathTo(prev, g.pc, g.pr, k % w.cols, k / w.cols);  // (here already: wait)
-        if (p.size() > 5) p.resize(5);
+        g.cut(p, 5);
         Cand c = walkCand(p.back() % w.cols, p.back() / w.cols, Cand::Live, tname + " (get in place)");
-        c.commit = p.size() == 1 ? 30 : std::min(c.commit, 60);
+        c.commit = p.size() == 1 ? 30 : hasJump(c.req.path) ? c.commit : std::min(c.commit, 60);
         cs.push_back(c);
       }
       if (!cs.empty() && tryCands(cs, live, o, 3)) return;
@@ -877,6 +971,7 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
       return;
     }
     case TaskKind::KillEnemy: {
+      killSlot_ = task.ref >= 0 && w.enemies[size_t(task.ref)].slot >= 4 ? w.enemies[size_t(task.ref)].slot - 4 : -1;
       // The remote with a bomb to spare: lay a trap where enemies are likely
       // to walk (the model's odds an enemy enters its blast within kTrapH),
       // go to cover and leave it; frame() sets it off when one is in. Traps
@@ -919,7 +1014,7 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
           bombCands(k % w.cols, k / w.cols, Cand::Live, "trap for " + tname, 2, cs, ambient());
           for (size_t j = n0; j < cs.size(); j++) {
             Cand& c = cs[j];
-            int d1 = int(c.req.path.size() / 2) - 1, d2 = int(c.req.path2.size() / 2) - 1;
+            int d1 = wpSteps(c.req.path), d2 = wpSteps(c.req.path2);
             c.req.detEnd = 0;
             c.afterA = c.afterB = 0;
             c.commit = kWalkFPT * (d1 + d2) + 2 * kSettle;
@@ -1071,10 +1166,10 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
       }
       if (bestK >= 0) {
         auto p = g.pathTo(prev, g.pc, g.pr, bestK % w.cols, bestK / w.cols);
-        if (p.size() > 4) p.resize(4);
+        g.cut(p, 4);
         int k = p.back();
         Cand c = walkCand(k % w.cols, k / w.cols, Cand::Live, tname + " (closing in)");
-        c.commit = std::min(c.commit, 40);
+        if (!hasJump(c.req.path)) c.commit = std::min(c.commit, 40);  // (never end one in the air)
         cs.push_back(c);
       }
       if (!cs.empty() && tryCands(cs, live, o, 4)) return;
@@ -1126,6 +1221,7 @@ struct COracle : sbm2::Oracle {
     for (size_t i = 0; i < n; i++) {
       out[i].dead = rs[i].dead;
       out[i].enemies = rs[i].enemies;
+      out[i].enemyMask = rs[i].enemyMask;
       out[i].hp = rs[i].hp;
       out[i].px = rs[i].px;
       out[i].py = rs[i].py;

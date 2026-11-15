@@ -40,6 +40,10 @@ struct Enemy {
 };
 
 struct Panel { int c = 0, r = 0, mode = 0; bool done = false; };
+// A ride seen (the agent learns them): P1 boarding the object on (c,r)
+// was carried to (tc,tr), and the object then sat on (dc,dr) (-1: not
+// seen), where it can be boarded back. Not in WRAM: the agent adds them.
+struct Ride { int c = 0, r = 0, tc = 0, tr = 0, dc = -1, dr = -1; };
 // kind: the item list's kind ($7E3C48, docs/mechanics.md "Items and
 // hearts"): 0 bomb up (+$E1), 2 fire up (+$E2), 11 heart; -1 not known.
 struct Item { int c = 0, r = 0; bool heart = false; int kind = -1; };
@@ -80,6 +84,7 @@ struct World {
   std::vector<Bomb> bombs;
   std::vector<Enemy> enemies;
   std::vector<Panel> panels;
+  std::vector<Ride> rides;
   std::vector<Item> items;
   std::vector<Item> hidden;  // items still inside an unbroken soft block
   std::vector<Magnet> magnets;

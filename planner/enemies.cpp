@@ -1,6 +1,7 @@
 #include "enemies.hpp"
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <cstdlib>
 
@@ -104,6 +105,10 @@ void EnemyModel::rollOne(const Enemy& e, int hold, const ModelBomb* b, EnemyRun&
   const int t3 = e.type & 0x3F;
   const bool asleep = (w_.intro && t3 >= 0x24 && t3 <= 0x28) || (e.c0 == 0 && e.step == '-' && e.tc == 0 && e.tr == 0);
   const int safeTo = asleep ? std::max(0, hold) : -1;
+  // $98 (docs/enemies.md): at +$BC = $1C0 it stops (hp $FF), vanishes and
+  // comes back on a random cell: no hit, no known track after that (3-1:
+  // bombs timed past it, 14000 frames of misses).
+  const int vanish = e.type == 0x98 ? int(std::max(0, 0x1C0 - int(e.bc)) * scale_) : INT_MAX;
   auto kills = [&](int cc, int rr, int t0, int t1) {
     if (!b || died >= 0) return;
     t0 = std::max(t0, safeTo);
@@ -112,6 +117,7 @@ void EnemyModel::rollOne(const Enemy& e, int hold, const ModelBomb* b, EnemyRun&
     if (f0 <= f1) died = f0;
   };
   auto stay = [&](int cc, int rr, int t0, int t1) {
+    t1 = std::min(t1, vanish - 1);
     if (t1 < t0) return;
     sp.push_back({int16_t(cc), int16_t(rr), t0, t1});
     kills(cc, rr, t0, t1);
@@ -142,7 +148,7 @@ void EnemyModel::rollOne(const Enemy& e, int hold, const ModelBomb* b, EnemyRun&
     if (!move(e.tc, e.tr, std::max(1, left))) moving = false, wait = kStop;
   }
   int detour = 0, detourAxis = 0;
-  while (t < horizon_ && died < 0) {
+  while (t < std::min(horizon_, vanish) && died < 0) {
     if (!moving) {
       // Stopped: wait, then a direction (generic: random each frame until a
       // free one comes up; chaser: plan a leg).

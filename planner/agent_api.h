@@ -36,6 +36,7 @@ typedef struct {
     int16_t *trace;    /* 2 * cap: P1 world x, y at the start of each frame */
     int16_t *etrace;   /* AG_ESLOTS * cap (wantEnemies, else NULL): agent_enemy_cells per frame */
     int bossHp;        /* sum of +$20 over bossBase at the end */
+    int enemyMask;     /* agent_enemy_mask at the end */
     int16_t *btrace;   /* 2 * nboss * cap (wantBoss, else NULL): each boss's world x, y per frame */
     int cap;
 } AgSimRes;
@@ -66,17 +67,33 @@ static inline uint64_t agent_map_sig(const uint8_t *wram)
     return h;
 }
 
-/* Live enemies and their HP as botrun's sim_result counts them. */
+/* Live enemies and their HP as botrun's sim_result counts them. A blast
+ * turns a $90 or $98 into a harmless mount (+$BE bit 15, bit 14 clear) and
+ * spawns a $99 rider: the mount is no enemy. Otherwise they count (3-1: a
+ * $98 never counted, its hits looked like misses). */
+static inline int agent_is_enemy(const uint8_t *w, int base)
+{
+    int hi = w[base + 1] & 0xF0, ty = w[base + 0x7E];
+    return (hi == 0x90 || hi == 0xA0) && !(w[base + 5] & 0x80) && ty < 0xC0 &&
+           !((ty == 0x90 || ty == 0x98) && (w[base + 0xBF] & 0xC0) == 0x80);
+}
 static inline void agent_enemies(const uint8_t *w, int *en, int *hp)
 {
     *en = *hp = 0;
-    for (int base = 0x8400; base <= 0x8F00; base += 0x100) {
-        int hi = w[base + 1] & 0xF0, ty = w[base + 0x7E];
-        if ((hi == 0x90 || hi == 0xA0) && !(w[base + 5] & 0x80) && ty < 0xC0 && ty != 0x90 && ty != 0x98) {
+    for (int base = 0x8400; base <= 0x8F00; base += 0x100)
+        if (agent_is_enemy(w, base)) {
             (*en)++;
             *hp += w[base + 0x43] & 0x7F;
         }
-    }
+}
+/* Which slots hold an enemy (that rule): bit i = $8400 + $100 * i. A kill
+ * shows as its slot's bit gone even when another enemy appears (a $98 hit:
+ * a mount, and a new $99 rider). */
+static inline int agent_enemy_mask(const uint8_t *w)
+{
+    int m = 0;
+    for (int i = 0; i < 12; i++) m |= agent_is_enemy(w, 0x8400 + 0x100 * i) << i;
+    return m;
 }
 
 /* The enemy slots ($8400..$8F00) and each one's cell, as the world view

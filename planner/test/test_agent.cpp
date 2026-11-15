@@ -8,6 +8,7 @@
 #include "agent.hpp"
 #include "blast.hpp"
 #include "capture.hpp"
+#include "agent_api.h"
 #include "test.hpp"
 
 using namespace sbm2;
@@ -26,7 +27,7 @@ struct FakeOracle : Oracle {
       o.trace.assign(size_t(2 * (r.frames + 1)), 0);
       // P1 ends where the move ends.
       const auto& last = !r.path2.empty() ? r.path2 : r.path;
-      if (last.size() >= 2) o.px = last[last.size() - 2], o.py = last.back();
+      if (last.size() >= 2) o.px = last[last.size() - 2] & ~kWpFlags, o.py = last.back();
       answer(r, o);
       out.push_back(o);
     }
@@ -697,8 +698,8 @@ TEST("agent: spring pads: a walk jumps; held by a pad is no lock") {
   bool jumped = false;
   for (const SimReq& q : o.seen)
     for (size_t i = 0; i + 3 < q.path.size(); i += 2)
-      jumped |= q.path[i] == 4 * 16 + 8 && q.path[i + 1] == 1 * 16 + 8 && q.path[i + 2] == 4 * 16 + 8 &&
-                q.path[i + 3] == 4 * 16 + 8;
+      jumped |= q.path[i] == 4 * 16 + 8 && q.path[i + 1] == 1 * 16 + 8 && (q.path[i + 2] & ~kJumpHold) == 4 * 16 + 8 &&
+                q.path[i + 3] >= 4 * 16 + 8;  // (let go to (4,4) or held to (4,5))
   CHECK(jumped);
   // Nothing to do (no gate): staying alive never ends a move on the pad.
   World nx = w;
@@ -754,4 +755,186 @@ TEST("agent: remote trap: a gap a block left ranks higher") {
   w.frame = 200;
   seen.decide(w, liveOf(w), o);
   CHECK(seen.what().find("trap for kill 5,1: bomb at (7,1)") == 0);
+}
+
+// A route over a held jump flags the landing waypoint (kJumpHold), a let-go one not.
+TEST("agent: a held jump's landing waypoint says hold") {
+  World w = mk({"#####",
+                "#.i.#",
+                "##w##",
+                "#####",
+                "#####",
+                "##S##",
+                "#...#",
+                "#####"}, 1, 6, "item 2 1 item kind=2");
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; };
+  Agent a = agentFor("items");
+  a.decide(w, liveOf(w), o);
+  bool held = false, plain = false;
+  for (const SimReq& q : o.seen)
+    for (size_t i = 0; i + 1 < q.path.size(); i += 2) {
+      if (q.path[i] & kJumpHold) held |= (q.path[i] & ~kJumpHold) == 2 * 16 + 8 && q.path[i + 1] == 1 * 16 + 8;
+      else plain |= q.path[i] == 2 * 16 + 8 && q.path[i + 1] == 5 * 16 + 8;
+    }
+  CHECK(held);
+  CHECK(plain);
+}
+
+// A short walk (closing in on an enemy) is never cut to end on a pad: P1
+// would be thrown on with no plan for it (3-6, cut on (5,13): bounced).
+TEST("agent: a cut walk never ends on a pad") {
+  World w = mk({"###########",
+                "#...S.....#",
+                "###########"}, 1, 1,
+               "enemy slot=5 type=80 x=" + std::to_string(9 * 16 + 8) + " y=" + std::to_string(1 * 16 + 8) + " hp=1");
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 1; r.enemies = r.hp = 1; };  // (no kill)
+  Agent a = agentFor("enemies");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.what().find("closing in") != std::string::npos);
+  for (const SimReq& q : o.seen) {
+    const auto& p = q.path2.empty() ? q.path : q.path2;
+    if (p.size() >= 2) CHECK(!((p[p.size() - 2] & ~kJumpHold) == 4 * 16 + 8 && p.back() == 1 * 16 + 8));
+  }
+}
+
+// The oracle's enemy count (agent_enemies): a $90/$98 counts until a blast
+// makes it a mount (+$BE bit 15, bit 14 clear; 3-1 never saw a $98 hit).
+TEST("agent: enemy count: $90/$98 until they are mounts") {
+  std::vector<uint8_t> w(size_t(kWramSize), 0);
+  auto put = [&](int slot, int ty, int be) {
+    int b = 0x8400 + slot * 0x100;
+    w[size_t(b + 1)] = 0x90, w[size_t(b + 0x7E)] = uint8_t(ty), w[size_t(b + 0x43)] = 1;
+    w[size_t(b + 0xBE)] = uint8_t(be), w[size_t(b + 0xBF)] = uint8_t(be >> 8);
+  };
+  put(0, 0x98, 0);
+  put(1, 0x98, 0x8000);  // (mounts)
+  put(2, 0x90, 0);
+  put(3, 0x90, 0x8000);
+  put(4, 0x81, 0);
+  put(5, 0x98, 0xC000);  // (bit 14 too: not a mount)
+  int en, hp;
+  agent_enemies(w.data(), &en, &hp);
+  CHECK_EQ(en, 4);
+}
+
+// No plan, a rideable object not tried: board it and see; the ride is kept
+// and the next decision routes over it (flagging where it lets P1 off).
+TEST("agent: rides: probe an unknown one, then use it") {
+  World w = mk({"###########",
+                "#...^#....#",
+                "###########"}, 1, 1,
+               "enemy slot=5 type=DA x=" + std::to_string(4 * 16 + 8) + " y=" + std::to_string(1 * 16 + 8) +
+                   "\nitem 8 1 item kind=2");
+  FakeOracle o;
+  // (walks 3 cells, boards, carried to (8,1), stands there)
+  auto ride = [](const SimReq&, SimOut& r) {
+    r.dead = -1;
+    for (size_t f = 0; 2 * f + 1 < r.trace.size(); f++) {
+      int c = f < 40 ? 1 + int(f) / 13 : f < 100 ? 4 : 8;
+      r.trace[2 * f] = int16_t(c * 16 + 8), r.trace[2 * f + 1] = 1 * 16 + 8;
+    }
+  };
+  o.answer = ride;
+  Agent a = agentFor("items");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.committed());
+  CHECK(a.takeLog().find("ride: (4,1) carries P1 to (8,1)") != std::string::npos);
+  CHECK(!o.seen.empty() && o.seen[0].frames > 300);
+  CHECK_EQ(a.pending(), 101);  // (to the landing, not the probe's whole run)
+  // Dead before the ride let P1 off: no ride; dead later (idle at the
+  // landing, 3-5's $8B): the ride stands.
+  SimOut x;
+  x.trace.assign(2 * 400, 0);
+  SimReq q;
+  q.frames = 399;
+  ride(q, x);
+  CHECK_EQ(rideEnd(x, 4, 1), 100);
+  x.dead = 110;
+  CHECK_EQ(rideEnd(x, 4, 1), -1);
+  x.dead = 300;
+  CHECK_EQ(rideEnd(x, 4, 1), 100);
+  CHECK_EQ(rideEnd(x, 6, 1), -1);  // (never on that cell)
+  // Off the ride, the sub beside P1 is its dock (boarded back from there).
+  World off = w;
+  off.p.x = 8 * 16 + 8;
+  off.enemies[0].x = 7 * 16 + 8;
+  off.frame = 200;
+  a.decide(off, liveOf(off), o);
+  CHECK(a.worldText().find("ride 4 1 8 1 dock_c=7 dock_r=1") != std::string::npos);
+  o.seen.clear();
+  World w2 = w;
+  w2.frame = 400;
+  o.answer = [](const SimReq& q, SimOut& r) {
+    r.dead = -1;
+    r.px = q.path[q.path.size() - 2] & ~kWpFlags, r.py = q.path.back();
+  };
+  a.decide(w2, liveOf(w2), o);
+  bool rode = false;
+  for (const SimReq& q : o.seen)
+    for (size_t i = 0; i + 1 < q.path.size(); i += 2) rode |= (q.path[i] & kRideEnd) && (q.path[i] & ~kWpFlags) == 8 * 16 + 8;
+  CHECK(rode);
+}
+
+// Back by a ride's dock (no sub there yet: the one P1 came on docks there):
+// the landing waypoint says where the ride lets P1 off.
+TEST("agent: rides: a dock's ride is flagged too") {
+  World w = mk({"###########",
+                "#i..^#^...#",
+                "###########"}, 8, 1,
+               "enemy slot=5 type=DA x=" + std::to_string(4 * 16 + 8) + " y=" + std::to_string(1 * 16 + 8) +
+                   "\nride 4 1 8 1 dock_c=6 dock_r=1\nride 6 1 2 1 dock_c=4 dock_r=1\nitem 1 1 item kind=2");
+  FakeOracle o;
+  o.answer = [](const SimReq& q, SimOut& r) {
+    r.dead = -1;
+    r.px = q.path[q.path.size() - 2] & ~kWpFlags, r.py = q.path.back();
+  };
+  Agent a = agentFor("items");
+  a.decide(w, liveOf(w), o);
+  bool rode = false;
+  for (const SimReq& q : o.seen)
+    for (size_t i = 0; i + 1 < q.path.size(); i += 2) rode |= (q.path[i] & kRideEnd) && (q.path[i] & ~kWpFlags) == 2 * 16 + 8;
+  CHECK(rode);
+}
+
+// A short move over a pad (closing in on an enemy) is not cut to 40 frames:
+// a jump takes ~90, and a move ending in the air leaves P1 landing blind
+// (3-1: by the $98 it then landed beside).
+TEST("agent: a short move over a pad lasts the jump") {
+  World w = mk({"###########",
+                "#.S...#...#",
+                "###########"}, 1, 1,
+               "enemy slot=5 type=80 x=" + std::to_string(9 * 16 + 8) + " y=" + std::to_string(1 * 16 + 8) + " hp=1");
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 1; r.enemies = r.hp = 1; };  // (no kill)
+  Agent a = agentFor("enemies");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.what().find("closing in") != std::string::npos);
+  CHECK(a.pending() > 90);
+}
+
+// A kill counts when the target's slot stops holding an enemy, even if the
+// count stays (a $98 hit: a mount, and a new $99 rider elsewhere).
+TEST("agent: a kill is the target's slot gone, whatever the count") {
+  World w = mk({"#######",
+                "#.....#",
+                "#.#.#.#",
+                "#.....#",
+                "#######"}, 1, 3,
+               "enemy slot=6 type=98 x=" + std::to_string(5 * 16 + 8) + " y=" + std::to_string(1 * 16 + 8) +
+                   " vx=0 vy=0 hp=1 spd=0.5");
+  Live l = liveOf(w);
+  l.enemyMask = 1 << 2;
+  FakeOracle o;
+  // (no run lowers the count; the slot's bit goes, a rider's comes)
+  o.answer = [](const SimReq& q, SimOut& r) {
+    r.dead = -1, r.mapSig = 2, r.enemies = r.hp = 1;
+    r.enemyMask = q.post.empty() ? 1 << 2 : 1 << 3;
+  };
+  Agent a = agentFor("enemies");
+  a.decide(w, l, o);
+  CHECK_EQ(a.killSlot(), 2);
+  CHECK(a.what().find("kill 5,1") == 0);
+  CHECK(a.what().find("closing in") == std::string::npos);
 }

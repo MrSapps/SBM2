@@ -1,0 +1,7 @@
+# The C++ agent plays all of world 3 from the 3-1 start through the 3-8 boss, no deaths.
+start 30
+agent 1
+budget 150000
+pass STAGE 40
+fail DEATH|agent error
+env SBM2_STOPAT=40

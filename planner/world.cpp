@@ -132,6 +132,9 @@ bool parseWorld(const std::string& text, World& w, std::string* err) {
       w.enemies.push_back(e);
     } else if (k == "panel") {
       w.panels.push_back({std::atoi(arg(1).c_str()), std::atoi(arg(2).c_str()), dec(f, "mode"), arg(3) == "done"});
+    } else if (k == "ride") {
+      w.rides.push_back({std::atoi(arg(1).c_str()), std::atoi(arg(2).c_str()), std::atoi(arg(3).c_str()),
+                         std::atoi(arg(4).c_str()), dec(f, "dock_c", -1), dec(f, "dock_r", -1)});
     } else if (k == "switch") {
       w.lightSwitch = std::make_pair(std::atoi(arg(1).c_str()), std::atoi(arg(2).c_str()));
     } else if (k == "item") {

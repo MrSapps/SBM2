@@ -102,8 +102,12 @@ emu.addEventCallback(function()
   -- throw or a carry locks it the same way but lets go sooner (the
   -- oracle's rule, port/botrun.c sim_run).
   local lock = r16(0x8052)
-  if (lock & 0xF809) == 0x0801 and r16(0x80A8) ~= r16(0x5D72) then lockAt = lockAt or frame
-  elseif (lock & 1) == 0 then lockAt = nil end
+  -- (a jump resets it: $1801 in the air, $0809 landing; $0801 on a pad)
+  local px, py = (r16(0x8010) + r16(0x5F01)) & 0xFFFF, (r16(0x8018) + r16(0x5EFB)) & 0xFFFF
+  local pc, pr = px // 16, py // 16
+  local onPad = pc < 32 and pr < 32 and emu.read(0x1C000 + pr * 0x80 + pc * 2, WRAM, false) == 0x4C
+  if (lock & 0xF809) == 0x0801 and r16(0x80A8) ~= r16(0x5D72) and not onPad then lockAt = lockAt or frame
+  else lockAt = nil end
   if lockAt and frame - lockAt >= 90 then
     if not deadAt then
       deadAt = frame

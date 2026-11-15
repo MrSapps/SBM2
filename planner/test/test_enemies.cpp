@@ -198,3 +198,19 @@ TEST("enemies: $90/$98 modelled unless a mount or hidden") {
   a0.type = 0xA0, a0.hp = 1;  // (a jump pad)
   CHECK(!EnemyModel::modelled(a0));
 }
+
+// A $98 vanishes at +$BC = $1C0 (then reappears anywhere): a blast after
+// that hits nothing (3-1: bombs timed past it, a stage of misses).
+TEST("enemies: a $98 can't be hit once it vanishes") {
+  World w = mkw({"#########",
+                 "#.......#",
+                 "####.####",
+                 "####.####",
+                 "#########"}, walker(3, 1, 'l'), 4, 3);
+  w.enemies[0].type = 0x98;
+  ModelBomb b{4, 1, 10, 160, 3, false};
+  w.enemies[0].bc = 0x1C0 - 400;  // (vanishes after the blast)
+  CHECK(EnemyModel::killOdds(EnemyModel(w, 400).roll(&b, 4, 3, 64)) > 0.95);
+  w.enemies[0].bc = 0x1C0 - 100;  // (gone before it)
+  CHECK(EnemyModel::killOdds(EnemyModel(w, 400).roll(&b, 4, 3, 64)) < 0.05);
+}

@@ -87,16 +87,34 @@ bool breakable(char c);
 // follower does) P1 lands 3 cells on, or slides on past walls to the next
 // cell it can stand on (or a pad). Water, a soft block, a bomb or the map edge first: no landing
 // (drowned, stuck). A pad is a node P1 leaves only by a jump.
-bool springLanding(const World& w, int c, int r, int dc, int dr, int& lc, int& lr);
+// hold: the way kept held in the air instead (the path follower does when
+// the landing waypoint says so, kJumpHold): 4 cells on, sliding the same way
+// (3-6's left climb, (5,21) Up held to the (5,16) pad, let go it drowns).
+bool springLanding(const World& w, int c, int r, int dc, int dr, int& lc, int& lr, bool hold = false);
 constexpr int kSpringFrames = 90;  // locked + in the air
 // Jump-pad objects ($E0 right, $A0/$E1 left, docs/enemies.md): P1 on the
 // object's cell is caught and thrown 8 cells. The way (+1/-1), or 0.
 int throwerAt(const World& w, int c, int r);
 inline bool isThrower(int type) { return type == 0xE0 || type == 0xA0 || type == 0xE1; }
+// Objects that carry P1 once it walks onto their cell (3-5's submarines
+// $DA/$DB, docs/mechanics.md 5b). Where to is learnt (World::rides).
+inline bool isRideable(int type) { return type == 0xDA || type == 0xDB; }
+bool rideableAt(const World& w, int c, int r);
+// (c,r) is where a ride P1 can take docks its object: boardable there later.
+bool rideDock(const World& w, int c, int r);
 // Where P1 stepping on (c,r) is thrown to: a spring pad's landings, or a
 // jump-pad object's. -1: (c,r) throws nothing (P1 walks on); else how many
 // landings are in out.
-int jumps(const World& w, int c, int r, int out[4][2]);
+constexpr int kMaxJumps = 8;  // 4 ways, let go or held
+int jumps(const World& w, int c, int r, int out[kMaxJumps][2]);
+// The jump from pad (c,r) to (lc,lr) needs the way held in the air (its
+// let-go landing is elsewhere).
+bool jumpHeld(const World& w, int c, int r, int lc, int lr);
+// Waypoint flag (on x): hold the way to this waypoint through a jump's flight.
+constexpr int16_t kJumpHold = 0x4000;
+// Waypoint flag (on x): a ride lets P1 off here (port/path_pad.h PP_RIDE).
+constexpr int16_t kRideEnd = 0x2000;
+constexpr int16_t kWpFlags = kJumpHold | kRideEnd;
 // Each panel's state once the bombs already out have gone off (docs/
 // mechanics.md 4): mode 1 toggles once per blast over it (parity), mode 0
 // is done by any.

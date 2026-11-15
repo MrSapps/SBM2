@@ -149,10 +149,11 @@ TEST("goap: $8F enemies die only when every crystal is lit") {
 TEST("goap: one bomb does every block, panel and crystal its blast reaches") {
   World w = mk({"#########",
                 "#.%...%.#",
+                "###.#####",
                 "#########"}, 4, 1);
   Plan p = run(w, "blocks");
   CHECK(p.ok);
-  CHECK_EQ(p.steps.size(), size_t(1));  // from (4,1), range 2 reaches both
+  CHECK_EQ(p.steps.size(), size_t(1));  // from (4,1), range 2 reaches both (cover: (3,2))
   CHECK(allDone(p, TaskKind::BombSoft));
 }
 
@@ -192,17 +193,16 @@ TEST("goap: many blocks: search limit, greedy finish still clears them") {
 }
 
 // Seed 3, 3-6: the gate was open, P1 sat in the bottom pocket until time
-// ran out. The pocket connects to the rest only by spring pads, which the
-// goal layer does not model yet, so today it must say the gate is out of
-// reach (not invent a walking route). Flip this when springs land.
-TEST("goap: s3_36: gate open but only springs lead out of the pocket") {
+// ran out. The pocket connects to the rest only by spring pads (held jumps
+// among them): the goal layer routes over them to the gate.
+TEST("goap: s3_36: gate open, only springs lead out of the pocket") {
   World w;
   std::string err;
   CHECK(loadWorld(sbm2test::worldsDir + "/s3_36_m300.txt", w, &err));
   CHECK(w.gateOpen);
   Plan p = run(w, "exit");
-  CHECK(!p.ok);
-  CHECK_EQ(p.why, std::string("unreachable: gate(5,2)"));
+  CHECK(p.ok);
+  CHECK_EQ(tasksOf(p), std::string("gate 5,2"));
 }
 
 // 1-1 (frame 110): three $94 block the exit and there is one $69 panel, so
@@ -364,13 +364,16 @@ TEST("goap: a bomb's blast never burns a wanted item") {
                 "#######"}, 1, 1, "item 3 2 heart kind=11");
   Plan p = run(w, "blocks+powerups");
   CHECK(p.ok);
-  CHECK_EQ(p.str(), std::string("item 3,2 from 3,2\nsoft 5,1 from 3,1\n"));
+  // ((3,1)'s blast catches every cell P1 could go, the item's too: (4,1))
+  CHECK_EQ(p.str(), std::string("soft 5,1 from 4,1\nitem 3,2 from 3,2\n"));
   // ...and an item still in its block is uncovered by the blast that breaks
   // it; the next blast over it burns it.
   World h = mk({"#######",
                 "#.%...#",
                 "#.##%##",
+                "#.#####",
                 "#######"}, 1, 1, "hidden 2 1 kind=11");
+  h.p.fire = 1;  // ((1,3): out of the first bomb's blast)
   p = run(h, "blocks+powerups");
   CHECK(p.ok);
   CHECK_EQ(tasksOf(p), std::string("soft 2,1; item 2,1; soft 4,2"));
@@ -483,15 +486,105 @@ TEST("goap: mode 1 panels: bombs out count, and a done one is not bombed again")
   Plan q = run(t, "blocks");
   CHECK(q.ok && q.steps.size() == 1 && q.steps[0].standR == 1);
   // Two planned blasts over a todo panel: done, then undone again.
-  World v = mk({"###",
-                "#.#",
-                "#P#",
-                "#%#",
-                "#%#",
-                "###"}, 1, 1, "panel 1 2 todo mode=1");
+  World v = mk({"######",
+                "#....#",
+                "##P#.#",
+                "##%#.#",
+                "##%#.#",
+                "######"}, 2, 1, "panel 2 2 todo mode=1");
   Plan b = run(v, "blocks");
   CHECK(b.ok);
   CHECK_EQ(b.steps.size(), size_t(2));
   for (size_t i = 0; i < b.tasks.size(); i++)
     if (b.tasks[i].kind == TaskKind::TogglePanel) CHECK(!b.done[i]);
+}
+
+// Held in the air a jump lands 4 cells on (sliding past walls): 3-6's left
+// climb, (5,21) Up let go lands in water, held reaches the (5,16) pad.
+TEST("goap: spring pads: held jumps, and a climb only they make") {
+  World w = mk({"#####",
+                "#...#",
+                "##w##",
+                "#####",
+                "#####",
+                "##S##",
+                "#...#",
+                "#####"}, 1, 6);
+  int c, r;
+  CHECK(!springLanding(w, 2, 5, 0, -1, c, r));  // (let go: 3 up is water)
+  CHECK(springLanding(w, 2, 5, 0, -1, c, r, true));
+  CHECK_EQ(r, 1);  // (4 up is (2,1))
+  CHECK(jumpHeld(w, 2, 5, 2, 1));
+  CHECK(!jumpHeld(w, 1, 6, 2, 6));  // (not a pad)
+  int l[kMaxJumps][2];
+  int n = jumps(w, 2, 5, l);
+  bool up = false;
+  for (int i = 0; i < n; i++) up |= l[i][0] == 2 && l[i][1] == 1;
+  CHECK(up);
+  World g = w;
+  g.hasGate = true, g.gateOpen = true, g.gateC = 1, g.gateR = 1;
+  g.map[size_t(1 * w.cols + 1)] = 'g';
+  CHECK(run(g, "exit").ok);
+}
+
+// Rideable objects (3-5's subs, docs/mechanics.md 5b): their cell leads
+// only where a learnt ride went; none known, a dead end.
+TEST("goap: rides: a learnt ride is a route, an unknown one a dead end") {
+  std::vector<std::string> m{"###########",
+                             "#...^#....#",
+                             "###########"};
+  World w = mk(m, 1, 1, enemy(4, 1, "DA") + "item 8 1 item kind=2\nride 4 1 8 1");
+  CHECK(rideableAt(w, 4, 1));
+  int l[kMaxJumps][2];
+  CHECK_EQ(jumps(w, 4, 1, l), 1);
+  CHECK_EQ(l[0][0], 8);
+  CHECK(run(w, "items").ok);
+  World none = mk(m, 1, 1, enemy(4, 1, "DA") + "item 8 1 item kind=2");
+  CHECK_EQ(jumps(none, 4, 1, l), 0);
+  CHECK(!run(none, "items").ok);
+  World gone = mk(m, 1, 1, "item 8 1 item kind=2\nride 4 1 8 1");  // (the sub is elsewhere now)
+  CHECK(!run(gone, "items").ok);
+}
+
+// A shuttle (3-5's subs): ridden over, it docks on the far side, where it
+// takes P1 back. Its rides chain: the dock of one boardable ride is
+// boardable too.
+TEST("goap: rides: there and back by the ride's dock") {
+  std::vector<std::string> m{"###########",
+                             "#g..^#^...#",
+                             "###########"};
+  // (4,1) carries P1to (8,1), the sub then at (6,1); (6,1) back to (2,1), the sub at (4,1).
+  std::string rides = "ride 4 1 8 1 dock_c=6 dock_r=1\nride 6 1 2 1 dock_c=4 dock_r=1\n";
+  World w = mk(m, 1, 1, enemy(4, 1, "DA") + rides + "gate 1 1 open\nitem 9 1 item kind=2");
+  CHECK(rideDock(w, 6, 1));
+  CHECK(!rideDock(w, 4, 1) || rideableAt(w, 4, 1));
+  Plan p = run(w, "items+exit");
+  CHECK(p.ok);
+  CHECK_EQ(tasksOf(p), std::string("item 9,1; gate 1,1"));
+  World nodock = mk(m, 1, 1, enemy(4, 1, "DA") + "ride 4 1 8 1\nride 6 1 2 1\ngate 1 1 open\nitem 9 1 item kind=2");
+  CHECK(!rideDock(nodock, 6, 1));
+  CHECK(!run(nodock, "items+exit").ok);
+}
+
+// A bomb cell is only good with somewhere out of its blast to go. 3-1
+// (frame 4723): the (15,8) panel's only bomb cell (14,8), fire 1, is a
+// pocket reached by a jump, all of it in the blast; the plan used it
+// forever. Now a soft block by it is opened first (here (14,10), on the
+// way to the (15,10) panel).
+TEST("goap: 3-1: no bomb from a pocket with no cover") {
+  World w;
+  std::string err;
+  CHECK(loadWorld(sbm2test::worldsDir + "/3-1_panel_pocket.txt", w, &err));
+  Plan p = run(w, "exit");
+  CHECK(p.ok);
+  bool opened = false;
+  for (auto& st : p.steps) {
+    const Task& t = p.tasks[size_t(st.task)];
+    if (t.kind == TaskKind::BombSoft && ((t.c == 13 && t.r == 8) || (t.c == 14 && t.r == 7) || (t.c == 14 && t.r == 10))) opened = true;
+    for (auto& v : st.via) opened |= (v.first == 13 && v.second == 8) || (v.first == 14 && v.second == 7) || (v.first == 14 && v.second == 10);
+    if (t.kind == TaskKind::TogglePanel && t.c == 15 && t.r == 8) {
+      CHECK(opened || !(st.standC == 14 && st.standR == 8));
+      break;
+    }
+  }
 }

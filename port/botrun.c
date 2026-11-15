@@ -587,13 +587,13 @@ static void *sim_run(void *arg)
                 j->dead = (int)(s->frame - f0); break;
             }
             if (s->wram[0x80EF] > h0) h0 = s->wram[0x80EF];
-            if ((lock & 0xF809) == 0x0801) {
+            if ((lock & 0xF809) == 0x0801 && !p1_on_pad(s->wram)) {
                 uint16_t at8 = s->wram[0x80A8] | s->wram[0x80A9] << 8;
                 uint16_t ex = s->wram[0x5D72] | s->wram[0x5D73] << 8;
                 if (at8 == ex) { j->dead = -2; break; }
                 if (!lockAt) lockAt = s->frame;
                 else if (s->frame - lockAt >= 90) { j->dead = (int)(lockAt - f0); break; }
-            } else if (!(lock & 1)) lockAt = 0;
+            } else lockAt = 0;  /* (a jump: $1801 in the air, $0809 landing, $0801 on a pad) */
         }
     }
     j->h0 = h0;
@@ -663,6 +663,9 @@ static void sim_result(const SimJob *j, SimRes *r)
     for (int o = 0; o < 32 * 0x80; o += 2) fl += w[0x1C000 + o] == 0;
     r->fl = fl;
     int en = 0, hp = 0;
+#ifdef SBM2_AGENT
+    agent_enemies(w, &en, &hp);  /* (the agent's count: $98 too, planner/agent_api.h) */
+#else
     for (int base = 0x8400; base <= 0x8F00; base += 0x100) {
         int hi = w[base + 1] & 0xF0, ty = w[base + 0x7E];
         if ((hi == 0x90 || hi == 0xA0) && !(w[base + 5] & 0x80) && ty < 0xC0 && ty != 0x90 && ty != 0x98) {
@@ -670,6 +673,7 @@ static void sim_result(const SimJob *j, SimRes *r)
             hp += w[base + 0x43] & 0x7F;
         }
     }
+#endif
     r->en = en; r->hp = hp;
     /* (world pixels: + the scroll origin, as path_pad) */
     r->ph = j->ph;
@@ -944,8 +948,8 @@ static double ag_now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &
 #endif
 static const char *ag_cache;
 static unsigned long ag_hits;
-typedef struct { uint32_t magic; int32_t dead, en, hp, px, py, ph, cap; uint64_t mapSig; int32_t bossHp, nbt, mapChanged; } AgCacheHdr;
-#define AG_MAGIC 0x41474333
+typedef struct { uint32_t magic; int32_t dead, en, hp, px, py, ph, cap; uint64_t mapSig; int32_t bossHp, nbt, mapChanged, emask; } AgCacheHdr;
+#define AG_MAGIC 0x41474334
 static uint64_t ag_key(uint64_t live, const AgSimReq *r, int cap)
 {
     uint64_t h = mix64(live, SBM2_CORE_ID, strlen(SBM2_CORE_ID));
@@ -976,6 +980,7 @@ static int ag_cache_get(uint64_t k, AgSimRes *o)
     if (!ok) return 0;
     o->dead = h.dead; o->enemies = h.en; o->hp = h.hp; o->px = h.px; o->py = h.py; o->ph = h.ph; o->mapSig = h.mapSig; o->mapChanged = h.mapChanged;
     o->bossHp = h.bossHp;
+    o->enemyMask = h.emask;
     return 1;
 }
 static void ag_cache_put(uint64_t k, const AgSimRes *o, int nboss)
@@ -989,7 +994,7 @@ static void ag_cache_put(uint64_t k, const AgSimRes *o, int nboss)
     snprintf(t, sizeof t, "%s.%d.tmp", p, (int)getpid());
     FILE *f = fopen(t, "wb");
     if (!f) return;
-    AgCacheHdr h = {AG_MAGIC, o->dead, o->enemies, o->hp, o->px, o->py, o->ph, o->cap, o->mapSig, o->bossHp, nbt, o->mapChanged};
+    AgCacheHdr h = {AG_MAGIC, o->dead, o->enemies, o->hp, o->px, o->py, o->ph, o->cap, o->mapSig, o->bossHp, nbt, o->mapChanged, o->enemyMask};
     int ok = fwrite(&h, sizeof h, 1, f) == 1 && fwrite(o->pads, 2, (size_t)o->cap, f) == (size_t)o->cap &&
              fwrite(o->trace, 2, (size_t)o->cap * 2, f) == (size_t)o->cap * 2 &&
              (!o->etrace || fwrite(o->etrace, 2, (size_t)o->cap * AG_ESLOTS, f) == (size_t)o->cap * AG_ESLOTS) &&
@@ -1082,6 +1087,7 @@ static void ag_run(const AgSimReq *rq, AgSimRes *rs, int n)
             o->bossHp = 0;
             for (int q = 0; q < j->nboss; q++) o->bossHp += j->s.wram[j->bossBase[q] + 0x20] | j->s.wram[j->bossBase[q] + 0x21] << 8;
             o->dead = r.dead; o->enemies = r.en; o->hp = r.hp;
+            o->enemyMask = agent_enemy_mask(j->s.wram);
             o->px = r.px; o->py = r.py; o->ph = r.ph;
             o->mapSig = agent_map_sig(j->s.wram);
             o->mapChanged = j->mapChanged || o->mapSig != j->map0;

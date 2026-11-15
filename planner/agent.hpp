@@ -41,6 +41,7 @@ struct SimReq {
 struct SimOut {
   int dead = -1;  // -1 lived, -2 left by the exit, else the frame P1 died
   int enemies = 0, hp = 0;
+  int enemyMask = 0;  // agent_enemy_mask at the end
   int px = 0, py = 0, ph = 0;
   uint64_t mapSig = 0;
   bool mapChanged = false;      // the map differed from the start at some point (blocks grow back)
@@ -66,6 +67,7 @@ struct Live {  // what the agent reads from WRAM besides the world view
   bool inStage = false, locked = false;
   int px = 0, py = 0;  // P1 world pixels
   int enemies = 0, hp = 0;
+  int enemyMask = 0;  // agent_enemy_mask
   int bossHp = 0;  // the world's boss lines, summed
   uint64_t mapSig = 0;
 };
@@ -83,6 +85,11 @@ bool remoteTrigger(const World& w, const std::vector<int>& order, std::vector<ui
 constexpr int kTrapWait = 600;
 // Keep order in step with the world: gone bombs out, new ones at the end.
 void noteRemotes(const World& w, std::vector<int>& order);
+// A ride probe's run (boarding the object on (c,r)): the frame the ride let
+// P1 off (on the cell, then carried more than a cell away and still for 20
+// frames, alive by then), else -1.
+struct SimOut;
+int rideEnd(const SimOut& r, int c, int rr);
 
 class Agent {
  public:
@@ -101,6 +108,7 @@ class Agent {
   int pending() const { return int(pads_.size()) - at_; }  // frames of the move left to play
   const std::string& what() const { return what_; }
   bool verbose = false;  // log every oracle answer
+  int killSlot() const { return killSlot_; }
   // Set off the oldest remote bomb now? 1: an enemy is in its blast; 2: it
   // is stale (kTrapWait) or in the way (decide found only survive), P1,
   // the gate and items clear. 0: no. (frame() each
@@ -138,7 +146,13 @@ class Agent {
   std::set<int> badSoft_;
   // Power-ups (optional) whose moves failed: given up after 3 (cell -> fails).
   std::map<int, int> itemFails_;
-  std::set<int> softSeen_;  // cells that held a soft block this stage (gaps now, if open)
+  std::set<int> softSeen_;
+  // Rides learnt this stage (World::rides), probes that went nowhere (cell
+  // -> count), and where the last committed run ended (world pixels).
+  std::vector<Ride> rides_;
+  std::map<int, int> rideFails_;
+  int dockFor_ = -1;  // the ride just probed (its dock is seen next decision)
+  int lastPx_ = 0, lastPy_ = 0;  // cells that held a soft block this stage (gaps now, if open)
   bool senseStale_ = false;  // this frame's boss senses nothing (points remembered)
   std::vector<uint16_t> bossBase_;  // this decision's boss objects (every run reports their HP)
   std::vector<uint16_t> pads_;
@@ -160,7 +174,8 @@ class Agent {
   bool holdsRemote_ = false;
   std::vector<int> remoteOrder_;
   int trapB_ = 0, trapCool_ = 0, trapSince_ = -100000, lastEnemies_ = -1;
-  bool trapStuck_ = false;  // the last decision was a survive with traps out
+  bool trapStuck_ = false;
+  int killSlot_ = -1;  // the kill task's enemy slot (0 = $8400), else -1  // the last decision was a survive with traps out
 };
 
 }  // namespace sbm2

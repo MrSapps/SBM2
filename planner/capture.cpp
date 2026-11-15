@@ -306,6 +306,10 @@ std::string encodeWorld(const World& w) {
     std::snprintf(b, sizeof b, "panel %d %d %s mode=%d", pn.c, pn.r, pn.done ? "done" : "todo", pn.mode);
     add(b);
   }
+  for (const Ride& rd : w.rides) {
+    std::snprintf(b, sizeof b, "ride %d %d %d %d dock_c=%d dock_r=%d", rd.c, rd.r, rd.tc, rd.tr, rd.dc, rd.dr);
+    add(b);
+  }
   if (w.lightSwitch) {
     std::snprintf(b, sizeof b, "switch %d %d", w.lightSwitch->first, w.lightSwitch->second);
     add(b);

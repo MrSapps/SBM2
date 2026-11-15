@@ -1,0 +1,85 @@
+worldview 1
+stage 30
+frame 4723
+time 183
+origin 8 0
+size 17 14
+light none
+gate 14 2 closed
+player x=136 y=151 dir=- hearts=0 flash=0 bombs=1 maxbombs=2 e0=1 fire=1 pierce=0 remote=0 glove=0 softpass=0 lock=0000 ride=0 f4=0600 f60=0000
+bomb c=9 r=8 fuse=34 range=1 owner=p1 remote=0 pierce=0 magnet=0 slot=1 flags=80
+enemy slot=4 type=C0 x=232 y=39 vx=0 vy=0 step=- target=0,0 wait=0 hp=0 f4=0C00 c0=0000 d0=0000 be=0000 bc=0000 ba=0000 off=0
+enemy slot=5 type=8F x=67 y=103 vx=0 vy=0 step=r target=4,6 wait=1 hp=0 f4=0C00 c0=9000 d0=0000 be=0000 bc=0000 ba=0000 off=0 spd=0.5
+enemy slot=6 type=8F x=232 y=91 vx=0 vy=0 step=u target=14,5 wait=1 hp=0 f4=0C00 c0=9000 d0=0000 be=0000 bc=0000 ba=0000 off=0 spd=0.5
+enemy slot=7 type=8F x=72 y=194 vx=0 vy=0 step=u target=4,11 wait=1 hp=0 f4=0C00 c0=9000 d0=0000 be=0000 bc=0000 ba=0000 off=0 spd=0.5
+enemy slot=8 type=98 x=72 y=0 vx=0 vy=0 step=r target=3,12 wait=6 hp=1 f4=AC00 c0=0000 d0=0000 be=8001 bc=019B ba=0000 off=0 spd=0.5
+enemy slot=9 type=99 x=45 y=0 vx=0 vy=0 step=l target=2,12 wait=1 hp=1 f4=AC00 c0=9000 d0=01C0 be=0000 bc=0000 ba=0000 off=0 spd=0.5
+panel 1 8 done mode=1
+panel 15 8 todo mode=1
+panel 9 9 todo mode=1
+panel 1 10 done mode=1
+panel 15 10 todo mode=1
+panel 1 12 done mode=1
+panel 15 12 todo mode=1
+item 3 8 item kind=8
+hidden 14 7 kind=4
+map
+#################
+#################
+##############g##
+##.#.........#.##
+#....#######....#
+##.#.#######.#.##
+#...S##.#S##.%..#
+##.#.##...##.#%##
+#P.i.##S#b##S%.P#
+##.#.##..P##.#.##
+#P...#######.%%P#
+##.#.#######.#%##
+#P...........%%P#
+#################
+under
+#################
+#################
+##############g##
+##.#.........#.##
+#....#######....#
+##.#.#######.#.##
+#...S##.#S##....#
+##.#.##...##.#.##
+#P...##S#.##S..P#
+##.#.##..P##.#.##
+#P...#######...P#
+##.#.#######.#.##
+#P.............P#
+#################
+raw
+C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5
+C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6
+C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C9 C6 C6
+C6 C5 00 C5 00 00 00 00 00 00 00 00 00 C5 00 C5 C6
+C6 00 00 00 00 C5 C5 C5 C5 C5 C5 C5 00 00 00 00 C6
+C6 C5 00 C5 00 C5 C5 C5 C5 C5 C5 C5 00 C5 00 C5 C6
+C6 00 00 00 4C C5 C5 6F C5 4C C5 C5 00 C2 00 00 C6
+C6 C5 00 C5 00 C5 C5 00 00 00 C5 C5 00 C5 C2 C5 C6
+C6 74 00 44 00 C5 C5 4C C5 43 C5 C5 4C C2 00 74 C6
+C6 C5 00 C5 00 C5 C5 00 00 74 C5 C5 00 C5 00 C5 C6
+C6 74 00 00 00 C5 C5 C5 C5 C5 C5 C5 00 C2 C2 74 C6
+C6 C5 00 C5 00 C5 C5 C5 C5 C5 C5 C5 00 C5 C2 C5 C6
+C6 74 00 00 00 00 00 00 00 00 00 00 00 C2 C2 74 C6
+C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6
+rawunder
+C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5
+C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6
+C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C9 C6 C6
+C6 C5 00 C5 00 00 00 00 00 00 00 00 00 C5 00 C5 C6
+C6 00 00 00 00 C5 C5 C5 C5 C5 C5 C5 00 00 00 00 C6
+C6 C5 00 C5 00 C5 C5 C5 C5 C5 C5 C5 00 C5 00 C5 C6
+C6 00 00 00 4C C5 C5 6F C5 4C C5 C5 00 00 00 00 C6
+C6 C5 00 C5 00 C5 C5 00 00 00 C5 C5 00 C5 00 C5 C6
+C6 74 00 00 00 C5 C5 4C C5 00 C5 C5 4C 00 00 74 C6
+C6 C5 00 C5 00 C5 C5 00 00 74 C5 C5 00 C5 00 C5 C6
+C6 74 00 00 00 C5 C5 C5 C5 C5 C5 C5 00 00 00 74 C6
+C6 C5 00 C5 00 C5 C5 C5 C5 C5 C5 C5 00 C5 00 C5 C6
+C6 74 00 00 00 00 00 00 00 00 00 00 00 00 00 74 C6
+C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6

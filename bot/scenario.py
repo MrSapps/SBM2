@@ -34,7 +34,17 @@ import struct
 import subprocess
 import sys
 import tempfile
+import resource
 import time
+
+# Each run's address space is capped (SBM2_MEMCAP_MB, default 1024): a
+# runaway run fails alone (its stderr says so) instead of taking the machine
+# down with the other runs. A run uses ~25 MB resident, ~60 MB mapped.
+MEMCAP = int(os.environ.get('SBM2_MEMCAP_MB', '1024')) << 20
+
+
+def cap_memory():
+    resource.setrlimit(resource.RLIMIT_AS, (MEMCAP, MEMCAP))
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DIR = os.path.join(ROOT, 'bot', 'test', 'scenarios')
@@ -154,7 +164,8 @@ def run_one(sc, verbose):
     agent = sc.get('agent', '0') not in ('0', '')
     subprocess.run([AGENTRUN if agent else BOTRUN, os.path.join(ROOT, 'baserom.sfc'),
                     os.path.join(ROOT, 'bot', 'agent.lua' if agent else 'bot.lua')],
-                   env=env, stdout=subprocess.DEVNULL, stderr=open(os.path.join(out, 'stderr.txt'), 'w'))
+                   env=env, stdout=subprocess.DEVNULL, stderr=open(os.path.join(out, 'stderr.txt'), 'w'),
+                   preexec_fn=cap_memory)
     dt = time.time() - t0
     text = ''.join(open(p, errors='replace').read() for p in sorted(glob.glob(os.path.join(out, 'bot_*.log'))))
     ok, why = False, 'no match'

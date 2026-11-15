@@ -45,6 +45,7 @@ bomb x=11 y=10 fuse=12 range=10 owner=p1 remote=0 pierce=0 magnet=0 slot=3
 enemy slot=5 type=93 x=214 y=96 vx=0.5 vy=0 step=r target=14,6 wait=0 hp=2 f4=0000 c0=8000 d0=0000 be=0000 bc=0000 ba=0000 spd=0.5
                           # (spd: walking speed +$46/+$48, px/f; left out when 0)
 panel 3 12 todo           # todo | done; mode 0 ($69) or 1 (toggle)
+ride 10 4 12 9 dock_c=12 dock_r=10  # (agent-learnt, not from WRAM) boarding the rideable object on (10,4) carried P1 to (12,9); it then sat on (12,10)
 switch 5 5                # light switch cell
 item 4 5 heart kind=11    # visible item: heart | item; kind from the $3C48 list (-1 unknown)
 hidden 6 2 kind=0        # an item still inside the soft block there (0 bomb up, 2 fire up, 11 heart)

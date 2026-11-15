@@ -261,13 +261,12 @@ class Search {
       q.pop();
       if (dist > rt.d[size_t(i)]) continue;
       int c = i % w_.cols, r = i / w_.cols;
-      int land[4][2], nj = jumps(w_, c, r, land);
-      for (int di = 0; di < 4; di++) {
-        auto& dd = kDirs[di];
+      int land[kMaxJumps][2], nj = jumps(w_, c, r, land);
+      for (int di = 0; di < (nj >= 0 ? nj : 4); di++) {
+        auto& dd = kDirs[di % 4];
         int cc = c + dd[0], rr = r + dd[1];
         int step = kFPT;
         if (nj >= 0) {  // only a jump leaves a pad (or a jump-pad object's cell)
-          if (di >= nj) continue;
           cc = land[di][0], rr = land[di][1];
           step = kSpringFrames;
         }
@@ -295,6 +294,7 @@ class Search {
       int x = rt.d[size_t(cellIdx(c, r))];
       if (x == INT_MAX) return;
       if (isBombTask(t.kind)) {
+        if (t.kind != TaskKind::KillEnemy && t.kind != TaskKind::HurtBoss && !hasCover(n, rt, c, r)) return;  // (enemies move: the agent picks those cells)
         Harm h = harm(n, c, r);
         if (h.gate) return;
         x += h.cost;
@@ -335,6 +335,43 @@ class Search {
         if (!blastPasses(x) && !w_.p.pierce) break;
       }
     return dist != INT_MAX;
+  }
+
+  // A bomb at (c,r) leaves P1 somewhere to go: a cell out of its blast
+  // within kCoverSteps on this node's map (3-1: the (15,8) panel's only
+  // bomb cell (14,8) is a dead end, all of it in the blast; planned forever).
+  bool hasCover(const Node& n, const Routes& rt, int c, int r) const {
+    const int kCoverSteps = 8;
+    // (soft blocks the route to (c,r) bombs on its way are open by then)
+    std::vector<uint8_t> via(size_t(w_.cols * w_.rows), 0);
+    for (int j = cellIdx(c, r); j >= 0; j = rt.prev[size_t(j)]) via[size_t(j)] = 1;
+    std::vector<uint8_t> in(size_t(w_.cols * w_.rows), 0);
+    in[size_t(cellIdx(c, r))] = 1;
+    for (auto& dd : kDirs)
+      for (int k = 1; k <= std::max(1, w_.p.fire); k++) {
+        int cc = c + dd[0] * k, rr = r + dd[1] * k;
+        if (!w_.inside(cc, rr)) break;
+        char x = cls(n, cc, rr);
+        in[size_t(cellIdx(cc, rr))] = 1;
+        if (!blastPasses(x) && !(w_.p.pierce && breakable(x))) break;
+      }
+    std::vector<int> d(size_t(w_.cols * w_.rows), -1);
+    std::deque<int> q{cellIdx(c, r)};
+    d[size_t(cellIdx(c, r))] = 0;
+    while (!q.empty()) {
+      int k = q.front();
+      q.pop_front();
+      if (!in[size_t(k)]) return true;
+      if (d[size_t(k)] >= kCoverSteps) continue;
+      for (auto& dd : kDirs) {
+        int cc = k % w_.cols + dd[0], rr = k / w_.cols + dd[1];
+        if (!w_.inside(cc, rr) || d[size_t(cellIdx(cc, rr))] >= 0) continue;
+        if (!walkable(n, cc, rr) && !(via[size_t(cellIdx(cc, rr))] && breakable(w_.at(cc, rr)))) continue;
+        d[size_t(cellIdx(cc, rr))] = d[size_t(k)] + 1;
+        q.push_back(cellIdx(cc, rr));
+      }
+    }
+    return false;
   }
 
   // What a bomb at (c,r) spoils: a flame on the gate brings enemies back
@@ -601,8 +638,8 @@ bool wantedItem(int kind) {
 bool unwantedItem(int kind, const Player& p) {
   return p.remote && (kind == kItemPierce || kind == kItemBomb9 || kind == kItemBomb10);
 }
-bool springLanding(const World& w, int c, int r, int dc, int dr, int& lc, int& lr) {
-  for (int j = 3; j <= 9; j++) {
+bool springLanding(const World& w, int c, int r, int dc, int dr, int& lc, int& lr, bool hold) {
+  for (int j = hold ? 4 : 3; j <= 9; j++) {
     int cc = c + j * dc, rr = r + j * dr;
     if (!w.inside(cc, rr)) return false;
     char t = w.at(cc, rr);
@@ -621,12 +658,48 @@ int throwerAt(const World& w, int c, int r) {
   return 0;
 }
 
-int jumps(const World& w, int c, int r, int out[4][2]) {
+bool rideableAt(const World& w, int c, int r) {
+  for (const Enemy& e : w.enemies)
+    if (isRideable(e.type) && e.col() == c && e.row() == r) return true;
+  return false;
+}
+
+bool rideDock(const World& w, int c, int r) {
+  // Rides boardable now (an object on their cell), then those boardable
+  // where one of those docks (taking it brings the object there), ...
+  std::vector<uint8_t> ok(w.rides.size(), 0);
+  for (bool more = true; more;) {
+    more = false;
+    for (size_t i = 0; i < w.rides.size(); i++) {
+      if (ok[i]) continue;
+      const Ride& a = w.rides[i];
+      bool b = rideableAt(w, a.c, a.r);
+      for (size_t j = 0; j < w.rides.size() && !b; j++) b = ok[j] && w.rides[j].dc == a.c && w.rides[j].dr == a.r;
+      if (b) ok[i] = 1, more = true;
+    }
+  }
+  for (size_t j = 0; j < w.rides.size(); j++)
+    if (ok[j] && w.rides[j].dc == c && w.rides[j].dr == r) return true;
+  return false;
+}
+
+int jumps(const World& w, int c, int r, int out[kMaxJumps][2]) {
   if (!w.inside(c, r)) return -1;
   int n = 0;
+  // A rideable object's cell: left only by riding it, to where its rides
+  // have gone (none known: a dead end).
+  if (rideableAt(w, c, r) || rideDock(w, c, r)) {
+    for (const Ride& rd : w.rides)
+      if (rd.c == c && rd.r == r && n < kMaxJumps) out[n][0] = rd.tc, out[n][1] = rd.tr, n++;
+    return n;
+  }
   if (w.at(c, r) == 'S') {
-    for (auto& d : kDirs)
-      if (springLanding(w, c, r, d[0], d[1], out[n][0], out[n][1])) n++;
+    for (auto& d : kDirs) {
+      int lc, lr, hc, hr;
+      bool let = springLanding(w, c, r, d[0], d[1], lc, lr), held = springLanding(w, c, r, d[0], d[1], hc, hr, true);
+      if (let) out[n][0] = lc, out[n][1] = lr, n++;
+      if (held && !(let && hc == lc && hr == lr)) out[n][0] = hc, out[n][1] = hr, n++;
+    }
     return n;
   }
   if (int dx = throwerAt(w, c, r)) {
@@ -636,6 +709,12 @@ int jumps(const World& w, int c, int r, int out[4][2]) {
     return n;
   }
   return -1;
+}
+
+bool jumpHeld(const World& w, int c, int r, int lc, int lr) {
+  if (!w.inside(c, r) || w.at(c, r) != 'S') return false;
+  int dc = (lc > c) - (lc < c), dr = (lr > r) - (lr < r), x, y;
+  return !(springLanding(w, c, r, dc, dr, x, y) && x == lc && y == lr);
 }
 
 bool canPlaceOn(char c) { return walkableClass(c) && std::string("Py^sbgv").find(c) == std::string::npos; }

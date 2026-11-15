@@ -16,6 +16,8 @@
 // No stage names anywhere: every rule is a game rule over the world view.
 #pragma once
 #include <cstdint>
+#include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -75,9 +77,14 @@ class Agent {
   uint16_t frame(const uint8_t* wram, int frame, Oracle& o, const char* extra = nullptr);
   // Decide from a world view (tests call this directly with a fake oracle).
   void decide(const World& w, const Live& live, Oracle& o);
+  // Fill in a boss's sense points from memory while it senses nothing
+  // (frame() calls it before decide; senseStale() then says so).
+  void noteBosses(World& w);
+  bool senseStale() const { return senseStale_; }
   std::string takeLog();
   const std::string& worldText() const { return worldText_; }
   bool committed() const { return at_ < int(pads_.size()); }
+  int pending() const { return int(pads_.size()) - at_; }  // frames of the move left to play
   const std::string& what() const { return what_; }
   bool verbose = false;  // log every oracle answer
 
@@ -88,6 +95,7 @@ class Agent {
     int commit = 0;   // frames to play
     int endC = -1, endR = -1;
     enum Want { Live, Exit, Change, Kill, BossHit } want = Live;
+    int drop = 1;     // BossHit: boss HP lost in the run (its bombs already out count too)
   };
   bool tryCands(std::vector<Cand>& cs, const Live& live, Oracle& o, size_t maxRuns);
   void survive(const World& w, const Live& live, Oracle& o, const char* why);
@@ -95,6 +103,15 @@ class Agent {
   void log(const std::string& s);
 
   Goal goal_;
+  std::map<int, std::vector<std::pair<int, int>>> senseMem_;  // boss base -> its last sense points
+  // Bomb cells whose runs never changed the map (the game refused the bomb:
+  // ObjectOnPlayerCell C0:31A0 blocks a cell some object, even a dormant
+  // enemy, has as its cell or target), and soft blocks no usable cell
+  // reaches. Per stage.
+  int stage_ = -1;
+  std::map<int, int> bombFails_;
+  std::set<int> badSoft_;
+  bool senseStale_ = false;  // this frame's boss senses nothing (points remembered)
   std::vector<uint16_t> bossBase_;  // this decision's boss objects (every run reports their HP)
   std::vector<uint16_t> pads_;
   std::vector<int16_t> trace_;

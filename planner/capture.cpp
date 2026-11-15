@@ -81,6 +81,7 @@ World captureWorld(const uint8_t* wram, int frame) {
   w.oy = rd.s(0x5EFB);
   int light = rd.h(0x5AAC);
   w.light = light == 0xFFFF ? "none" : ((light & 1) ? "on" : "off");
+  w.intro = rd.h(0x5E48) != 0;
 
   auto raw = [&](int c, int r) { return rd.b(kMap + r * kRow + c * 2); };
   auto under = [&](int c, int r) { return rd.b(kUnder + r * kRow + c * 2); };
@@ -160,6 +161,7 @@ World captureWorld(const uint8_t* wram, int frame) {
     e.y = rd.s(base + 0x18) + w.oy;
     e.vx = vel(base + 0x14, 1);
     e.vy = vel(base + 0x1C, 2);
+    e.spd = rd.h(base + 0x46) + rd.b(base + 0x49) / 256.0;
     e.step = stepName(rd.h(base + 0x4A));
     int tgt = rd.h(base + 0x4C);
     e.tc = (tgt & 0x7F) / 2;
@@ -236,6 +238,7 @@ std::string encodeWorld(const World& w) {
   std::snprintf(b, sizeof b, "size %d %d", w.cols, w.rows);
   add(b);
   add("light " + w.light);
+  if (w.intro) add("intro 1");
   if (w.hasGate) {
     std::snprintf(b, sizeof b, "gate %d %d %s", w.gateC, w.gateR, w.gateOpen ? "open" : "closed");
     add(b);
@@ -256,9 +259,10 @@ std::string encodeWorld(const World& w) {
   for (const Enemy& e : w.enemies) {
     std::snprintf(b, sizeof b,
                   "enemy slot=%d type=%02X x=%d y=%d vx=%s vy=%s step=%c target=%d,%d wait=%d hp=%d f4=%04X c0=%04X "
-                  "d0=%04X be=%04X bc=%04X ba=%04X off=%d",
+                  "d0=%04X be=%04X bc=%04X ba=%04X off=%d%s",
                   e.slot, e.type, e.x, e.y, num(e.vx).c_str(), num(e.vy).c_str(), e.step, e.tc, e.tr, e.wait, e.hp,
-                  e.f4, e.c0, e.d0, e.be, e.bc, e.ba, int(e.offscreen));
+                  e.f4, e.c0, e.d0, e.be, e.bc, e.ba, int(e.offscreen),
+                  e.spd > 0 ? (" spd=" + num(e.spd)).c_str() : "");
     add(b);
   }
   for (const Panel& pn : w.panels) {

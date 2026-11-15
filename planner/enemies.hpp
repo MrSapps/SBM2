@@ -10,6 +10,10 @@
 //                  bomb), then stop 32 frames, then a random free direction
 //   chaser  (4.2)  legs toward P1 along the longer axis; blocked: a detour
 //                  of up to 3 cells to a random side
+//   $A5            generic at 1 px/f with no rest when blocked (1-7);
+//                  it rests while its own bomb is out (see hold); in the
+//                  intro (world.intro), or before it ever started (c0 0, no
+//                  step or target), it can't be hurt until it first moves
 //   $8C            a chaser that halts at a cell centre while it sees P1
 //                  (SeesP1 C1:8AF9: same column, up to 4 cells, no solid
 //                  tile or bomb between; the same-row test never fires
@@ -63,11 +67,20 @@ class EnemyModel {
 
   static bool isChaser(const Enemy& e);
   static bool modelled(const Enemy& e);
+  // Frames a stopped enemy rests before it picks a new way (the generic
+  // 32; $A5 turns at once).
+  static int stopWait(const Enemy& e);
+
+  // Per enemy (world.enemies order): frames it stays in its cell from now
+  // (measured: a run of the real game with P1 holding still), or -1 if not
+  // known. A stopped enemy waits this long instead of its wait word: some
+  // rest on timers the world view doesn't show ($A5's start, its own bomb).
+  std::vector<int> hold;
 
  private:
   bool freeAt(int c, int r, int t, const ModelBomb* b) const;
   uint32_t rnd();
-  void rollOne(const Enemy& e, const ModelBomb* b, EnemyRun& out);
+  void rollOne(const Enemy& e, int hold, const ModelBomb* b, EnemyRun& out);
   P1At p1At(int t) const;
   bool seesP1(int c, int r, int t, const ModelBomb* b) const;
 

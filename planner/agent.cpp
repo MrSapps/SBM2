@@ -82,7 +82,7 @@ struct Grid {
   }
   // Route to (tc,tr) where soft blocks cost extra (bombed on the way): the
   // cells, start first.
-  std::vector<int> softRoute(int tc, int tr) const {
+  std::vector<int> softRoute(int tc, int tr, const std::set<int>& avoid = {}) const {
     size_t n = size_t(w.cols * w.rows);
     std::vector<int> d(n, INT_MAX), prev(n, -1);
     using QE = std::pair<int, int>;
@@ -99,7 +99,10 @@ struct Grid {
         if (!w.inside(nc, nr)) continue;
         char t = w.at(nc, nr);
         int cost;
-        if (breakable(t)) cost = 10;
+        if (breakable(t)) {
+          if (avoid.count(idx(nc, nr))) continue;
+          cost = 10;
+        }
         else if (open(nc, nr, pc, pr)) cost = 1;
         else continue;
         int nk = idx(nc, nr);
@@ -128,7 +131,7 @@ Live readLive(const uint8_t* w) {
   int t0 = w[0x1C000];
   bool hard = (t0 >= 0xC3 && t0 <= 0xCF) || (t0 >= 0xD0 && t0 <= 0xEF);
   l.inStage = hard && !(rd16(w, 0xB9) & 0x8000) && w[0xBC] != 0 && (rd16(w, 0x8000) & 0xF000) == 0x9000;
-  l.locked = rd16(w, 0x8052) & 1;
+  l.locked = (rd16(w, 0x8052) & 1) || rd16(w, 0x5E38) != 0;  // (+ PlayerCutsceneLock: intros)
   l.px = uint16_t(sx16(rd16(w, 0x8010)) + sx16(rd16(w, 0x5F01)));
   l.py = uint16_t(sx16(rd16(w, 0x8018)) + sx16(rd16(w, 0x5EFB)));
   agent_enemies(w, &l.enemies, &l.hp);
@@ -173,6 +176,18 @@ void Agent::watchLag(const uint8_t* w) {
   lastTick_ = t;
 }
 
+// A boss in a move that senses nothing (e.g. 1-8's leap) still has its
+// points: the last ones seen, so the goal stays and P1 gets in place.
+void Agent::noteBosses(World& w) {
+  senseStale_ = false;
+  bool sensing = false;
+  for (BossObj& b : w.bosses) {
+    if (!b.sense.empty()) senseMem_[b.base] = b.sense, sensing = true;
+    else if (b.hp > 0 && senseMem_.count(b.base)) b.sense = senseMem_[b.base], senseStale_ = true;
+  }
+  senseStale_ &= !sensing;
+}
+
 uint16_t Agent::frame(const uint8_t* wram, int frame, Oracle& o, const char* extra) {
   frame_ = frame;
   watchLag(wram);
@@ -198,6 +213,7 @@ uint16_t Agent::frame(const uint8_t* wram, int frame, Oracle& o, const char* ext
     World x;
     if (parseWorld("worldview 1\nsize 1 1\n" + std::string(extra) + "\nmap\n.\n", x)) w.bosses = x.bosses;
   }
+  noteBosses(w);
   for (const BossObj& b : w.bosses) live.bossHp += b.hp;
   decide(w, live, o);
   return committed() ? pads_[size_t(at_++)] : 0;
@@ -256,7 +272,7 @@ bool Agent::tryCands(std::vector<Cand>& cs, const Live& live, Oracle& o, size_t 
         case Cand::Live: ok = r.dead == -1 && at; break;
         case Cand::Change: ok = r.dead == -1 && at && r.mapSig != live.mapSig; break;
         case Cand::Kill: ok = r.dead == -1 && at && (r.enemies < live.enemies || r.hp < live.hp); break;
-        case Cand::BossHit: ok = r.dead == -1 && at && r.bossHp < live.bossHp; break;
+        case Cand::BossHit: ok = r.dead == -1 && at && r.bossHp <= live.bossHp - c.drop; break;
       }
       if (ok) {
         pads_ = r.pads;
@@ -347,6 +363,7 @@ void Agent::survive(const World& w, const Live& live, Oracle& o, const char* why
 void Agent::decide(const World& w, const Live& live, Oracle& o) {
   decisions_++;
   frame_ = w.frame;
+  if (w.stage != stage_) stage_ = w.stage, bombFails_.clear(), badSoft_.clear();
   worldText_ = encodeWorld(w);
   bossBase_.clear();
   for (const BossObj& b : w.bosses) bossBase_.push_back(uint16_t(b.base));
@@ -438,16 +455,34 @@ void Agent::decide(const World& w, const Live& live, Oracle& o) {
   // first one on the route instead.
   int sc = st.standC, sr = st.standR;
   if (dist[size_t(g.idx(sc, sr))] < 0) {
-    auto route = g.softRoute(sc, sr);
-    for (size_t i = 1; i < route.size(); i++) {
-      int k = route[i];
-      if (!breakable(w.at(k % w.cols, k / w.cols))) continue;
-      int bk = route[i - 1];
-      bombCands(bk % w.cols, bk / w.cols, Cand::Change, "clear the way to " + tname, 6, cs);
-      break;
+    // The first soft block on the route, from the cell before it, else
+    // from any cell whose blast reaches it; a cell that failed 3 times
+    // (the game won't take a bomb there) is dropped, and a soft block no
+    // cell is left for is routed around.
+    const int kBad = 3;
+    std::vector<int> tried;
+    for (int pass = 0; pass < 4 && cs.empty(); pass++) {
+      auto route = g.softRoute(sc, sr, badSoft_);
+      size_t i = 1;
+      while (i < route.size() && !breakable(w.at(route[i] % w.cols, route[i] / w.cols))) i++;
+      if (i >= route.size()) break;
+      int k = route[i], kc = k % w.cols, kr = k / w.cols;
+      std::vector<std::pair<int, int>> xs{{-1, route[i - 1]}};
+      for (int x = 0; x < w.cols * w.rows; x++)
+        if (x != route[i - 1] && dist[size_t(x)] >= 0 && covers(w, x % w.cols, x / w.cols, kc, kr))
+          xs.push_back({dist[size_t(x)], x});
+      std::sort(xs.begin(), xs.end());
+      for (auto& [d, x] : xs) {
+        if (bombFails_[x] >= kBad || tried.size() >= 2) continue;
+        size_t n0 = cs.size();
+        bombCands(x % w.cols, x / w.cols, Cand::Change, "clear the way to " + tname, 4, cs);
+        if (cs.size() > n0) tried.push_back(x);
+      }
+      if (cs.empty()) badSoft_.insert(k);
     }
-    if (cs.empty() || !tryCands(cs, live, o, 12)) return survive(w, live, o, ("way to " + tname).c_str());
-    return;
+    if (!cs.empty() && tryCands(cs, live, o, 8)) return;
+    for (int x : tried) bombFails_[x]++;
+    return survive(w, live, o, ("way to " + tname).c_str());
   }
   switch (task.kind) {
     case TaskKind::EnterGate:
@@ -538,19 +573,65 @@ void Agent::decide(const World& w, const Live& live, Oracle& o) {
         }
       }
       std::sort(xs.begin(), xs.end(), [](const X& a, const X& b) { return a.boom != b.boom ? a.boom < b.boom : a.d < b.d; });
-      if (xs.size() > 8) xs.resize(8);
+      if (xs.size() > 6) xs.resize(6);
       Risk risk = boxed;
+      // (two covers each: the boss strikes back where P1 hides, so the
+      // second is often the one that lives)
+      std::vector<std::vector<Cand>> per;
+      // P1's bombs already out: the run must show their hits too, and this
+      // one's. A run is played only until P1 is in cover; the next bomb
+      // is planned while this one ticks (the run lived through its blast).
+      int out = 0;
+      for (const Bomb& b : w.bombs) out += !b.enemyOwned && b.fuse > 0;
       for (const X& x : xs) {
-        size_t n0 = cs.size();
-        bombCands(x.k % w.cols, x.k / w.cols, Cand::BossHit, tname + " (wait " + std::to_string(x.wait) + ")", 1, cs, risk,
-                  x.wait);
-        for (size_t j = n0; j < cs.size(); j++) {
-          cs[j].req.pre.assign(size_t(x.wait), 0);
-          cs[j].commit += x.wait;
-          cs[j].req.frames += x.wait;
+        per.emplace_back();
+        bombCands(x.k % w.cols, x.k / w.cols, Cand::BossHit, tname + " (wait " + std::to_string(x.wait) + ")", 2, per.back(),
+                  risk, x.wait);
+        for (Cand& c : per.back()) {
+          c.req.pre.assign(size_t(x.wait), 0);
+          c.req.frames += x.wait;
+          int d1 = int(c.req.path.size() / 2) - 1, d2 = int(c.req.path2.size() / 2) - 1;
+          c.commit = x.wait + kWalkFPT * (d1 + d2) + 2 * kSettle;
+          c.drop = 1 + out;
+          if (out) c.what += " (+" + std::to_string(out) + " out)";
         }
       }
-      if (cs.empty() || !tryCands(cs, live, o, 8)) survive(w, live, o, tname.c_str());
+      for (size_t y = 0; y < 2; y++)
+        for (auto& p : per)
+          if (y < p.size()) cs.push_back(p[y]);
+      if (senseStale_) cs.clear();  // (it senses nothing now: just get in place)
+      if (!cs.empty() && tryCands(cs, live, o, 10)) return;
+      // No hit from here: get in place for the next one. The cell whose
+      // blast holds a sense point on the most frames of the boss's path
+      // (out of the contact boxes), a few cells' walk at a time.
+      cs.clear();
+      std::vector<std::pair<int, int>> spots;  // (-score, idx)
+      for (int k = 0; k < w.cols * w.rows; k++) {
+        int d = dist[size_t(k)];
+        if (d < 0 || d > kMaxD) continue;
+        int xc = k % w.cols, xr = k / w.cols;
+        if (!canPlaceOn(w.at(xc, xr)) || boxed(xc, xr, 0, pf - 1) > 0) continue;
+        std::fill(inBlast.begin(), inBlast.end(), 0);
+        for (const Cell& x : blastCells(w, xc, xr, w.p.fire, w.p.pierce)) inBlast[size_t(g.idx(x.c, x.r))] = 1;
+        int score = 0;
+        for (int f = 0; f < pf; f += 2) {
+          bool h = false, on = false;
+          for (int q : sense[size_t(f)]) h |= inBlast[size_t(q)] != 0, on |= q == k;
+          score += h && !on;
+        }
+        if (score > 0) spots.push_back({-(score * 4 - d), k});
+      }
+      std::sort(spots.begin(), spots.end());
+      for (size_t i = 0; i < spots.size() && cs.size() < 3; i++) {
+        int k = spots[i].second;
+        auto p = g.pathTo(prev, g.pc, g.pr, k % w.cols, k / w.cols);  // (here already: wait)
+        if (p.size() > 5) p.resize(5);
+        Cand c = walkCand(p.back() % w.cols, p.back() / w.cols, Cand::Live, tname + " (get in place)");
+        c.commit = p.size() == 1 ? 30 : std::min(c.commit, 60);
+        cs.push_back(c);
+      }
+      if (!cs.empty() && tryCands(cs, live, o, 3)) return;
+      survive(w, live, o, tname.c_str());
       return;
     }
     case TaskKind::KillEnemy: {
@@ -569,6 +650,29 @@ void Agent::decide(const World& w, const Live& live, Oracle& o) {
         if (verbose) log(eb);
       }
       EnemyModel em(w, horizon, uint32_t(w.frame) * 2654435761u + 1, eScale_);
+      {
+        // How long each stopped enemy stays put: one run of the real game
+        // with P1 holding still (rests on timers the world view lacks).
+        SimReq probe;
+        probe.path = g.waypoints({g.idx(g.pc, g.pr)});
+        probe.frames = horizon;
+        probe.wantEnemies = true;
+        std::vector<SimOut> pout;
+        o.run({probe}, pout);
+        sims_++;
+        if (!pout.empty() && !pout[0].etrace.empty()) {
+          const auto& et = pout[0].etrace;
+          const size_t nf = et.size() / kEnemySlots;
+          em.hold.assign(w.enemies.size(), -1);
+          for (size_t i = 0; i < w.enemies.size(); i++) {
+            int sl = w.enemies[i].slot - 4;
+            if (sl < 0 || sl >= kEnemySlots || et[size_t(sl)] < 0) continue;
+            size_t f = 1;
+            while (f < nf && et[f * kEnemySlots + size_t(sl)] == et[size_t(sl)]) f++;
+            em.hold[i] = int(f);
+          }
+        }
+      }
       // One option: bomb at x after `wait`, the cover picked by the odds
       // of meeting an enemy there; its odds are for that exact plan (the
       // chasers head for P1 in that cover). score = kill odds x the odds no

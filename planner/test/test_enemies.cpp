@@ -100,3 +100,59 @@ TEST("enemies: $8C halts once it sees P1 down its column") {
   CHECK(EnemyModel::nearOdds(runs, 5, 4, 0, 200) < 0.05);
   CHECK(EnemyModel::nearOdds(runs, 5, 1, 150, 200) > 0.95);
 }
+
+TEST("enemies: a measured hold keeps a stopped enemy in its cell") {
+  World w = mkw({"#########",
+                 "#.......#",
+                 "#########"},
+                "enemy slot=4 type=94 x=56 y=23 vx=0 vy=0 step=- target=3,1 wait=0 hp=1 f4=0C00 c0=0000", 7, 1);
+  EnemyModel m(w, 400);
+  m.hold = {200};
+  auto runs = m.roll(nullptr, 7, 1, 16);
+  CHECK(EnemyModel::nearOdds(runs, 1, 1, 0, 180) < 0.05);  // (3,1) -> (1,1) can't happen before it sets off
+  CHECK(EnemyModel::nearOdds(runs, 3, 1, 150, 190) > 0.95);
+}
+
+TEST("enemies: $A5 walks 1 px/f, unhurt in the mini-boss intro until it moves") {
+  // spd=1: 16 frames a cell, no rest when blocked.
+  World w = mkw({"#########",
+                 "#.......#",
+                 "#########"},
+                "intro 1\nenemy slot=5 type=A5 x=24 y=23 vx=0 vy=0 step=- target=1,1 wait=0 hp=3 f4=0C00 c0=0000 spd=1", 7, 1);
+  CHECK(w.intro);
+  EnemyModel m(w, 400);
+  m.hold = {100};
+  ModelBomb early{2, 1, 0, 60, 2, false};  // flames over it before it moves: no kill
+  CHECK(EnemyModel::killOdds(m.roll(&early, 7, 1, 32)) < 0.05);
+  // started (a target), out of the intro: the same bomb kills it
+  w.intro = false;
+  w.enemies[0].tc = 1, w.enemies[0].tr = 1;
+  EnemyModel m2(w, 400);
+  m2.hold = {100};
+  CHECK(EnemyModel::killOdds(m2.roll(&early, 7, 1, 32)) > 0.95);
+  // never started (no target): unhurt too, intro or not
+  w.enemies[0].tc = 0, w.enemies[0].tr = 0;
+  EnemyModel m4(w, 400);
+  m4.hold = {100};
+  CHECK(EnemyModel::killOdds(m4.roll(&early, 7, 1, 32)) < 0.05);
+  // 1 px/f: from (1,1) it reaches (7,1) at about 100 + 6 * 16
+  EnemyModel m3(w, 400);
+  m3.hold = {100};
+  auto runs = m3.roll(nullptr, 1, 1, 16);
+  CHECK(EnemyModel::nearOdds(runs, 7, 1, 0, 100 + 4 * 16) < 0.05);
+  CHECK(EnemyModel::nearOdds(runs, 6, 1, 0, 100 + 8 * 16) > 0.3);
+}
+
+TEST("enemies: $A5 at its spd (1 px/f), turning back at a wall at once") {
+  // From (1,1) in a corridor: right only. 16 frames a cell: at (7,1) by
+  // ~96 (0.5 px/f: ~192), and straight back (the generic rests 32 first).
+  World w = mkw({"#########",
+                 "#.......#",
+                 "#########"},
+                "enemy slot=5 type=A5 x=24 y=23 vx=0 vy=0 step=- target=1,1 wait=0 hp=3 f4=0C00 c0=0000 spd=1", 1, 1);
+  EnemyModel m(w, 300);
+  m.hold = {8};
+  auto runs = m.roll(nullptr, 1, 1, 16);
+  CHECK(EnemyModel::nearOdds(runs, 7, 1, 80, 104) > 0.95);
+  CHECK(EnemyModel::nearOdds(runs, 4, 1, 110, 145) > 0.95);  // (back by (5,1) at 121..143; generic 153+)
+}

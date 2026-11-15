@@ -228,3 +228,135 @@ TEST("snapshot text: encode(parse(file)) gives the file back (worldview.lua's fo
     CHECK(text == ss.str());
   }
 }
+
+namespace {
+// 1-8's boss, standing still; every run that isn't the boss probe ends with
+// the boss at `hpAfter`.
+World boss18() {
+  World w;
+  std::string err;
+  loadWorld(sbm2test::worldsDir + "/1-8_boss.txt", w, &err);
+  return w;
+}
+void bossAnswers(FakeOracle& o, const World& w, int hpNow, int hpAfter) {
+  o.answer = [&w, hpNow, hpAfter](const SimReq& q, SimOut& r) {
+    r.dead = -1;
+    r.bossHp = q.wantBoss ? hpNow : hpAfter;
+    if (q.wantBoss) {
+      r.btrace.assign(size_t(2 * q.bossBase.size() * size_t(q.frames + 1)), 0);
+      for (size_t f = 0; f <= size_t(q.frames); f++)
+        for (size_t b = 0; b < q.bossBase.size(); b++) {
+          r.btrace[2 * (f * q.bossBase.size() + b)] = int16_t(w.bosses[b].x);
+          r.btrace[2 * (f * q.bossBase.size() + b) + 1] = int16_t(w.bosses[b].y);
+        }
+    }
+  };
+}
+}  // namespace
+
+// 1-7: P1 is frozen ($7E5E38 PlayerCutsceneLock) for ~200 frames while the
+// $A5 walks in. Plans made then were all mistimed (the A press came 200
+// frames late); the agent now sits the lock out.
+TEST("agent: the cutscene lock ($5E38) counts as locked") {
+  std::vector<uint8_t> wram(0x20000, 0);
+  wram[0x1C000] = 0xC3;                     // a stage tile set
+  wram[0xBC] = 1;
+  wram[0x8000] = 0x00, wram[0x8001] = 0x90;  // P1 live
+  CHECK(readLive(wram.data()).inStage);
+  CHECK(!readLive(wram.data()).locked);
+  wram[0x5E38] = 1;
+  CHECK(readLive(wram.data()).locked);
+}
+
+// 1-8: while the body leaps it senses nothing and its boss line has no
+// sense points. Before, the goal vanished ("no plan") and P1 wandered.
+TEST("agent: boss sensing nothing: last points kept, P1 only gets in place") {
+  World w = boss18();
+  Agent a = agentFor("exit");
+  a.noteBosses(w);
+  CHECK(!a.senseStale());
+  World leap = w;
+  for (BossObj& b : leap.bosses) b.sense.clear();
+  a.noteBosses(leap);
+  CHECK(a.senseStale());
+  CHECK_EQ(leap.bosses[1].sense.size(), w.bosses[1].sense.size());
+  Plan p = plan(leap, Goal{true, false, false, false});
+  CHECK(p.ok && !p.steps.empty() && p.tasks[size_t(p.steps[0].task)].kind == TaskKind::HurtBoss);
+  FakeOracle o;
+  bossAnswers(o, leap, 11, 10);  // (a hit would "work": it must not be tried)
+  Live l = liveOf(leap);
+  l.bossHp = 11;
+  a.decide(leap, l, o);
+  for (const SimReq& r : o.seen) CHECK(r.post.empty());  // no bombs
+  CHECK(a.what().find("get in place") != std::string::npos);
+}
+
+// With a bomb of P1's already out, a new bomb counts only if the run shows
+// both hits; and the move is played only until P1 is in cover (the next
+// bomb is planned while this one ticks).
+TEST("agent: boss: a bomb already out must hit too; play to cover only") {
+  World w = boss18();
+  Bomb b;
+  b.c = 2, b.r = 2, b.fuse = 100, b.range = 5;
+  w.bombs.push_back(b);
+  Live l = liveOf(w);
+  l.bossHp = 11;
+  {
+    FakeOracle o;
+    bossAnswers(o, w, 11, 10);  // one hit: the bomb already out's
+    Agent a = agentFor("exit");
+    a.decide(w, l, o);
+    CHECK(a.what().find("(+1 out)") == std::string::npos || !a.committed());
+    CHECK(a.what().find("bomb at") == std::string::npos);
+  }
+  {
+    FakeOracle o;
+    bossAnswers(o, w, 11, 9);  // both hit
+    Agent a = agentFor("exit");
+    a.decide(w, l, o);
+    CHECK(a.committed());
+    CHECK(a.what().find("(+1 out)") != std::string::npos);
+    const SimReq* hit = nullptr;
+    for (const SimReq& r : o.seen)
+      if (!r.post.empty()) hit = &r;
+    CHECK(hit != nullptr);
+    if (hit) {
+      int cells = int(hit->path.size() / 2 + hit->path2.size() / 2) - 2;
+      CHECK(a.pending() <= 22 * cells + 2 * 20 + int(hit->pre.size()));  // to cover, not through the blast
+      CHECK(a.pending() < hit->frames - 150);
+    }
+  }
+}
+
+// 1-5 in the full world-1 run: the soft block before panel (28,3) can only
+// be bombed from (24,3), and the game won't take a bomb there (an object
+// has it as its target: ObjectOnPlayerCell). Every run lived and changed
+// nothing, 271 times. Now a cell that fails 3 times is dropped and the
+// route goes another way.
+TEST("agent: a bomb cell the game refuses: dropped after 3 tries, routed around") {
+  // P1 (1,1) must reach the gate (7,1); soft blocks at (3,1) and (3,3).
+  // The game refuses every bomb on row 1 (the cells that reach (3,1)), so
+  // the way is through (3,3), bombed from (2,3).
+  World w = mk({"#########",
+                "#..%...g#",
+                "#.##.####",
+                "#..%.####",
+                "#########"}, 1, 1, "gate 7 1 open");
+  FakeOracle o;
+  int refused = 0;
+  o.answer = [&](const SimReq& q, SimOut& r) {
+    r.dead = -1;
+    r.mapSig = 1;
+    if (q.post.empty()) return;
+    if (q.path.back() / 16 == 1) refused++;
+    else r.mapSig = 2;
+  };
+  Agent a = agentFor("exit");
+  for (int k = 0; k < 6; k++) {
+    a.decide(w, liveOf(w), o);
+    if (a.what().find("bomb at") != std::string::npos) break;
+  }
+  CHECK(refused > 0);
+  CHECK(a.committed());
+  CHECK(a.what().find("bomb at (2,3)") != std::string::npos);
+}

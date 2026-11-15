@@ -27,6 +27,7 @@ struct Bomb {
 struct Enemy {
   int slot = 0, type = 0, x = 0, y = 0;
   double vx = 0, vy = 0;
+  double spd = 0;  // its walking speed, px/f (+$46 + $48's high byte / 256; 0: unknown)
   char step = '-';
   int tc = 0, tr = 0, wait = 0, hp = 0;
   uint16_t f4 = 0, c0 = 0, d0 = 0, be = 0, bc = 0, ba = 0;
@@ -62,6 +63,9 @@ struct World {
   int version = 0, stage = 0, frame = 0, time = 0;
   int ox = 0, oy = 0, cols = 0, rows = 0;
   std::string light = "none";
+  // A mini-boss intro is on ($7E5E48, set when a $A4-$A8 spawns): those
+  // enemies skip their flame check (C1:67FD) until it ends.
+  bool intro = false;
   bool hasGate = false, gateOpen = false;
   int gateC = 0, gateR = 0;
   Player p;

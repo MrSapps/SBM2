@@ -30,6 +30,8 @@ bool EnemyModel::modelled(const Enemy& e) {
   return e.hp > 0 && e.hp < 0x7F && !e.dormant() && !e.hidden();
 }
 
+int EnemyModel::stopWait(const Enemy& e) { return e.type == 0xA5 ? 0 : kStopWait; }
+
 EnemyModel::EnemyModel(const World& w, int horizon, uint32_t seed, double timeScale)
     : w_(w), horizon_(horizon), s_(seed | 1), scale_(timeScale) {}
 
@@ -66,18 +68,26 @@ bool EnemyModel::seesP1(int c, int r, int t, const ModelBomb* b) const {
   return true;
 }
 
-void EnemyModel::rollOne(const Enemy& e, const ModelBomb* b, EnemyRun& out) {
+void EnemyModel::rollOne(const Enemy& e, int hold, const ModelBomb* b, EnemyRun& out) {
   std::vector<EnemyRun::Span> sp;
   double speed = std::max(std::fabs(e.vx), std::fabs(e.vy));
+  if (e.spd >= 0.25) speed = e.spd;
   if (speed < 0.25) speed = 0.5;
   const int T = std::max(4, int(16.0 / speed * scale_ + 0.5));  // frames per cell
-  const int kStop = int(kStopWait * scale_ + 0.5);
+  const int kStop = int(stopWait(e) * scale_ + 0.5);
   const bool chaser = isChaser(e), halts = e.type == 0x8C;
   int halted = 0;
   int c = e.col(), r = e.row();
   int t = 0, died = -1;
+  // Unhurt until its measured rest ends: in a mini-boss intro, or not
+  // started yet (no step, no target: 1-7's $A5 runs no code, so no flame
+  // check, for its first ~206 frames).
+  const int t3 = e.type & 0x3F;
+  const bool asleep = (w_.intro && t3 >= 0x24 && t3 <= 0x28) || (e.c0 == 0 && e.step == '-' && e.tc == 0 && e.tr == 0);
+  const int safeTo = asleep ? std::max(0, hold) : -1;
   auto kills = [&](int cc, int rr, int t0, int t1) {
     if (!b || died >= 0) return;
+    t0 = std::max(t0, safeTo);
     if (!blast_[size_t(rr * w_.cols + cc)]) return;
     int f0 = std::max(t0, b->boom), f1 = std::min(t1, b->boom + int((kFlameFrames - 4) * scale_));
     if (f0 <= f1) died = f0;
@@ -106,6 +116,8 @@ void EnemyModel::rollOne(const Enemy& e, const ModelBomb* b, EnemyRun& out) {
   int dir = dirOf(e.step);
   bool moving = (e.c0 & 0x8000) && dir >= 0 && (e.tc != c || e.tr != r);
   int wait = moving ? 0 : int(std::max(0, e.wait) * scale_);
+  // (measured: it leaves its cell at `hold`, half a cell's walk after it sets off)
+  if (!moving && hold >= 0) wait = std::max(0, hold - T / 2);
   if (moving) {
     int left = int((std::abs(e.x - (e.tc * 16 + 8)) + std::abs(e.y - (e.tr * 16 + 7))) / speed * scale_ + 0.5);
     if (!move(e.tc, e.tr, std::max(1, left))) moving = false, wait = kStop;
@@ -208,7 +220,7 @@ std::vector<EnemyRun> EnemyModel::roll(const ModelBomb* bomb, const std::vector<
   for (size_t i = 0; i < w_.enemies.size(); i++) {
     const Enemy& e = w_.enemies[i];
     if (!modelled(e) || !w_.inside(e.col(), e.row())) continue;
-    for (int k = 0; k < n; k++) rollOne(e, bomb, out[i]);
+    for (int k = 0; k < n; k++) rollOne(e, i < hold.size() ? hold[i] : -1, bomb, out[i]);
   }
   return out;
 }

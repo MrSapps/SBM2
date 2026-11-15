@@ -93,6 +93,7 @@ bool parseWorld(const std::string& text, World& w, std::string* err) {
     else if (k == "origin") { w.ox = std::atoi(arg(1).c_str()); w.oy = std::atoi(arg(2).c_str()); }
     else if (k == "size") { w.cols = std::atoi(arg(1).c_str()); w.rows = std::atoi(arg(2).c_str()); }
     else if (k == "light") w.light = arg(1);
+    else if (k == "intro") w.intro = arg(1) == "1";
     else if (k == "gate") {
       w.hasGate = true;
       w.gateC = std::atoi(arg(1).c_str());
@@ -127,6 +128,7 @@ bool parseWorld(const std::string& text, World& w, std::string* err) {
       e.f4 = uint16_t(hex(f, "f4")); e.c0 = uint16_t(hex(f, "c0")); e.d0 = uint16_t(hex(f, "d0"));
       e.be = uint16_t(hex(f, "be")); e.bc = uint16_t(hex(f, "bc")); e.ba = uint16_t(hex(f, "ba"));
       e.offscreen = dec(f, "off");
+      e.spd = real(f, "spd");
       w.enemies.push_back(e);
     } else if (k == "panel") {
       w.panels.push_back({std::atoi(arg(1).c_str()), std::atoi(arg(2).c_str()), dec(f, "mode"), arg(3) == "done"});

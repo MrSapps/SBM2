@@ -333,6 +333,19 @@ TEST("goap: a push from behind a soft block") {
   CHECK(p.ok && p.steps[0].standC == 2);
 }
 
+// The game won't take a bomb on a done panel ('n'): the push is done from
+// the other cell in reach (2-5: (5,5) from (4,5), not the panel at (3,5)).
+TEST("goap: a push not from a cell that takes no bomb") {
+  World w = mk({"########",
+                "#.n.XOP#",
+                "#g######"}, 1, 1, "gate 1 2 closed\npanel 6 1 mode=0");
+  w.p.fire = 2;
+  Plan p = run(w, "exit");
+  CHECK(p.ok);
+  CHECK_EQ(tasksOf(p), std::string("push 4,1; panel 6,1; gate 1,2"));
+  CHECK(p.ok && p.steps[0].standC == 3);
+}
+
 // Search limit hit: the greedy finish still finds a chain of pushes and a
 // button press that no single step of which brings a task in reach (2-6:
 // before, it gave up and bombed every block, which grow back in world 2).

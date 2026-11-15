@@ -67,7 +67,8 @@ rawunder                  # CellItems codes, hex
 
 | char | class | tiles (raw) | notes |
 |---|---|---|---|
-| `.` | floor | `$00`, floor variants `$04`-`$3F` not listed below, `$6B`, `$6F`, `$70`, `$72` | |
+| `.` | floor | `$00`, floor variants `$04`-`$3F` not listed below | |
+| `n` | floor, no bombs | `$6F`, `$70` (done panel), `$72`, `$11` | walkable, but the game refuses a bomb there (C0:30C8: tile bit 6, or low bits `$01`/`$11`) |
 | `i` | item | `$44` | walkable; stops a blast (picking it up clears it) |
 | `#` | wall | `$C3`-`$CF` except below | stops blasts |
 | `%` | soft block | `$C2` | blast breaks it; may hide an item or a dormant enemy |

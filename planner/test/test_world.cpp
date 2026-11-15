@@ -2,6 +2,7 @@
 #include <dirent.h>
 
 #include "capture.hpp"
+#include "goap.hpp"
 #include "test.hpp"
 #include "world.hpp"
 
@@ -137,6 +138,42 @@ TEST("capture: items keep their kind; ones still in a block are hidden") {
   CHECK(parseWorld(encodeWorld(w), x));
   CHECK(x.hidden.size() == 1 && x.hidden[0].kind == kItemBomb && x.items.size() == 1 && x.items[0].kind == kItemFire);
   CHECK_EQ(x.p.maxbombs, 3);
+}
+
+// $C9 is the closed gate's tile, but an idle mount writes it to its own
+// cell while P1 rides another (solid): only the gate's cell reads 'g'.
+TEST("capture: a $C9 off the gate's cell is a wall (an idle mount)") {
+  std::vector<uint8_t> wram(0x20000, 0);
+  auto tile = [&](int c, int r, uint8_t t) { wram[size_t(0x1C000 + r * 0x80 + c * 2)] = t; };
+  for (int r = 0; r < 32; r++)
+    for (int c = 0; c < 32; c++) tile(c, r, 0xC3);
+  for (int c = 1; c <= 6; c++) tile(c, 2, 0x00);
+  tile(2, 1, 0xC9);  // the gate
+  tile(4, 2, 0xC9);  // a mount
+  int gate = 1 * 0x80 + 2 * 2;
+  wram[0x5D72] = uint8_t(gate), wram[0x5D73] = uint8_t(gate >> 8);
+  World w = captureWorld(wram.data(), 0);
+  CHECK(w.hasGate && w.gateC == 2 && w.gateR == 1 && !w.gateOpen);
+  CHECK_EQ(w.at(2, 1), 'g');
+  CHECK_EQ(w.at(4, 2), '#');
+}
+
+// C0:30C8 refuses a bomb on a tile with bit 6 or low bits $01/$11: the
+// done panel $70 is floor P1 can't bomb from (2-5: (3,5), behind a push
+// block, made the agent retry the push for 8000 frames).
+TEST("capture: a done panel is floor that takes no bomb") {
+  std::vector<uint8_t> wram(0x20000, 0);
+  auto tile = [&](int c, int r, uint8_t t) { wram[size_t(0x1C000 + r * 0x80 + c * 2)] = t; };
+  for (int r = 0; r < 32; r++)
+    for (int c = 0; c < 32; c++) tile(c, r, 0xC3);
+  for (int c = 1; c <= 6; c++) tile(c, 2, 0x00);
+  tile(2, 2, 0x70);
+  tile(3, 2, 0x11);
+  World w = captureWorld(wram.data(), 0);
+  CHECK_EQ(w.at(1, 2), '.');
+  CHECK_EQ(w.at(2, 2), 'n');
+  CHECK_EQ(w.at(3, 2), 'n');
+  CHECK(walkableClass('n') && !canPlaceOn('n') && canPlaceOn('.'));
 }
 
 // 2-8 (stage $27): a falling bomb (CC:B189) and its marker (CC:B2F1, same

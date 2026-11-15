@@ -938,3 +938,261 @@ TEST("agent: a kill is the target's slot gone, whatever the count") {
   CHECK(a.what().find("kill 5,1") == 0);
   CHECK(a.what().find("closing in") == std::string::npos);
 }
+
+// Every option dies (something passing by): the best ones again after
+// standing still a while (3-2 at fire 1: an immune $8F patrolled the only
+// way; P1 survived in place a whole stage).
+TEST("agent: all options die: try them again after a wait") {
+  World w = mk({"#######",
+                "#...%.#",
+                "#.###.#",
+                "#.....#",
+                "#######"}, 1, 1);
+  FakeOracle o;
+  o.answer = [](const SimReq& q, SimOut& r) {
+    r.dead = q.pre.size() >= 64 ? -1 : 20;
+    r.mapSig = 2;
+  };
+  Agent a = agentFor("blocks");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.committed());
+  CHECK(a.what().find("(wait 64)") != std::string::npos);
+}
+
+// 2-3: a "clear the way" with no bomb cell this decision (here two bombs
+// out leave no cover for either cell that reaches the block) marks it; the mark must
+// not outlive the reason, or the route is shut for the rest of the stage.
+TEST("agent: a soft block no cell reaches now: routed around for a while, not for good") {
+  std::vector<std::string> rows = {"#######",
+                                   "#...%g#",
+                                   "#.#.###",
+                                   "#...###",
+                                   "#######"};
+  const char* bombs = "gate 5 1 open\n"
+                      "bomb c=1 r=3 fuse=150 range=2 owner=enemy remote=0 pierce=0 magnet=0 slot=-1\n"
+                      "bomb c=3 r=3 fuse=150 range=2 owner=enemy remote=0 pierce=0 magnet=0 slot=-1";
+  World w1 = mk(rows, 1, 1, bombs);
+  w1.frame = 1000;
+  w1.p.bombs = 1;
+  FakeOracle o;
+  o.answer = [&](const SimReq& q, SimOut& r) {
+    r.dead = -1;
+    r.mapSig = q.post.empty() ? 1 : 2;
+  };
+  Agent a = agentFor("exit");
+  a.decide(w1, liveOf(w1), o);
+  CHECK(a.what() == "survive");
+  CHECK(a.takeLog().find("survive (way to gate 5,1)") != std::string::npos);
+  World w2 = mk(rows, 1, 1, "gate 5 1 open");
+  w2.frame = 1000 + kBadSoftTTL;
+  w2.p.bombs = 1;
+  a.decide(w2, liveOf(w2), o);
+  CHECK(a.what().find("clear the way to gate 5,1: bomb at") == 0);
+}
+
+// 2-5: the cells next to the block on the way to the button failed 3 times
+// (every option ran into an enemy) and were dropped for the rest of the
+// stage: P1 waited out the clock. A drop wears off.
+TEST("agent: a bomb cell dropped after 3 fails is tried again later") {
+  World w = mk({"#########",
+                "#..%...g#",
+                "#.##.####",
+                "#..%.####",
+                "#########"}, 1, 1, "gate 7 1 open");
+  w.frame = 1000;
+  FakeOracle o;
+  bool refuse = true;
+  o.answer = [&](const SimReq& q, SimOut& r) {
+    r.dead = -1;
+    r.mapSig = 1;
+    if (q.post.empty()) return;
+    if (!(refuse && q.path.back() / 16 == 1)) r.mapSig = 2;
+  };
+  Agent a = agentFor("exit");
+  for (int k = 0; k < 6; k++) {
+    a.decide(w, liveOf(w), o);
+    if (a.what().find("bomb at") != std::string::npos) break;
+  }
+  CHECK(a.what().find("bomb at (2,3)") != std::string::npos);
+  refuse = false;
+  w.frame += 2 * kBadSoftTTL;
+  a.decide(w, liveOf(w), o);
+  CHECK(a.what().find("bomb at (2,1)") != std::string::npos);
+}
+
+// 2-5: a bomb under a furnace lights the fuse lines; every cover on one
+// died. The cover is off the fuse lines, though farther.
+TEST("agent: a bomb under a furnace: no cover on a fuse line") {
+  World w = mk({"########",
+                "###F####",
+                "#ff.%.g#",
+                "#f######",
+                "#.######",
+                "########"}, 1, 2, "gate 6 2 open");
+  w.p.bombs = 1;
+  FakeOracle o;
+  o.answer = [&](const SimReq& q, SimOut& r) {
+    r.dead = -1;
+    r.mapSig = q.post.empty() ? 1 : 2;
+  };
+  Agent a = agentFor("exit");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.what().find("bomb at (3,2), cover (1,4)") != std::string::npos);
+}
+
+// 3-6: survive parked P1 on a spring pad, and on a pad B is the held jump:
+// the trap's B presses did nothing for 20000 frames. No waiting on a pad,
+// no trap presses from one.
+TEST("agent: spring pads: survive doesn't wait on one, traps don't fire from one") {
+  World w = mk({"###########",
+                "#S........#",
+                "###########"}, 1, 1, "bomb c=8 r=1 fuse=0 range=1 owner=p1 remote=1");
+  w.p.remote = 1;
+  FakeOracle o;
+  o.answer = [&](const SimReq&, SimOut& r) { r.dead = -1; };
+  Agent a = agentFor("exit");
+  a.decide(w, liveOf(w), o);
+  std::string lg = a.takeLog();
+  CHECK(lg.find("survive (") != std::string::npos);
+  CHECK(lg.find("toward (1,1)") == std::string::npos);
+  // An enemy in the trap's blast, P1 well clear: fired off the floor, not
+  // off the pad.
+  World t = mk({"###########",
+                "#S........#",
+                "###########"}, 1, 1,
+               "bomb c=8 r=1 fuse=0 range=1 owner=p1 remote=1\nenemy type=80 x=" + std::to_string(9 * 16 + 8) +
+                   " y=" + std::to_string(16 + 8));
+  Agent b = agentFor("exit");
+  CHECK_EQ(b.trapCheck(t), 0);
+  t.p.x = 3 * 16 + 8;
+  CHECK_EQ(b.trapCheck(t), 1);
+}
+
+// Riding, an idle mount's cell is a wall ($C9, C1:C75A); off the mount it
+// is floor again. A flame on P1 costs the mount, not a heart (C0:A630): no
+// plan but one through an idle mount's cell -> bomb P1's own cell and stay
+// (3-3: a $90 parked at (6,4) shut the corridor to the last $99).
+TEST("agent: riding, an idle mount in the way: get off by a bomb on P1") {
+  const std::string mount = "enemy slot=5 type=90 x=" + std::to_string(3 * 16 + 8) + " y=24 be=8001";
+  World w = mk({"########",
+                "#..#..g#",
+                "########"}, 1, 1, "gate 6 1 open\n" + mount);
+  w.p.f60 = 0x8000;
+  w.p.bombs = 1;
+  FakeOracle o;
+  o.answer = [&](const SimReq&, SimOut& r) { r.dead = -1, r.px = 24, r.py = 24; };
+  Agent a = agentFor("exit");
+  a.decide(w, liveOf(w), o);
+  std::string lg = a.takeLog();
+  CHECK(lg.find("do get off the mount: bomb at (1,1)") != std::string::npos);
+  CHECK(!o.seen.empty() && !o.seen[0].pre.empty() && (o.seen[0].pre[0] & kPadA));
+  // Not riding (the mount's cell would read floor then), or nothing past
+  // it: no.
+  World v = w;
+  v.p.f60 = 0;
+  Agent b = agentFor("exit");
+  b.decide(v, liveOf(v), o);
+  CHECK(b.takeLog().find("get off the mount") == std::string::npos);
+  World u = mk({"########",
+                "#..#..##",
+                "#g######"}, 1, 1, "gate 1 2 open\n" + mount);
+  u.p.f60 = 0x8000, u.p.bombs = 1;
+  Agent c = agentFor("exit");
+  c.decide(u, liveOf(u), o);
+  CHECK(c.takeLog().find("get off the mount") == std::string::npos);
+}
+
+// Riding, no spring pad launches P1 (3-1: the route over the pad at (4,6)
+// to the east half never went): the pad is floor, and a plan that needs it
+// means getting off the mount first.
+TEST("agent: riding, pads don't throw: get off for a plan that needs one") {
+  World w = mk({"#########",
+                "#..S#..g#",
+                "#########"}, 1, 1, "gate 7 1 open");
+  w.p.f60 = 0x8000;
+  w.p.bombs = 1;
+  FakeOracle o;
+  o.answer = [&](const SimReq&, SimOut& r) { r.dead = -1, r.px = 24, r.py = 24; };
+  Agent a = agentFor("exit");
+  a.decide(w, liveOf(w), o);
+  std::string lg = a.takeLog();
+  CHECK(lg.find("do get off the mount: bomb at (1,1)") != std::string::npos);
+  // Not riding: over the pad.
+  World v = w;
+  v.p.f60 = 0;
+  Agent b = agentFor("exit");
+  b.decide(v, liveOf(v), o);
+  CHECK(b.takeLog().find("get off the mount") == std::string::npos);
+}
+
+// B sets off the oldest remote bomb, but one already going off still
+// reads as the oldest: the press then sets off the next. P1 has to be clear
+// of all its remote bombs (2-3: a second press for (8,6) blew up P1 on its
+// new bomb at (7,8)).
+TEST("agent: trap: no B while P1 is in any of its remote bombs' blasts") {
+  std::string en = "enemy type=80 x=" + std::to_string(9 * 16 + 8) + " y=" + std::to_string(16 + 8);
+  World t = mk({"###########",
+                "#.........#",
+                "###########"}, 2, 1,
+               "bomb c=8 r=1 fuse=0 range=1 owner=p1 remote=1\nbomb c=2 r=1 fuse=0 range=1 owner=p1 remote=1\n" + en);
+  Agent a = agentFor("exit");
+  CHECK_EQ(a.trapCheck(t), 0);
+  // Off the newer bomb's blast: fire.
+  t.p.x = 4 * 16 + 8;
+  Agent b = agentFor("exit");
+  CHECK_EQ(b.trapCheck(t), 1);
+}
+
+// Riding a $98, its $99 rider is parked dormant and the gate stays shut
+// (3-1: 10000 frames by the gate): get off; not riding: no.
+TEST("agent: riding, gate shut, only the parked rider left: get off") {
+  World w = mk({"########",
+                "#.....g#",
+                "########"}, 1, 1,
+               "gate 6 1 closed\nenemy slot=9 type=99 x=56 y=0 f4=AC00\nenemy slot=8 type=98 x=24 y=24 be=C001");
+  w.p.f60 = 0x8000;
+  w.p.bombs = 1;
+  FakeOracle o;
+  o.answer = [&](const SimReq&, SimOut& r) { r.dead = -1, r.px = 24, r.py = 24; };
+  Agent a = agentFor("exit");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.takeLog().find("do get off the mount: bomb at (1,1)") != std::string::npos);
+  World v = w;
+  v.p.f60 = 0;
+  Agent b = agentFor("exit");
+  b.decide(v, liveOf(v), o);
+  CHECK(b.takeLog().find("get off the mount") == std::string::npos);
+}
+
+// A power-up no plan reaches doesn't hold up the exit (3-4: a fire-up in
+// a soft block ringed by pads: 1400 "no plan" decisions to time-up).
+TEST("agent: an unreachable power-up is left, the rest goes on") {
+  World w = mk({"#######",
+                "#....##",
+                "###g#%#",
+                "#######"}, 1, 1, "gate 3 2 open\nhidden 5 2 kind=2");
+  FakeOracle o;
+  o.answer = [&](const SimReq&, SimOut& r) { r.dead = -2; };
+  Agent a = agentFor("powerups+exit");
+  a.decide(w, liveOf(w), o);
+  std::string lg = a.takeLog();
+  CHECK(lg.find("do gate 3,2") != std::string::npos);
+  CHECK(lg.find("no plan") == std::string::npos);
+}
+
+// The flame kills by the cell under P1's point: P1 1 px off centre beside
+// the trap's blast is clear (3-6: x=41 on (2,4) beside (3,4), boxed in by
+// its own trap at (3,6) for 40000 frames).
+TEST("agent: trap: P1 a pixel off centre beside the blast is clear") {
+  World t = mk({"#######",
+                "#.....#",
+                "#.#.#.#",
+                "#.....#",
+                "#######"}, 2, 1, "bomb c=3 r=3 fuse=0 range=2 owner=p1 remote=1");
+  t.p.x = 2 * 16 + 9;  // (1 px right of centre; (3,1) is in the blast)
+  Agent a = agentFor("exit");
+  CHECK_EQ(a.trapCheck(t), 2);
+  t.p.x = 2 * 16 + 14;  // (about to step into it: not clear)
+  Agent b = agentFor("exit");
+  CHECK_EQ(b.trapCheck(t), 0);
+}

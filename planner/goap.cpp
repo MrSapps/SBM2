@@ -717,9 +717,9 @@ bool jumpHeld(const World& w, int c, int r, int lc, int lr) {
   return !(springLanding(w, c, r, dc, dr, x, y) && x == lc && y == lr);
 }
 
-bool canPlaceOn(char c) { return walkableClass(c) && std::string("Py^sbgv").find(c) == std::string::npos; }
+bool canPlaceOn(char c) { return walkableClass(c) && std::string("Py^sbgvn").find(c) == std::string::npos; }
 
-bool walkableClass(char c) { return std::string(".i^Pyspf=ktTcCg*v").find(c) != std::string::npos; }
+bool walkableClass(char c) { return std::string(".i^Pyspf=ktTcCg*vn").find(c) != std::string::npos; }
 
 std::vector<uint8_t> panelsDone(const World& w) {
   std::vector<uint8_t> hits(w.panels.size(), 0), out(w.panels.size(), 0);

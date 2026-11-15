@@ -20,7 +20,10 @@ struct ClassTable {
     t[0x00] = '.';
     for (int i = 0x01; i <= 0x03; i++) t[i] = '*';
     for (int i = 0x40; i <= 0x43; i++) t[i] = 'b';
-    for (int i : {0x6F, 0x70, 0x72}) t[i] = '.';
+    // Floor the game won't take a bomb on (C0:30C8: the tile under P1 has
+    // bit 6, or its low 6 bits are $01/$11): done panels etc. (2-5: a bomb
+    // on the done panel $70 at (3,5) to push (5,5) was never placed).
+    for (int i : {0x6F, 0x70, 0x72, 0x11}) t[i] = 'n';
     t[0x6B] = 'v';
     t[0x44] = 'i';
     for (int i = 0xC3; i <= 0xCF; i++) t[i] = '#';
@@ -112,6 +115,12 @@ World captureWorld(const uint8_t* wram, int frame) {
     w.gateR = gate >> 7;
     w.gateOpen = w.gateR < kMapH && raw(w.gateC, w.gateR) == 0x49;
   }
+  // $C9 off the gate's cell: a mount standing idle while P1 rides one
+  // (C1:C75A writes $C9 to its cell, solid, until P1 gets off; 3-3 rode
+  // into one in a 1-wide way and stood there for 12000 frames).
+  for (int r = 0; r < w.rows; r++)
+    for (int c = 0; c < w.cols; c++)
+      if (raw(c, r) == 0xC9 && !(w.hasGate && c == w.gateC && r == w.gateR)) w.map[size_t(r * w.cols + c)] = '#';
 
   Player& p = w.p;
   int f4 = rd.h(kP1 + 4), d = rd.h(kP1 + 0x6C), stats = rd.b(kP1 + 0xF3);

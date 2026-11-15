@@ -83,6 +83,8 @@ bool remoteTrigger(const World& w, const std::vector<int>& order, std::vector<ui
                    bool needEnemy = true);
 // Traps out and no enemy for this long (frames): they go off once P1 is clear.
 constexpr int kTrapWait = 600;
+// How long a soft block no bomb cell could reach stays routed around.
+constexpr int kBadSoftTTL = 300;
 // Keep order in step with the world: gone bombs out, new ones at the end.
 void noteRemotes(const World& w, std::vector<int>& order);
 // A ride probe's run (boarding the object on (c,r)): the frame the ride let
@@ -130,7 +132,9 @@ class Agent {
     // after they break. 0: the whole commit.
     int afterA = 0, afterB = 0;
   };
-  bool tryCands(std::vector<Cand>& cs, const Live& live, Oracle& o, size_t maxRuns);
+  // waits: if every option died, try the best two again after 32/64/128
+  // frames standing still.
+  bool tryCands(std::vector<Cand>& cs, const Live& live, Oracle& o, size_t maxRuns, bool waits = true);
   void survive(const World& w, const Live& live, Oracle& o, const char* why);
   void learnSpeed(const SimReq& q, const SimOut& r);
   void log(const std::string& s);
@@ -140,10 +144,14 @@ class Agent {
   // Bomb cells whose runs never changed the map (the game refused the bomb:
   // ObjectOnPlayerCell C0:31A0 blocks a cell some object, even a dormant
   // enemy, has as its cell or target), and soft blocks no usable cell
-  // reaches. Per stage.
+  // reaches. Per stage; the marks wear off (kBadSoftTTL: what kept a cell
+  // out may pass: a blast, a bomb in the way, an enemy on it or nearby).
   int stage_ = -1;
-  std::map<int, int> bombFails_;
-  std::set<int> badSoft_;
+  std::map<int, int> bombFails_, bombFailAt_;  // cell -> fails, frame of the last
+  bool bombDropped(int cell) const;  // 3 fails, the last within kBadSoftTTL * 2
+  std::map<int, int> badSoft_;  // soft block -> frame marked
+  int dismountAt_ = -100000;  // the last "get off the mount" try (frame)
+  std::set<int> badSoftNow() const;
   // Power-ups (optional) whose moves failed: given up after 3 (cell -> fails).
   std::map<int, int> itemFails_;
   std::set<int> softSeen_;

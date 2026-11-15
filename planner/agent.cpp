@@ -221,9 +221,24 @@ bool remoteTrigger(const World& w, const std::vector<int>& order, std::vector<ui
   }
   if (blast) *blast = in;
   auto hit = [&](int c, int r) { return w.inside(c, r) && in[size_t(r * w.cols + c)]; };
-  for (int dx : {-7, 7})
-    for (int dy : {-7, 7})
-      if (hit((w.p.x + dx) / 16, (w.p.y + dy) / 16)) return false;
+  // P1 clear of every remote bomb of its own, not just the oldest: one
+  // already going off still reads as the oldest, and B then sets off the
+  // next (2-3: a second press for (8,6) set off the bomb P1 stood on).
+  std::vector<uint8_t> any = in;
+  for (int k : order) {
+    const Bomb* b = w.bombAt(k % w.cols, k / w.cols);
+    for (const Cell& x : blastCells(w, k % w.cols, k / w.cols, b ? b->range : w.p.fire, b ? b->pierce : w.p.pierce))
+      any[size_t(x.r * w.cols + x.c)] = 1;
+  }
+  // (the flame kills by the cell under P1's point, C0:A5F1; P1 stands
+  // still for the press, so a few px of margin: with 7, 1 px off centre
+  // beside the blast never counted as clear, 3-6 sat 40000 frames boxed in
+  // by its own trap)
+  for (int dx : {-4, 4})
+    for (int dy : {-4, 4}) {
+      int c = (w.p.x + dx) / 16, r = (w.p.y + dy) / 16;
+      if (w.inside(c, r) && any[size_t(r * w.cols + c)]) return false;
+    }
   if (w.hasGate && hit(w.gateC, w.gateR)) return false;
   for (const Item& it : w.items)
     if (wantedItem(it.kind) && hit(it.c, it.r)) return false;
@@ -239,6 +254,9 @@ bool remoteTrigger(const World& w, const std::vector<int>& order, std::vector<ui
 int Agent::trapCheck(const World& tw) {
   noteRemotes(tw, remoteOrder_);
   if (remoteOrder_.empty()) return 0;
+  // (on a spring pad B is the held jump, not the remote: 3-6 pressed it
+  // 180 times on (5,21) and the trap never went off)
+  if (tw.inside(tw.p.col(), tw.p.row()) && tw.at(tw.p.col(), tw.p.row()) == 'S') return 0;
   if (remoteTrigger(tw, remoteOrder_)) return 1;
   bool stale = tw.frame - trapSince_ > kTrapWait;
   if ((stale || trapStuck_) && remoteTrigger(tw, remoteOrder_, nullptr, false)) return 2;
@@ -372,8 +390,9 @@ int rideEnd(const SimOut& r, int c, int rr) {
 
 static size_t batchSize(size_t n) { return n == 0 ? 1 : n == 1 ? 3 : 4; }
 
-bool Agent::tryCands(std::vector<Cand>& cs, const Live& live, Oracle& o, size_t maxRuns) {
+bool Agent::tryCands(std::vector<Cand>& cs, const Live& live, Oracle& o, size_t maxRuns, bool waits) {
   if (cs.size() > maxRuns) cs.resize(maxRuns);
+  bool died = false;  // (some option ran into something)
   for (size_t b = 0, bn = 0; b < cs.size(); b += batchSize(bn++)) {
     std::vector<SimReq> reqs;
     for (size_t i = b; i < std::min(cs.size(), b + batchSize(bn)); i++) {
@@ -387,6 +406,7 @@ bool Agent::tryCands(std::vector<Cand>& cs, const Live& live, Oracle& o, size_t 
       const Cand& c = cs[b + i];
       const SimOut& r = out[i];
       learnSpeed(c.req, r);
+      died |= r.dead >= 0;
       if (verbose) {
         char vb[240];
         int aAt = -1;
@@ -468,6 +488,22 @@ bool Agent::tryCands(std::vector<Cand>& cs, const Live& live, Oracle& o, size_t 
       }
     }
   }
+  // Every option ran into something: the best few again after standing
+  // still a while (3-2, fire 1: the way along row 11 met the immune $8F
+  // patrolling it every time; P1 survived on the spot for 15000 frames).
+  if (waits && died && !cs.empty()) {
+    std::vector<Cand> ws;
+    for (int wait : {32, 64, 128})
+      for (size_t i = 0; i < std::min<size_t>(2, cs.size()); i++) {
+        Cand c = cs[i];
+        c.req.pre.insert(c.req.pre.begin(), size_t(wait), 0);
+        c.commit += wait;
+        c.req.frames += wait;
+        c.what += " (wait " + std::to_string(wait) + ")";
+        ws.push_back(c);
+      }
+    return tryCands(ws, live, o, ws.size(), false);
+  }
   return false;
 }
 
@@ -482,7 +518,8 @@ void Agent::survive(const World& w, const Live& live, Oracle& o, const char* why
   g.bfs(g.pc, g.pr, dist, prev);
   std::vector<std::pair<int, int>> cells;  // (dist, idx)
   for (int k = 0; k < w.cols * w.rows; k++)
-    if (dist[size_t(k)] >= 0 && dist[size_t(k)] <= 6) cells.push_back({dist[size_t(k)], k});
+    if (dist[size_t(k)] >= 0 && dist[size_t(k)] <= 6 && w.at(k % w.cols, k / w.cols) != 'S')  // (no standing on a pad)
+      cells.push_back({dist[size_t(k)], k});
   std::sort(cells.begin(), cells.end());
   // Cells out of every known blast first, then (stuck behind a trap) out
   // of the oldest trap's, so frame() can set it off.
@@ -548,6 +585,18 @@ void Agent::survive(const World& w, const Live& live, Oracle& o, const char* why
   (void)live;
 }
 
+bool Agent::bombDropped(int cell) const {
+  auto n = bombFails_.find(cell), at = bombFailAt_.find(cell);
+  return n != bombFails_.end() && n->second >= 3 && at != bombFailAt_.end() && frame_ - at->second < 2 * kBadSoftTTL;
+}
+
+std::set<int> Agent::badSoftNow() const {
+  std::set<int> out;
+  for (auto& [k, at] : badSoft_)
+    if (frame_ - at < kBadSoftTTL) out.insert(k);
+  return out;
+}
+
 void Agent::decide(const World& w0, const Live& live, Oracle& o) {
   // An item that would cost the remote (another bomb kind) is kept off:
   // a wall as far as routes go.
@@ -559,6 +608,13 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
                                  return true;
                                }),
                 w.items.end());
+  // Riding a mount ($90/$98, P1 +$60 bit 15) no spring pad launches P1:
+  // a pad is floor (3-1: riding a $98, the route over the pad at (4,6)
+  // to the east half never went).
+  const bool riding = w.p.f60 & 0x8000;
+  if (riding)
+    for (char& ch : w.map)
+      if (ch == 'S') ch = '.';
   decisions_++;
   frame_ = w.frame;
   killSlot_ = -1;
@@ -567,7 +623,7 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
   int mine = int(remoteOrder_.size());  // P1's remote bombs out
   if (lastEnemies_ >= 0 && live.enemies < lastEnemies_) trapSince_ = w.frame;  // (a kill: the traps work)
   lastEnemies_ = live.enemies;
-  if (w.stage != stage_) stage_ = w.stage, bombFails_.clear(), badSoft_.clear(), itemFails_.clear(), softSeen_.clear(), rides_.clear(),
+  if (w.stage != stage_) stage_ = w.stage, bombFails_.clear(), bombFailAt_.clear(), badSoft_.clear(), itemFails_.clear(), softSeen_.clear(), rides_.clear(),
                             rideFails_.clear(), dockFor_ = -1;
   // The ride just probed let P1 off: its object sits next to P1 now, where
   // it can be boarded back (its dock).
@@ -607,7 +663,33 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
   pw.hidden.erase(std::remove_if(pw.hidden.begin(), pw.hidden.end(), given), pw.hidden.end());
   for (Item& it : pw.items)
     if (given(it)) it.kind = -1;
+  // Get off the mount: a bomb on P1's own cell, P1 staying in the flame
+  // (C0:A630 -> C1:29E0: the mount is lost, not a heart; P1 flashes $C0
+  // frames and the mount stays there, idle). Once per kBadSoftTTL.
+  auto getOff = [&]() {
+    if (!riding || frame_ - dismountAt_ < kBadSoftTTL || !canPlaceOn(w0.at(g.pc, g.pr)) || w.bombAt(g.pc, g.pr) ||
+        w.p.bombs <= 0)
+      return false;
+    Cand c;
+    c.req.pre = {kPadA, kPadA};
+    c.req.detEnd = w.p.remote ? 1 + mine : 0;
+    c.commit = 2 + int((w.p.remote ? 30 + kFlameFrames : kNewFuse + kFlameFrames) * eScale_ + 0.5);
+    c.req.frames = c.commit + kTail;
+    c.endC = g.pc, c.endR = g.pr;
+    c.want = Cand::Live;
+    c.what = "get off the mount: bomb at (" + std::to_string(g.pc) + "," + std::to_string(g.pr) + "), stay in it";
+    std::vector<Cand> cs{c};
+    dismountAt_ = frame_;
+    return tryCands(cs, live, o, 1, false);
+  };
   Plan gp = plan(pw, goal_);
+  // Power-ups are optional: one no plan reaches (3-4: a fire-up in the
+  // soft block at (7,8), ringed by pads) doesn't hold up the rest.
+  if ((!gp.ok || gp.steps.empty()) && goal_.powerups) {
+    Goal less = goal_;
+    less.powerups = false;
+    gp = plan(pw, less);
+  }
   if (!gp.ok || gp.steps.empty()) {
     Goal more;
     more.blocks = true;
@@ -646,6 +728,24 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
         pads_.clear();
         rideFails_[k]++;
       }
+      // Riding a mount, every idle one is a wall (C1:C75A writes $C9 into
+      // its cell while P1 +$60 bit 15); off the mount they are floor
+      // again, and walking onto one boards it. A flame on P1 costs the
+      // mount, not a heart (C0:A630 -> C1:29E0: P1 flashes $C0 frames, the
+      // mount stays, idle): if a plan needs an idle mount's cell, P1 bombs
+      // itself off (3-3: a $90 parked at (6,4) shut the corridor to the
+      // last $99 for 12000 frames).
+      // The same for a plan that needs the spring pads back.
+      if (riding && pending.empty()) {
+        World mw = pw;
+        for (size_t k = 0; k < mw.map.size(); k++)
+          if (w0.map[k] == 'S') mw.map[k] = 'S';
+        for (const Enemy& e : w.enemies)
+          if ((e.type == 0x90 || e.type == 0x98) && (e.be & 0xC000) == 0x8000 && w.inside(e.col(), e.row()) &&
+              mw.at(e.col(), e.row()) == '#')
+            mw.map[size_t(g.idx(e.col(), e.row()))] = '.';
+        if (mw.map != pw.map && plan(mw, more).ok && getOff()) return;
+      }
       return survive(w, live, o, pending.empty() ? "no plan" : "waiting for a blast");
     }
   }
@@ -655,7 +755,7 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
   for (; si < gp.steps.size() && si < 4; si++) {
     const Step& s = gp.steps[si];
     if (pending.empty() || dist[size_t(g.idx(s.standC, s.standR))] >= 0) break;
-    auto route = g.softRoute(s.standC, s.standR, badSoft_);
+    auto route = g.softRoute(s.standC, s.standR, badSoftNow());
     size_t i = 1;
     while (i < route.size() && !breakable(w.at(route[i] % w.cols, route[i] / w.cols))) i++;
     if (i >= route.size() || !pending.count(route[i])) break;
@@ -712,10 +812,15 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
     dm.addBomb(xc, xr, w.p.fire, w.p.pierce, t1 + kNewFuse);
     for (const Bomb& b : w.bombs)  // (P1's remote bombs out: set off first, by the same B presses)
       if (b.remote && !b.enemyOwned) dm.addBomb(b.c, b.r, b.range, b.pierce, t1 + kNewFuse);
+    // A bomb under a furnace (2-5: the $DF takes it in) sets the fuse
+    // lines alight: every 'f' cell burns a while later (World2FuseIgnite
+    // C1:4922), so no cover on one (2-5: all four covers died at A+88).
+    bool underFurnace = w.inside(xc, xr - 1) && w.at(xc, xr - 1) == 'F';
     std::vector<std::pair<int, int>> ys;
     for (int k = 0; k < w.cols * w.rows; k++) {
       if (d2[size_t(k)] <= 0) continue;
       int yc = k % w.cols, yr = k / w.cols;
+      if (underFurnace && w.at(yc, yr) == 'f') continue;
       int t2 = t1 + kWalkFPT * d2[size_t(k)] + kSettle;
       if (dm.deadly(yc, yr, t2, t1 + kNewFuse + kFlameFrames + kTail)) continue;
       int key = d2[size_t(k)];
@@ -792,10 +897,10 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
     // from any cell whose blast reaches it; a cell that failed 3 times
     // (the game won't take a bomb there) is dropped, and a soft block no
     // cell is left for is routed around.
-    const int kBad = 3;
     std::vector<int> tried;
+    std::set<int> bad = badSoftNow();
     for (int pass = 0; pass < 4 && cs.empty(); pass++) {
-      auto route = g.softRoute(sc, sr, badSoft_);
+      auto route = g.softRoute(sc, sr, bad);
       size_t i = 1;
       while (i < route.size() && !breakable(w.at(route[i] % w.cols, route[i] / w.cols))) i++;
       if (i >= route.size()) break;
@@ -806,20 +911,27 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
           xs.push_back({dist[size_t(x)], x});
       std::sort(xs.begin(), xs.end());
       for (auto& [d, x] : xs) {
-        if (bombFails_[x] >= kBad || tried.size() >= 2) continue;
+        if (bombDropped(x) || tried.size() >= 2) continue;
         size_t n0 = cs.size();
         bombCands(x % w.cols, x / w.cols, Cand::Change, "clear the way to " + tname, 4, cs, ambient());
         if (cs.size() > n0) tried.push_back(x);
       }
-      if (cs.empty()) badSoft_.insert(k);
+      if (cs.empty()) bad.insert(k), badSoft_[k] = w.frame;
     }
     if (!cs.empty() && tryCands(cs, live, o, 8)) return;
-    for (int x : tried) bombFails_[x]++;
+    for (int x : tried) {
+      if (frame_ - bombFailAt_[x] >= 2 * kBadSoftTTL) bombFails_[x] = 0;  // (worn off: count afresh)
+      bombFails_[x]++, bombFailAt_[x] = frame_;
+    }
     itemFailed();
     return survive(w, live, o, ("way to " + tname).c_str());
   }
   switch (task.kind) {
     case TaskKind::EnterGate:
+      // Riding and the gate still shut (the plan has nothing left to
+      // kill): the mount's own $99 rider is parked dormant while P1 rides
+      // (3-1: 10000 frames by the shut gate on a $98).
+      if (riding && !w.gateOpen && getOff()) return;
       cs.push_back(walkCand(task.c, task.r, Cand::Exit, tname));
       break;
     case TaskKind::PickItem:

@@ -31,6 +31,7 @@ typedef struct {
     int enemies, hp;   /* live enemies (and their HP) at the end, as botrun counts them */
     int px, py, ph;    /* P1 at the end (world pixels), controller phase */
     uint64_t mapSig;   /* TileMap hash at the end (agent_map_sig) */
+    int mapChanged;    /* the TileMap differed from the start at some point (or at the end) */
     uint16_t *pads;    /* cap entries: the pad of each frame (host fills) */
     int16_t *trace;    /* 2 * cap: P1 world x, y at the start of each frame */
     int16_t *etrace;   /* AG_ESLOTS * cap (wantEnemies, else NULL): agent_enemy_cells per frame */

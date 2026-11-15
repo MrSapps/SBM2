@@ -426,3 +426,65 @@ TEST("agent: a power-up it can't get: left after 3 tries") {
   a.decide(w, liveOf(w), o);
   CHECK_EQ(a.what(), std::string("gate 6,3: walk to (6,3)"));
 }
+
+// With the remote, a pierce item on the floor is a wall to the routes.
+TEST("agent: holding the remote: walks around a pierce item") {
+  World w = mk({"#######",
+                "#..i.g#",
+                "#.###.#",
+                "#.....#",
+                "#######"}, 1, 1, "gate 5 1 open\nitem 3 1 item kind=1");
+  auto through = [](const SimReq& r) {
+    for (size_t k = 0; k + 1 < r.path.size(); k += 2)
+      if (r.path[k] / 16 == 3 && r.path[k + 1] / 16 == 1) return true;
+    return false;
+  };
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -2; };
+  Agent a = agentFor("exit");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.committed() && through(o.seen.back()));  // no remote: straight on
+  w.p.remote = true;
+  o.seen.clear();
+  Agent b = agentFor("exit");
+  b.decide(w, liveOf(w), o);
+  CHECK(b.committed() && !o.seen.empty() && !through(o.seen.back()));
+}
+
+// Every bomb move ranks its covers by the enemy model: of two covers as
+// near, the one an enemy is walking into goes last.
+TEST("agent: a block's bomb: the cover an enemy is heading for goes last") {
+  World w = mk({"#########",
+                "#...%...#",
+                "#.#.#####",
+                "#.#.....#",
+                "#########"}, 3, 1,
+               "enemy slot=4 type=94 x=24 y=55 vx=0 vy=-0.5 step=u target=1,2 wait=0 hp=1 f4=0C00 c0=8000");
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 2; };
+  Agent a = agentFor("blocks");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.committed());
+  int bc, br, yc, yr;
+  bombAndCover(o.seen[0], bc, br, yc, yr);
+  CHECK(bc == 3 && br == 1);
+  CHECK(yr == 3 && yc >= 4);  // along row 3, not up column 1 where it walks
+}
+
+// World 2: a blown block grows back within the run, so the end map can
+// match the start; the oracle's "changed on the way" still counts.
+TEST("agent: a block that grows back in the run still counts as done") {
+  World w = mk({"#########",
+                "#...%...#",
+                "#.#.#.#.#",
+                "#########"}, 1, 1);
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 1; r.mapChanged = true; };
+  Agent a = agentFor("blocks");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.committed() && a.what().find("soft 4,1") == 0);
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 1; };
+  Agent b = agentFor("blocks");
+  b.decide(w, liveOf(w), o);
+  CHECK_EQ(b.what(), std::string("survive"));
+}

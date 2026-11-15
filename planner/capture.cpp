@@ -20,14 +20,16 @@ struct ClassTable {
     t[0x00] = '.';
     for (int i = 0x01; i <= 0x03; i++) t[i] = '*';
     for (int i = 0x40; i <= 0x43; i++) t[i] = 'b';
-    for (int i : {0x6F, 0x70, 0x72, 0x6B}) t[i] = '.';
+    for (int i : {0x6F, 0x70, 0x72}) t[i] = '.';
+    t[0x6B] = 'v';
     t[0x44] = 'i';
     for (int i = 0xC3; i <= 0xCF; i++) t[i] = '#';
     t[0xC2] = '%';
     t[0xC9] = 'g';
     t[0x49] = 'g';
     t[0xD3] = 'O';
-    t[0xE2] = t[0xF5] = 'X';
+    t[0xE2] = 'X';
+    t[0xF5] = 'x';
     t[0xD0] = 'w';
     for (int i : {0xD2, 0xD5, 0xE0, 0xE1}) t[i] = 'm';
     t[0xD6] = 'B';
@@ -148,6 +150,32 @@ World captureWorld(const uint8_t* wram, int frame) {
     b.flags = flags;
     w.bombs.push_back(b);
   }
+  // 2-8 boss drops (docs/enemies.md 6b): a bomb falls at 2 px/f (state
+  // CC:B189) onto the marker under it (CC:B2F1, same x) and goes off on
+  // landing, range 10. Each marker is a bomb due when the faller lands
+  // (none seen yet: 60 frames). slot -1: not in the bomb table.
+  if (w.stage == 0x27) {
+    auto st = [&](int base) { return rd.h(base) | rd.b(base + 2) << 16; };
+    std::vector<std::pair<int, int>> falls;
+    for (int base = 0x1040; base <= 0x17C0; base += 0x40)
+      if (st(base) == 0xCCB189) falls.push_back({rd.h(base + 0x11), rd.s(base + 0x14)});
+    for (int base = 0x1040; base <= 0x17C0; base += 0x40) {
+      if (st(base) != 0xCCB2F1) continue;
+      int mx = rd.h(base + 0x11), my = rd.h(base + 0x14), t = 60;
+      for (auto& f : falls)
+        if (std::abs(f.first - mx) <= 2) t = std::max(0, (my - f.second) / 2 - 3);
+      Bomb b;
+      b.slot = -1;
+      b.c = (mx + w.ox) / 16;
+      b.r = (my + w.oy) / 16;
+      b.fuse = t;
+      b.range = 10;
+      b.enemyOwned = true;
+      bool dup = false;
+      for (const Bomb& o : w.bombs) dup |= o.c == b.c && o.r == b.r;
+      if (!dup) w.bombs.push_back(b);
+    }
+  }
 
   for (int base = 0x8400; base <= 0x8F00; base += 0x100) {
     int s0 = rd.h(base), h = s0 & 0xF000;
@@ -159,8 +187,10 @@ World captureWorld(const uint8_t* wram, int frame) {
     Enemy e;
     e.slot = (base >> 8) - 0x80;
     e.type = rd.b(base + 0x7E);
-    e.x = rd.s(base + 0x10) + w.ox;
-    e.y = rd.s(base + 0x18) + w.oy;
+    // (positions wrap at 512 px like the 32x32 TileMap, C0:BFE2: 2-3's
+    // off-screen enemies in the top rooms read 32 rows too far down)
+    e.x = (rd.s(base + 0x10) + w.ox) & 511;
+    e.y = (rd.s(base + 0x18) + w.oy) & 511;
     e.vx = vel(base + 0x14, 1);
     e.vy = vel(base + 0x1C, 2);
     e.spd = rd.h(base + 0x46) + rd.b(base + 0x49) / 256.0;

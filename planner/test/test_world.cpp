@@ -138,3 +138,48 @@ TEST("capture: items keep their kind; ones still in a block are hidden") {
   CHECK(x.hidden.size() == 1 && x.hidden[0].kind == kItemBomb && x.items.size() == 1 && x.items[0].kind == kItemFire);
   CHECK_EQ(x.p.maxbombs, 3);
 }
+
+// 2-8 (stage $27): a falling bomb (CC:B189) and its marker (CC:B2F1, same
+// x) are a range-10 bomb due when the faller lands; a marker with no faller
+// yet is due in 60.
+TEST("capture: 2-8 boss drops are bombs due when they land") {
+  std::vector<uint8_t> wram(0x20000, 0);
+  for (int r = 0; r < 32; r++)
+    for (int c = 0; c < 32; c++) wram[size_t(0x1C000 + r * 0x80 + c * 2)] = r >= 1 && r <= 12 && c >= 1 && c <= 14 ? 0 : 0xC3;
+  wram[0x1A] = 0x27;
+  auto obj = [&](int base, uint32_t st, int x, int y) {
+    wram[size_t(base)] = uint8_t(st), wram[size_t(base + 1)] = uint8_t(st >> 8), wram[size_t(base + 2)] = uint8_t(st >> 16);
+    wram[size_t(base + 0x11)] = uint8_t(x), wram[size_t(base + 0x12)] = uint8_t(x >> 8);
+    wram[size_t(base + 0x14)] = uint8_t(y), wram[size_t(base + 0x15)] = uint8_t(y >> 8);
+  };
+  obj(0x1080, 0xCCB189, 128, uint16_t(-3));  // falling over (8,7)
+  obj(0x10C0, 0xCCB2F1, 128, 120);
+  obj(0x1100, 0xCCB2F1, 80, 168);             // (5,10): nothing falling yet
+  World w = captureWorld(wram.data(), 0);
+  CHECK_EQ(w.bombs.size(), size_t(2));
+  for (const Bomb& b : w.bombs) {
+    CHECK(b.range == 10 && b.enemyOwned && b.slot == -1);
+    if (b.c == 8) CHECK(b.r == 7 && b.fuse == (120 + 3) / 2 - 3);
+    else CHECK(b.c == 5 && b.r == 10 && b.fuse == 60);
+  }
+  wram[0x1A] = 0x26;  // other stages: not read
+  CHECK(captureWorld(wram.data(), 0).bombs.empty());
+}
+
+// The TileMap is a 32x32 ring (C0:BFE2 masks the index): 2-3's off-screen
+// enemies in the top rooms read y = 600 on a 29-row map; they are at row
+// 37 & 31 = 5.
+TEST("capture: enemy positions wrap like the 32x32 map") {
+  std::vector<uint8_t> wram(0x20000, 0);
+  for (int r = 0; r < 32; r++)
+    for (int c = 0; c < 32; c++) wram[size_t(0x1C000 + r * 0x80 + c * 2)] = r >= 1 && r <= 12 && c >= 1 && c <= 14 ? 0 : 0xC3;
+  int base = 0x8500;
+  wram[size_t(base + 1)] = 0xA0;  // live, off screen
+  wram[size_t(base + 0x7E)] = 0x92;
+  wram[size_t(base + 0x43)] = 1;
+  wram[size_t(base + 0x10)] = 136;
+  wram[size_t(base + 0x18)] = uint8_t(600 & 0xFF), wram[size_t(base + 0x19)] = uint8_t(600 >> 8);
+  World w = captureWorld(wram.data(), 0);
+  CHECK_EQ(w.enemies.size(), size_t(1));
+  CHECK(w.enemies.size() == 1 && w.enemies[0].col() == 8 && w.enemies[0].row() == 5);
+}

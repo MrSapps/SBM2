@@ -14,6 +14,9 @@
 //                  it rests while its own bomb is out (see hold); in the
 //                  intro (world.intro), or before it ever started (c0 0, no
 //                  step or target), it can't be hurt until it first moves
+//   $86            generic at 2.5 px/f, at most 4 cells a go, then rests
+//                  128 frames; then toward P1 if it sees it (8 cells, no
+//                  solid between), else random (C1:664B)
 //   $8C            a chaser that halts at a cell centre while it sees P1
 //                  (SeesP1 C1:8AF9: same column, up to 4 cells, no solid
 //                  tile or bomb between; the same-row test never fires
@@ -83,6 +86,7 @@ class EnemyModel {
   void rollOne(const Enemy& e, int hold, const ModelBomb* b, EnemyRun& out);
   P1At p1At(int t) const;
   bool seesP1(int c, int r, int t, const ModelBomb* b) const;
+  int sightDir(int c, int r, int t, const ModelBomb* b) const;
 
   const World& w_;
   int horizon_;

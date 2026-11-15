@@ -253,3 +253,103 @@ TEST("goap: powerups: open the block hiding a bomb up, pick up a fire up, then t
   Goal g;
   CHECK(Goal::parse("powerups+exit", g) && g.powerups && g.str() == "powerups+exit");
 }
+
+// Push blocks (docs/mechanics.md 1): a blast pushes an X one cell its way;
+// into a hole, both cells become floor. The planner pushes only to open a
+// way (here the panel), from the far side, in line.
+TEST("goap: push the block into the hole, then the panel behind it") {
+  World w = mk({"#######",
+                "#..XOP#",
+                "#g#####"}, 1, 1, "gate 1 2 closed\npanel 5 1 mode=0");
+  Plan p = run(w, "exit");
+  CHECK(p.ok);
+  CHECK_EQ(tasksOf(p), std::string("push 3,1; panel 5,1; gate 1,2"));
+  const Task& t = p.tasks[size_t(p.steps[0].task)];
+  CHECK(t.dc == 1 && t.dr == 0);
+  CHECK(p.steps[0].standR == 1 && p.steps[0].standC < 3);  // the far side
+  // No hole: no push (and no way to the panel).
+  World v = mk({"#######",
+                "#..X.P#",
+                "#g#####"}, 1, 1, "gate 1 2 closed\npanel 5 1 mode=0");
+  CHECK(!run(v, "exit").ok);
+  // Nothing behind it needed: no push.
+  World u = mk({"#######",
+                "#..XO.#",
+                "#g#####"}, 1, 1, "gate 1 2 open");
+  CHECK_EQ(tasksOf(run(u, "exit")), std::string("gate 1,2"));
+}
+
+// World 2's $F5 (x) is a wall until a flame has been on the $6B button (v)
+// (C1:4897); the same blast doesn't count for both.
+TEST("goap: a dormant block needs the button first") {
+  World w = mk({"#######",
+                "#..xOP#",
+                "#gv####"}, 1, 1, "gate 1 2 closed\npanel 5 1 mode=0");
+  Plan p = run(w, "exit");
+  CHECK(p.ok);
+  CHECK_EQ(tasksOf(p), std::string("button 2,2; push 3,1; panel 5,1; gate 1,2"));
+  World v = mk({"#######",
+                "#..xOP#",
+                "#g#####"}, 1, 1, "gate 1 2 closed\npanel 5 1 mode=0");
+  CHECK(!run(v, "exit").ok);
+}
+
+// +$F3 is set, not or'ed: another bomb kind costs the remote.
+TEST("goap: items: the remote is wanted; with it, other bomb kinds are not") {
+  Player p;
+  CHECK(wantedItem(kItemRemote) && wantedItem(kItemFullFire) && !wantedItem(kItemPierce));
+  CHECK(!unwantedItem(kItemPierce, p));
+  p.remote = true;
+  CHECK(unwantedItem(kItemPierce, p) && unwantedItem(kItemBomb9, p) && unwantedItem(kItemBomb10, p));
+  CHECK(!unwantedItem(kItemBomb, p) && !unwantedItem(kItemRemote, p));
+}
+
+// A blast pushes the block its own way only: a block between two holes
+// fills one of them, so of the panels behind them one stays out of reach.
+TEST("goap: a block pushed one way can't fill the other hole") {
+  World w = mk({"#######",
+                "#....g#",
+                "#..XOP#",
+                "###O###",
+                "###P###",
+                "#######"}, 1, 1, "gate 5 1 closed\npanel 5 2 mode=0\npanel 3 4 mode=0");
+  CHECK(!run(w, "exit").ok);
+  w.panels.pop_back();  // one panel: fine
+  w.map[size_t(4 * w.cols + 3)] = '#';
+  Plan p = run(w, "exit");
+  CHECK(p.ok);
+  CHECK(tasksOf(p).find("push 3,2") == 0);
+}
+
+// A push done from a soft block's cell: the route bombs it, then P1 stands
+// there (2-6: (13,23) is pushed from the soft block at (13,22)).
+TEST("goap: a push from behind a soft block") {
+  World w = mk({"#######",
+                "#.%XOP#",
+                "#g#####"}, 1, 1, "gate 1 2 closed\npanel 5 1 mode=0");
+  Plan p = run(w, "exit");
+  CHECK(p.ok);
+  CHECK_EQ(tasksOf(p), std::string("push 3,1; panel 5,1; gate 1,2"));
+  CHECK(p.ok && p.steps[0].standC == 2);
+}
+
+// Search limit hit: the greedy finish still finds a chain of pushes and a
+// button press that no single step of which brings a task in reach (2-6:
+// before, it gave up and bombed every block, which grow back in world 2).
+TEST("goap: greedy finish: a chain of pushes and the button that opens the way") {
+  // Fill (5,1) then (7,1) in that order, press the button (9,1), then push
+  // the woken block (8,2) down into (8,3): the panel (8,4) comes in reach.
+  World w = mk({"###########",
+                "#g..XOXO.v#",
+                "########x##",
+                "########O##",
+                "########P##",
+                "###########"}, 2, 1, "gate 1 1 closed\npanel 8 4 mode=0");
+  PlanOptions o;
+  o.maxNodes = 1;
+  Goal g;
+  g.exit = true;
+  Plan p = plan(w, g, o);
+  CHECK(p.ok);
+  CHECK_EQ(tasksOf(p), std::string("push 4,1; push 6,1; button 9,1; push 8,2; panel 8,4; gate 1,1"));
+}

@@ -43,6 +43,7 @@ struct SimOut {
   int enemies = 0, hp = 0;
   int px = 0, py = 0, ph = 0;
   uint64_t mapSig = 0;
+  bool mapChanged = false;      // the map differed from the start at some point (blocks grow back)
   std::vector<uint16_t> pads;   // one per frame
   std::vector<int16_t> trace;   // x, y per frame start
   // wantEnemies: kEnemySlots per frame, each slot's cell (c | r << 8) or -1

@@ -398,6 +398,8 @@ typedef struct SimJob {
     int detEnd;       /* press B for 4 frames once path2 is done */
     int detWait;      /* ... after standing this many frames in cover */
     int sx, sy, still; /* path_pad: closest to the waypoint so far, frames since, waypoint */
+    uint64_t map0;     /* TileMap hash at the start ... */
+    int mapChanged;    /* ... and whether it ever differed (sampled every 4 frames) */
     /* the result cache (sim_cache_*): resume from a cached end state */
     int resume, done;
     uint32_t f0;
@@ -425,6 +427,14 @@ static uint16_t path_pad(const Snes *s, const int16_t *wp, int n, int *at, int *
     /* world pixels: P1's position plus the scroll origin ($5F01, $5EFB) */
     int x = (uint16_t)((s->wram[0x8010] | s->wram[0x8011] << 8) + (s->wram[0x5F01] | s->wram[0x5F02] << 8));
     int y = (uint16_t)((s->wram[0x8018] | s->wram[0x8019] << 8) + (s->wram[0x5EFB] | s->wram[0x5EFC] << 8));
+    /* The start cell's centre is only there to line P1 up for its turn: if
+     * the first leg runs along the axis P1 is already lined up on, go
+     * straight (back to the centre first is a step the wrong way when P1
+     * sits off it toward the next cell: 2-8, a drop dodge walked up into
+     * the blast's row). */
+    if (*at == 0 && n >= 2 && ((wp[2] == wp[0] && abs(x - wp[0]) <= 1 && wp[3] != wp[1]) ||
+                               (wp[3] == wp[1] && abs(y - wp[1]) <= 1 && wp[2] != wp[0])))
+        *at = 1;
     while (*at < n && abs(wp[2 * *at] - x) <= 1 && abs(wp[2 * *at + 1] - y) <= 1) (*at)++;
     if (*at >= n) return 0;
     int dx = wp[2 * *at] - x, dy = wp[2 * *at + 1] - y;
@@ -547,6 +557,8 @@ static void *sim_run(void *arg)
     j->ph = 1; j->at2 = 0;
     j->sx = 1 << 20; j->sy = 0; j->still = -1;
     if (!j->resume) {
+        j->map0 = agent_map_sig(s->wram);
+        j->mapChanged = 0;
         memset(j->hash, 0, sizeof j->hash);
         if (j->nwp && j->npre == 0) j->buf[0] = sim_pad(j, s, 0, &at);
         /* this frame's pad: latched already (see vblank_cb) */
@@ -594,6 +606,9 @@ static void *sim_run(void *arg)
             tpend = j->trace && i - 1 < j->tcap ? i - 1 : 0;
             if (j->nwp && i >= j->npre && i <= j->frames + 2) j->buf[i] = sim_pad(j, s, i, &at);
             if (j->det && i >= j->det && i < j->det + 4 && i <= j->frames + 2) j->buf[i] |= PAD_B;
+            /* (world 2 soft blocks grow back within a run: a change seen on
+             * the way counts, not just the end state) */
+            if (!j->mapChanged && (i & 3) == 0 && agent_map_sig(s->wram) != j->map0) j->mapChanged = 1;
             uint16_t lock = s->wram[0x8052] | s->wram[0x8053] << 8;
             if (sim_heart_death && s->wram[0x80EF] < h0) {
                 uint16_t at8 = s->wram[0x80A8] | s->wram[0x80A9] << 8;
@@ -959,8 +974,8 @@ static double ag_now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &
 #endif
 static const char *ag_cache;
 static unsigned long ag_hits;
-typedef struct { uint32_t magic; int32_t dead, en, hp, px, py, ph, cap; uint64_t mapSig; int32_t bossHp, nbt; } AgCacheHdr;
-#define AG_MAGIC 0x41474332
+typedef struct { uint32_t magic; int32_t dead, en, hp, px, py, ph, cap; uint64_t mapSig; int32_t bossHp, nbt, mapChanged; } AgCacheHdr;
+#define AG_MAGIC 0x41474333
 static uint64_t ag_key(uint64_t live, const AgSimReq *r, int cap)
 {
     uint64_t h = mix64(live, SBM2_CORE_ID, strlen(SBM2_CORE_ID));
@@ -989,7 +1004,7 @@ static int ag_cache_get(uint64_t k, AgSimRes *o)
              (!o->btrace || fread(o->btrace, 2, (size_t)h.nbt, f) == (size_t)h.nbt);
     fclose(f);
     if (!ok) return 0;
-    o->dead = h.dead; o->enemies = h.en; o->hp = h.hp; o->px = h.px; o->py = h.py; o->ph = h.ph; o->mapSig = h.mapSig;
+    o->dead = h.dead; o->enemies = h.en; o->hp = h.hp; o->px = h.px; o->py = h.py; o->ph = h.ph; o->mapSig = h.mapSig; o->mapChanged = h.mapChanged;
     o->bossHp = h.bossHp;
     return 1;
 }
@@ -1004,7 +1019,7 @@ static void ag_cache_put(uint64_t k, const AgSimRes *o, int nboss)
     snprintf(t, sizeof t, "%s.%d.tmp", p, (int)getpid());
     FILE *f = fopen(t, "wb");
     if (!f) return;
-    AgCacheHdr h = {AG_MAGIC, o->dead, o->enemies, o->hp, o->px, o->py, o->ph, o->cap, o->mapSig, o->bossHp, nbt};
+    AgCacheHdr h = {AG_MAGIC, o->dead, o->enemies, o->hp, o->px, o->py, o->ph, o->cap, o->mapSig, o->bossHp, nbt, o->mapChanged};
     int ok = fwrite(&h, sizeof h, 1, f) == 1 && fwrite(o->pads, 2, (size_t)o->cap, f) == (size_t)o->cap &&
              fwrite(o->trace, 2, (size_t)o->cap * 2, f) == (size_t)o->cap * 2 &&
              (!o->etrace || fwrite(o->etrace, 2, (size_t)o->cap * AG_ESLOTS, f) == (size_t)o->cap * AG_ESLOTS) &&
@@ -1099,6 +1114,7 @@ static void ag_run(const AgSimReq *rq, AgSimRes *rs, int n)
             o->dead = r.dead; o->enemies = r.en; o->hp = r.hp;
             o->px = r.px; o->py = r.py; o->ph = r.ph;
             o->mapSig = agent_map_sig(j->s.wram);
+            o->mapChanged = j->mapChanged || o->mapSig != j->map0;
             for (int f = 0; f < o->cap && f <= j->frames + 2; f++) o->pads[f] = j->buf[f];
             ag_simfr += j->frames;
         }

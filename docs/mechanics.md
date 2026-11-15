@@ -159,8 +159,10 @@ Items hidden in soft blocks are listed at `$7E3C48` (4-byte entries
 and `sub_C1223D` writes tile `$44` and the item's art from table C5:F205).
 Picking an item up jumps through table C5:F145 by the low byte of the
 cell's `TileGfxMap` (`$7FA000`). Kind 11 (art `$1640`, handler C0:9C5B)
-is the **heart**: `+$EF` += 1. Kinds 0/2 raise `+$E1`/`+$E2`, 1/5/9/10 set
-`+$F3` (remote and other bomb kinds), 12/13/7/8 count up `+$FB/$FA/$FE/$FF`,
+is the **heart**: `+$EF` += 1. Kinds 0/2 raise `+$E1`/`+$E2`, 3 sets fire
+to full (`+$E2` = 9), 4 is speed (`+$E0` += 1, cap 5), 1/5/9/10 **set**
+`+$F3` = 4 (pierce, C0:9965) / 1 (remote, C0:9B1D) / 2 (C0:9C3A) / 8
+(C0:9C19): one bomb kind at a time, the last picked up wins, 12/13/7/8 count up `+$FB/$FA/$FE/$FF`,
 14/15 add score. Bench start states: 5-2 hides a heart at (26,11) and 5-6
 one at (13,4); 5-3 and 5-5 hide none (5-3 starts with 0 hearts, 5-5 with
 1). 5-3 still clears without crossing (bench seed 1, frame 14230); 5-5's

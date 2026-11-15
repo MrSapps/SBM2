@@ -22,7 +22,9 @@ int baseCost(TaskKind k) {
     case TaskKind::HurtBoss: return kEnemyCost;
     case TaskKind::BombSoft:
     case TaskKind::TogglePanel:
-    case TaskKind::LightCrystal: return kBombCost;
+    case TaskKind::LightCrystal:
+    case TaskKind::PushBlock:
+    case TaskKind::PressButton: return kBombCost;
     default: return 0;
   }
 }
@@ -48,8 +50,14 @@ class Search {
     staticAt_.assign(size_t(w.cols * w.rows), {});
     for (size_t i = 0; i < tasks_.size(); i++) {
       const Task& t = tasks_[i];
-      if (t.kind == TaskKind::BombSoft || t.kind == TaskKind::TogglePanel || t.kind == TaskKind::LightCrystal)
+      if (t.kind == TaskKind::BombSoft || t.kind == TaskKind::TogglePanel || t.kind == TaskKind::LightCrystal ||
+          t.kind == TaskKind::PressButton)
         staticAt_[size_t(t.r * w.cols + t.c)].push_back(int(i));
+      if (t.kind == TaskKind::PushBlock) {
+        blockTasks_[t.r * w.cols + t.c].push_back(int(i));
+        holeTasks_[(t.r + t.dr) * w.cols + t.c + t.dc].push_back(int(i));
+      }
+      if (t.kind == TaskKind::PressButton) buttons_.push_back(int(i));
       if (t.kind == TaskKind::BombSoft) softAt_[size_t(t.r * w.cols + t.c)] = int(i);
       if (t.kind == TaskKind::TogglePanel) hasPanels_ = true;
     }
@@ -170,6 +178,8 @@ class Search {
       case TaskKind::KillEnemy: return goal_.enemies || (goal_.exit && t.blocksExit && !gateOpen(n));
       case TaskKind::HurtBoss: return goal_.exit || goal_.enemies;
       case TaskKind::TogglePanel: return goal_.exit && !gateOpen(n);
+      case TaskKind::PushBlock:
+      case TaskKind::PressButton: return false;  // (enablers: done when they open the way)
       case TaskKind::LightCrystal:
         // KillAllType8F: crystals are the only way to kill $8F enemies.
         for (size_t i = 0; i < tasks_.size(); i++)
@@ -187,6 +197,28 @@ class Search {
     return h;
   }
 
+  bool anyDone(const Node& n, const std::unordered_map<int, std::vector<int>>& m, int k) const {
+    auto it = m.find(k);
+    if (it == m.end()) return false;
+    for (int i : it->second)
+      if (n.done[size_t(i)]) return true;
+    return false;
+  }
+  // A push block that has left its cell; a hole a block has filled.
+  bool moved(const Node& n, int c, int r) const { return anyDone(n, blockTasks_, cellIdx(c, r)); }
+  bool filled(const Node& n, int c, int r) const { return anyDone(n, holeTasks_, cellIdx(c, r)); }
+  bool pressed(const Node& n) const {
+    for (int i : buttons_)
+      if (n.done[size_t(i)]) return true;
+    return false;
+  }
+  // Can a blast push it now: still there, the hole still open, and a
+  // dormant $F5 woken by the button.
+  bool pushable(const Node& n, const Task& t) const {
+    if (moved(n, t.c, t.r) || filled(n, t.c + t.dc, t.r + t.dr)) return false;
+    return w_.at(t.c, t.r) == 'X' || pressed(n);
+  }
+
   bool walkable(const Node& n, int c, int r) const {
     if (!w_.inside(c, r)) return false;
     char t = w_.at(c, r);
@@ -194,11 +226,13 @@ class Search {
       int s = softAt_[size_t(cellIdx(c, r))];
       return w_.p.softpass || (s >= 0 && n.done[size_t(s)]);
     }
+    if (t == 'X' || t == 'x') return moved(n, c, r);
+    if (t == 'O') return filled(n, c, r);
     return walkableClass(t);
   }
   char cls(const Node& n, int c, int r) const {
     char t = w_.at(c, r);
-    if (breakable(t) && walkable(n, c, r)) return '.';
+    if ((breakable(t) || t == 'X' || t == 'x' || t == 'O') && walkable(n, c, r)) return '.';
     return t;
   }
 
@@ -249,6 +283,20 @@ class Search {
       if (w_.inside(t.c, t.r)) consider(t.c, t.r);
       return dist != INT_MAX;
     }
+    if (t.kind == TaskKind::PushBlock) {  // in line on the far side from the hole
+      for (int k = 1; k <= std::max(1, w_.p.fire); k++) {
+        int c = t.c - t.dc * k, r = t.r - t.dr * k;
+        if (w_.inside(c, r) && breakable(w_.at(c, r)) && !walkable(n, c, r)) {
+          consider(c, r);  // the route bombs it first, then P1 stands there
+          break;
+        }
+        if (!walkable(n, c, r)) break;
+        char x = cls(n, c, r);
+        if (canPlaceOn(x)) consider(c, r);
+        if (!blastPasses(x)) break;
+      }
+      return dist != INT_MAX;
+    }
     if (t.kind == TaskKind::KillEnemy && w_.inside(t.c, t.r) && walkable(n, t.c, t.r) &&
         canPlaceOn(cls(n, t.c, t.r)))
       consider(t.c, t.r);
@@ -279,7 +327,16 @@ class Search {
         int cc = c + dd[0] * k, rr = r + dd[1] * k;
         if (!w_.inside(cc, rr)) break;
         char x = cls(n, cc, rr);
-        if (breakable(x) || x == 'y' || x == 'P') mark(cc, rr);
+        if (breakable(x) || x == 'y' || x == 'P' || x == 'v') mark(cc, rr);
+        if (x == 'X' || x == 'x') {  // pushed the blast's way, if a hole is there
+          auto it = blockTasks_.find(cellIdx(cc, rr));
+          if (it != blockTasks_.end())
+            for (int i : it->second) {
+              const Task& t = tasks_[size_t(i)];
+              if (t.dc == dd[0] && t.dr == dd[1] && pushable(n, t)) done[size_t(i)] = 1;
+            }
+          break;
+        }
         if (x == 'B') break;  // (its burst does more; not counted)
         if (x == '%' && w_.p.pierce) continue;
         if (!blastPasses(x)) break;
@@ -296,7 +353,10 @@ class Search {
       if (n.done[i] || t.needsCrystals) continue;  // $8F: immune to bombs
       // Only what the goal needs (soft blocks in the way are bombed by the
       // route itself). The gate ends the stage, so it comes last.
-      if (t.kind == TaskKind::EnterGate ? (!open || !goal_.exit || !restDone(n)) : !required(n, t)) continue;
+      if (t.kind == TaskKind::EnterGate ? (!open || !goal_.exit || !restDone(n))
+          : t.kind == TaskKind::PushBlock ? !pushable(n, t)
+          : t.kind != TaskKind::PressButton && !required(n, t))
+        continue;
       int c, r, dist;
       if (!standCell(n, rt, t, c, r, dist)) continue;
       Node s{cellIdx(c, r), n.done, 0, 0, ni, int(i), c, r, 0, {}};
@@ -384,6 +444,8 @@ class Search {
   PlanOptions o_;
   std::vector<Task> tasks_;
   std::vector<int> softAt_;
+  std::unordered_map<int, std::vector<int>> blockTasks_, holeTasks_;  // push tasks by block / hole cell
+  std::vector<int> buttons_;
   std::vector<std::vector<int>> staticAt_;  // static bomb tasks per cell
   bool hasPanels_ = false;
   std::vector<Node> nodes_;
@@ -399,6 +461,8 @@ const char* taskName(TaskKind k) {
     case TaskKind::PickItem: return "item";
     case TaskKind::EnterGate: return "gate";
     case TaskKind::HurtBoss: return "boss";
+    case TaskKind::PushBlock: return "push";
+    case TaskKind::PressButton: return "button";
   }
   return "?";
 }
@@ -461,10 +525,15 @@ bool blocksExit(const Enemy& e) {
 // A bomb can't be placed on tiles with bit 6 set: panels, crystals, stairs,
 // switches, bombs (docs/mechanics.md, "button places nothing").
 bool breakable(char c) { return c == '%' || c == 'B'; }
-bool wantedItem(int kind) { return kind == kItemBomb || kind == kItemFire || kind == kItemHeart; }
-bool canPlaceOn(char c) { return walkableClass(c) && std::string("Py^sbg").find(c) == std::string::npos; }
+bool wantedItem(int kind) {
+  return kind == kItemBomb || kind == kItemFire || kind == kItemFullFire || kind == kItemHeart || kind == kItemRemote;
+}
+bool unwantedItem(int kind, const Player& p) {
+  return p.remote && (kind == kItemPierce || kind == kItemBomb9 || kind == kItemBomb10);
+}
+bool canPlaceOn(char c) { return walkableClass(c) && std::string("Py^sbgv").find(c) == std::string::npos; }
 
-bool walkableClass(char c) { return std::string(".i^Pyspf=ktTcCg*").find(c) != std::string::npos; }
+bool walkableClass(char c) { return std::string(".i^Pyspf=ktTcCg*v").find(c) != std::string::npos; }
 
 std::vector<Task> worldTasks(const World& w) {
   std::vector<Task> out;
@@ -479,6 +548,14 @@ std::vector<Task> worldTasks(const World& w) {
       char x = w.at(c, r);
       if (breakable(x)) out.push_back({TaskKind::BombSoft, c, r, -1, false, false});
       if (x == 'y') out.push_back({TaskKind::LightCrystal, c, r, -1, false, false});
+      if (x == 'v') out.push_back({TaskKind::PressButton, c, r, -1, false, false});
+      if (x == 'X' || x == 'x')
+        for (auto& d : kDirs)
+          if (w.inside(c + d[0], r + d[1]) && w.at(c + d[0], r + d[1]) == 'O') {
+            Task t{TaskKind::PushBlock, c, r, -1, false, false};
+            t.dc = d[0], t.dr = d[1];
+            out.push_back(t);
+          }
     }
   for (size_t i = 0; i < w.panels.size(); i++)
     if (!w.panels[i].done) out.push_back({TaskKind::TogglePanel, w.panels[i].c, w.panels[i].r, int(i), false, false});

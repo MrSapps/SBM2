@@ -73,7 +73,9 @@ rawunder                  # CellItems codes, hex
 | `b` | bomb | `$40`-`$43` | details in `bomb` lines |
 | `*` | flame | `$01`-`$03` | |
 | `O` | hole | `$D3` | solid; a push block fills it |
-| `X` | push block | `$E2`, `$F5` | |
+| `X` | push block | `$E2` | a blast pushes it a cell (into a hole: both become floor) |
+| `x` | dormant push block | `$F5` | as `X` once a flame has been on the `v` button |
+| `v` | button | `$6B` | walkable, no bombs on it; a flame presses it |
 | `w` | water | `$D0` | |
 | `m` | magnet | `$D2` `$D5` `$E0` `$E1` | details in `magnet` lines |
 | `B` | barrel | `$D6` | blast sets off 5 small blasts |
@@ -105,6 +107,10 @@ while `+4` bit 5 is set, else 0). `lock` = `+$52` in hex. `ride` = `+2` bit 15
 (launched or riding).
 
 ## Enemies
+
+Positions wrap at 512 px, like the 32x32 TileMap (C0:BFE2 masks the cell index): in the tall
+world 2 stages an off-screen enemy in the top rooms reads `y` 32 rows too far down.
+2-8's falling boss bombs are `bomb` lines with `slot=-1`, `owner=enemy`, range 10, due when they land.
 
 Every live object in `$8400`-`$8F00`. The fields are raw, so models can be written and
 tested against them: `f4` = `+4` (bit 15 dormant, 6 hidden, 5 flashing), `c0` = `+$C0`

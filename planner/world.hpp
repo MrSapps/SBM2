@@ -43,7 +43,12 @@ struct Panel { int c = 0, r = 0, mode = 0; bool done = false; };
 // kind: the item list's kind ($7E3C48, docs/mechanics.md "Items and
 // hearts"): 0 bomb up (+$E1), 2 fire up (+$E2), 11 heart; -1 not known.
 struct Item { int c = 0, r = 0; bool heart = false; int kind = -1; };
-enum : int { kItemBomb = 0, kItemFire = 2, kItemHeart = 11 };
+// (handlers via C5:F145 by the art byte of C5:F205: 0 +$E1, 2 +$E2, 3 fire
+// to 9, 4 +$E0 speed (cap 5), 1/5/9/10 set +$F3 = 4/1/2/8)
+enum : int {
+  kItemBomb = 0, kItemPierce = 1, kItemFire = 2, kItemFullFire = 3, kItemSpeed = 4, kItemRemote = 5,
+  kItemBomb9 = 9, kItemBomb10 = 10, kItemHeart = 11
+};
 struct Magnet { int c = 0, r = 0; char dir = 'u'; };
 
 // A boss-engine object ($1000-$17FF, docs/enemies.md 8) as the boss code

@@ -156,3 +156,28 @@ TEST("enemies: $A5 at its spd (1 px/f), turning back at a wall at once") {
   CHECK(EnemyModel::nearOdds(runs, 7, 1, 80, 104) > 0.95);
   CHECK(EnemyModel::nearOdds(runs, 4, 1, 110, 145) > 0.95);  // (back by (5,1) at 121..143; generic 153+)
 }
+
+TEST("enemies: $86 goes at most 4 cells, rests 128, then heads for P1 in sight") {
+  // A long corridor, P1 far off to the right, out of sight (9+ cells).
+  World w = mkw({"################",
+                 "#..............#",
+                 "################"},
+                "enemy slot=4 type=86 x=24 y=23 vx=0 vy=0 step=- target=1,1 wait=0 hp=1 f4=0C00 c0=0000 spd=2.5", 14, 1);
+  EnemyModel m(w, 400);
+  m.hold = {0};
+  auto runs = m.roll(nullptr, 14, 1, 16);
+  // 2.5 px/f: ~6 frames a cell. 4 cells by ~30, then still there at ~150.
+  CHECK(EnemyModel::nearOdds(runs, 7, 1, 0, 150) < 0.05);
+  CHECK(EnemyModel::nearOdds(runs, 5, 1, 60, 150) > 0.95);
+  // In sight (P1 4 cells off): straight for P1 after the rest.
+  World v = mkw({"################",
+                 "#..............#",
+                 "#.############.#",
+                 "#..............#",
+                 "################"},
+                "enemy slot=4 type=86 x=24 y=23 vx=0 vy=0 step=- target=1,1 wait=0 hp=1 f4=0C00 c0=0000 spd=2.5", 9, 1);
+  EnemyModel m2(v, 400);
+  m2.hold = {200};
+  auto r2 = m2.roll(nullptr, 9, 1, 16);
+  CHECK(EnemyModel::nearOdds(r2, 5, 1, 190, 240) > 0.95);
+}

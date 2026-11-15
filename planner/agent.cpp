@@ -246,7 +246,7 @@ bool Agent::tryCands(std::vector<Cand>& cs, const Live& live, Oracle& o, size_t 
           if (r.pads[f] & kPadA) aAt = int(f);
         std::snprintf(vb, sizeof vb, "  opt %zu %s -> dead %d en %d/%d hp %d/%d boss %d/%d at (%d,%d)%s A@%d cells %zu", b + i + 1,
                       c.what.c_str(), r.dead, r.enemies, live.enemies, r.hp, live.hp, r.bossHp, live.bossHp, r.px, r.py,
-                      r.mapSig != live.mapSig ? " map" : "", aAt, c.req.path.size() / 2 - 1);
+                      r.mapSig != live.mapSig ? " map" : r.mapChanged ? " map(back)" : "", aAt, c.req.path.size() / 2 - 1);
         log(vb);
         {  // where P1 stopped for good, and the waypoints it was given
           size_t nf = r.trace.size() / 2, still = nf;
@@ -284,7 +284,7 @@ bool Agent::tryCands(std::vector<Cand>& cs, const Live& live, Oracle& o, size_t 
       switch (c.want) {
         case Cand::Exit: ok = r.dead == -2; break;
         case Cand::Live: ok = r.dead == -1 && at; break;
-        case Cand::Change: ok = r.dead == -1 && at && r.mapSig != live.mapSig; break;
+        case Cand::Change: ok = r.dead == -1 && at && (r.mapSig != live.mapSig || r.mapChanged); break;
         case Cand::Kill: ok = r.dead == -1 && at && (r.enemies < live.enemies || r.hp < live.hp); break;
         case Cand::BossHit: ok = r.dead == -1 && at && r.bossHp <= live.bossHp - c.drop; break;
       }
@@ -374,7 +374,17 @@ void Agent::survive(const World& w, const Live& live, Oracle& o, const char* why
   (void)live;
 }
 
-void Agent::decide(const World& w, const Live& live, Oracle& o) {
+void Agent::decide(const World& w0, const Live& live, Oracle& o) {
+  // An item that would cost the remote (another bomb kind) is kept off:
+  // a wall as far as routes go.
+  World w = w0;
+  w.items.erase(std::remove_if(w.items.begin(), w.items.end(),
+                               [&](const Item& it) {
+                                 if (!unwantedItem(it.kind, w.p) || !w.inside(it.c, it.r)) return false;
+                                 if (it.c != w.p.x / 16 || it.r != w.p.y / 16) w.map[size_t(it.r * w.cols + it.c)] = '#';
+                                 return true;
+                               }),
+                w.items.end());
   decisions_++;
   frame_ = w.frame;
   if (w.stage != stage_) stage_ = w.stage, bombFails_.clear(), badSoft_.clear(), itemFails_.clear();
@@ -424,6 +434,12 @@ void Agent::decide(const World& w, const Live& live, Oracle& o) {
     if (i >= route.size() || !pending.count(route[i])) break;
   }
   if (si >= gp.steps.size() || si >= 4) return survive(w, live, o, "waiting for a blast");
+  if (verbose) {
+    std::string ps = gp.str();
+    for (char& ch : ps)
+      if (ch == '\n') ch = ';';
+    log("  plan: " + ps.substr(0, 400));
+  }
   const Step& st = gp.steps[si];
   const Task& task = gp.tasks[size_t(st.task)];
   auto itemFailed = [&] {
@@ -491,6 +507,22 @@ void Agent::decide(const World& w, const Live& live, Oracle& o) {
       out.push_back(c);
     }
   };
+  // Covers enemies are likely to come by go last for every bomb move, not
+  // just kills: the enemy model rolled once with no bomb, P1 where it is
+  // (2-2: a cover at the end of a dead end, a $86 walked in after P1).
+  std::vector<EnemyRun> amb;
+  bool ambRolled = false;
+  auto ambient = [&]() -> Risk {
+    if (!ambRolled) {
+      ambRolled = true;
+      bool any = false;
+      for (const Enemy& q : w.enemies)
+        if (EnemyModel::modelled(q) && std::abs(q.col() - g.pc) + std::abs(q.row() - g.pr) <= 16) any = true;
+      if (any) amb = EnemyModel(w, 700, uint32_t(w.frame) * 2654435761u + 7, eScale_).roll(nullptr, g.pc, g.pr, 16);
+    }
+    if (amb.empty()) return nullptr;
+    return [&amb](int c, int r, int t0, int t1) { return EnemyModel::nearOdds(amb, c, r, t0, t1); };
+  };
   auto walkCand = [&](int tc, int tr, Cand::Want want, const std::string& what) {
     Cand c;
     auto p = g.pathTo(prev, g.pc, g.pr, tc, tr);
@@ -528,7 +560,7 @@ void Agent::decide(const World& w, const Live& live, Oracle& o) {
       for (auto& [d, x] : xs) {
         if (bombFails_[x] >= kBad || tried.size() >= 2) continue;
         size_t n0 = cs.size();
-        bombCands(x % w.cols, x / w.cols, Cand::Change, "clear the way to " + tname, 4, cs);
+        bombCands(x % w.cols, x / w.cols, Cand::Change, "clear the way to " + tname, 4, cs, ambient());
         if (cs.size() > n0) tried.push_back(x);
       }
       if (cs.empty()) badSoft_.insert(k);
@@ -548,7 +580,9 @@ void Agent::decide(const World& w, const Live& live, Oracle& o) {
     case TaskKind::BombSoft:
     case TaskKind::TogglePanel:
     case TaskKind::LightCrystal:
-      bombCands(sc, sr, Cand::Change, tname, 6, cs);
+    case TaskKind::PushBlock:
+    case TaskKind::PressButton:
+      bombCands(sc, sr, Cand::Change, tname, 6, cs, ambient());
       break;
     case TaskKind::HurtBoss: {
       // The boss's path: one run with P1 holding still, every boss object's
@@ -879,6 +913,7 @@ struct COracle : sbm2::Oracle {
       out[i].py = rs[i].py;
       out[i].ph = rs[i].ph;
       out[i].mapSig = rs[i].mapSig;
+      out[i].mapChanged = rs[i].mapChanged;
       out[i].bossHp = rs[i].bossHp;
     }
   }

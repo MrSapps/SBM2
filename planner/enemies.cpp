@@ -12,6 +12,7 @@ namespace sbm2 {
 namespace {
 constexpr int kStopWait = 32;  // generic: frames stopped before a new direction
 constexpr int kDetour = 3;     // chaser: cells of a detour
+constexpr int kHunterRun = 4, kHunterRest = 128, kHunterSight = 8;  // $86 (C1:664B)
 const int kDir[4][2] = {{0, -1}, {0, 1}, {-1, 0}, {1, 0}};  // up down left right ($000400 & 3)
 
 int dirOf(char step) { return step == 'u' ? 0 : step == 'd' ? 1 : step == 'l' ? 2 : step == 'r' ? 3 : -1; }
@@ -30,7 +31,7 @@ bool EnemyModel::modelled(const Enemy& e) {
   return e.hp > 0 && e.hp < 0x7F && !e.dormant() && !e.hidden();
 }
 
-int EnemyModel::stopWait(const Enemy& e) { return e.type == 0xA5 ? 0 : kStopWait; }
+int EnemyModel::stopWait(const Enemy& e) { return e.type == 0xA5 ? 0 : e.type == 0x86 ? kHunterRest : kStopWait; }
 
 EnemyModel::EnemyModel(const World& w, int horizon, uint32_t seed, double timeScale)
     : w_(w), horizon_(horizon), s_(seed | 1), scale_(timeScale) {}
@@ -60,6 +61,18 @@ P1At EnemyModel::p1At(int t) const {
   return at;
 }
 
+// $86: P1 in a straight line within 8 cells, nothing solid between: the
+// way to it, else -1.
+int EnemyModel::sightDir(int c, int r, int t, const ModelBomb* b) const {
+  P1At p = p1At(t);
+  if (p.c != c && p.r != r) return -1;
+  if (std::abs(p.c - c) + std::abs(p.r - r) > kHunterSight || (p.c == c && p.r == r)) return -1;
+  int d = p.c > c ? 3 : p.c < c ? 2 : p.r > r ? 1 : 0;
+  for (int cc = c + kDir[d][0], rr = r + kDir[d][1]; cc != p.c || rr != p.r; cc += kDir[d][0], rr += kDir[d][1])
+    if (!freeAt(cc, rr, t, b)) return -1;
+  return d;
+}
+
 bool EnemyModel::seesP1(int c, int r, int t, const ModelBomb* b) const {
   P1At p = p1At(t);
   if (p.c != c || std::abs(p.r - r) > 4) return false;
@@ -76,6 +89,10 @@ void EnemyModel::rollOne(const Enemy& e, int hold, const ModelBomb* b, EnemyRun&
   const int T = std::max(4, int(16.0 / speed * scale_ + 0.5));  // frames per cell
   const int kStop = int(stopWait(e) * scale_ + 0.5);
   const bool chaser = isChaser(e), halts = e.type == 0x8C;
+  // $86: at most 4 cells a go, then a 128-frame rest; then toward P1 if it
+  // sees P1, else a random way.
+  const bool hunter = e.type == 0x86;
+  int run = 0;
   int halted = 0;
   int c = e.col(), r = e.row();
   int t = 0, died = -1;
@@ -171,7 +188,9 @@ void EnemyModel::rollOne(const Enemy& e, int hold, const ModelBomb* b, EnemyRun&
           t += 8;
           continue;
         }
+      } else if (hunter && (nd = sightDir(c, r, t, b)) >= 0 && freeAt(c + kDir[nd][0], r + kDir[nd][1], t, b)) {
       } else {
+        nd = -1;
         int tries = 0;
         for (;;) {
           int d = int(rnd() & 3);
@@ -186,7 +205,8 @@ void EnemyModel::rollOne(const Enemy& e, int hold, const ModelBomb* b, EnemyRun&
         if (nd < 0) continue;
       }
       dir = nd;
-      if (move(c + kDir[dir][0], r + kDir[dir][1], T)) moving = true;
+      run = 0;
+      if (move(c + kDir[dir][0], r + kDir[dir][1], T)) moving = true, run = 1;
       else wait = kStop;
       continue;
     }
@@ -200,12 +220,14 @@ void EnemyModel::rollOne(const Enemy& e, int hold, const ModelBomb* b, EnemyRun&
       int dx = p.c - c, dy = p.r - r;
       if (dir >= 2 ? dx == 0 || (dx > 0) != (dir == 3) : dy == 0 || (dy > 0) != (dir == 1)) on = false;
     }
+    if (hunter && run >= kHunterRun) on = false;
     if (!on) {
       moving = false;
       wait = chaser ? 0 : kStop;
       continue;
     }
     if (!move(nc, nr, T)) moving = false, wait = kStop;
+    else run++;
   }
   out.rolls.push_back(std::move(sp));
   out.diedAt.push_back(died);

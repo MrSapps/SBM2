@@ -22,14 +22,15 @@ for t = 0x04, 0x3F do CLASS[t] = "." end
 CLASS[0x00] = "."
 for t = 0x01, 0x03 do CLASS[t] = "*" end
 for t = 0x40, 0x43 do CLASS[t] = "b" end
-for _, t in ipairs { 0x6F, 0x70, 0x72, 0x6B } do CLASS[t] = "." end
+for _, t in ipairs { 0x6F, 0x70, 0x72 } do CLASS[t] = "." end
+CLASS[0x6B] = "v"   -- world 2 button: a flame on it wakes the $F5 block
 CLASS[0x44] = "i"   -- item tile (stops a blast)
 for t = 0xC3, 0xCF do CLASS[t] = "#" end
 CLASS[0xC2] = "%"
 CLASS[0xC9] = "g"   -- closed gate (the gate line says which cell)
 CLASS[0x49] = "g"   -- open gate
 CLASS[0xD3] = "O"
-CLASS[0xE2], CLASS[0xF5] = "X", "X"
+CLASS[0xE2], CLASS[0xF5] = "X", "x"
 CLASS[0xD0] = "w"
 for _, t in ipairs { 0xD2, 0xD5, 0xE0, 0xE1 } do CLASS[t] = "m" end
 CLASS[0xD6] = "B"
@@ -128,6 +129,32 @@ function WV.capture(rd8, frame)
       }
     end
   end
+  -- 2-8 boss drops (docs/enemies.md 6b; as planner/capture.cpp)
+  if rd8(0x1A) == 0x27 then
+    local function st(base) return rd16(base) | (rd8(base + 2) << 16) end
+    local falls = {}
+    for base = 0x1040, 0x17C0, 0x40 do
+      if st(base) == 0xCCB189 then
+        local fy = rd16(base + 0x14); if fy >= 0x8000 then fy = fy - 0x10000 end
+        falls[#falls + 1] = { rd16(base + 0x11), fy }
+      end
+    end
+    for base = 0x1040, 0x17C0, 0x40 do
+      if st(base) == 0xCCB2F1 then
+        local mx, my, t = rd16(base + 0x11), rd16(base + 0x14), 60
+        for _, f in ipairs(falls) do
+          if math.abs(f[1] - mx) <= 2 then t = math.max(0, (my - f[2]) // 2 - 3) end
+        end
+        local c, r = (mx + ox) // 16, (my + oy) // 16
+        local dup = false
+        for _, b in ipairs(w.bombs) do if b.c == c and b.r == r then dup = true end end
+        if not dup then
+          w.bombs[#w.bombs + 1] = { slot = -1, c = c, r = r, fuse = t, range = 10, owner = "enemy",
+                                   remote = 0, pierce = 0, magnet = 0, flags = 0 }
+        end
+      end
+    end
+  end
 
   -- Enemies and gadgets ($8400-$8F00)
   w.enemies = {}
@@ -143,7 +170,7 @@ function WV.capture(rd8, frame)
       local tgt = rd16(base + 0x4C)
       w.enemies[#w.enemies + 1] = {
         slot = (base >> 8) - 0x80, type = rd8(base + 0x7E),
-        x = signed(rd16(base + 0x10)) + ox, y = signed(rd16(base + 0x18)) + oy,
+        x = (signed(rd16(base + 0x10)) + ox) & 511, y = (signed(rd16(base + 0x18)) + oy) & 511,  -- (wrap: as the 32x32 TileMap)
         vx = vel(base + 0x14, 1), vy = vel(base + 0x1C, 2),
         step = stepName(rd16(base + 0x4A)), target = { (tgt & 0x7F) // 2, (tgt >> 7) & 0x1F },
         wait = rd16(base + 0x4E), hp = rd8(base + 0x43),

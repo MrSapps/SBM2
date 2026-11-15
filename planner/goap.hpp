@@ -19,7 +19,8 @@
 
 namespace sbm2 {
 
-enum class TaskKind { KillEnemy, BombSoft /* or a barrel */, TogglePanel, LightCrystal, PickItem, EnterGate, HurtBoss };
+enum class TaskKind { KillEnemy, BombSoft /* or a barrel */, TogglePanel, LightCrystal, PickItem, EnterGate, HurtBoss,
+                      PushBlock /* into the hole at (c+dc, r+dr) */, PressButton };
 const char* taskName(TaskKind k);
 
 struct Task {
@@ -30,9 +31,13 @@ struct Task {
   bool blocksExit = false;     // KillEnemy: keeps the gate shut while alive
   bool powerup = false;        // PickItem: a bomb up, fire up or heart (the "powerups" goal)
   bool hidden = false;         // PickItem: still inside the soft block at (c,r)
+  int dc = 0, dr = 0;          // PushBlock: the way the blast pushes it
 };
-// Items worth a detour: bomb up, fire up, heart.
+// Items worth a detour: bomb up, fire up, full fire, heart, remote.
 bool wantedItem(int kind);
+// Items to keep off: another bomb kind would replace the remote (+$F3 is
+// set, not or'ed: C0:9965 pierce 4, C0:9B1D remote 1, C0:9C3A 2, C0:9C19 8).
+bool unwantedItem(int kind, const Player& p);
 
 // UpdateExitBlocked C1:531D: does this object keep the exit shut?
 bool blocksExit(const Enemy& e);

@@ -1,7 +1,7 @@
 ASAR := tools/asar
 ROM  := build/sbm2.sfc
 
-.PHONY: all compare disasm coverage clean verify trace verify-hybrid bot-test
+.PHONY: all compare disasm coverage clean verify trace verify-hybrid bot-test planner-test
 all: compare
 
 $(ROM): $(wildcard src/*.asm)
@@ -79,6 +79,16 @@ BOTRUN_SRC := port/botrun.c port/core_unity.c
 build/port/botrun: $(BOTRUN_SRC) port/snes.c port/cpu.c port/ppu.c port/snes.h port/cpu.h port/ppu.h $(LUA_CORE:%=$(LUA_SRC)/%.c)
 	@mkdir -p build/port
 	$(CC) -O2 -std=gnu99 -DLUA_USE_LINUX -I$(LUA_SRC) -Iport -o $@ $(BOTRUN_SRC) $(LUA_CORE:%=$(LUA_SRC)/%.c) -lm -ldl -lpthread
+
+# New C++ planner (planner/): unit tests on world view snapshots
+# (docs/worldview.md), no emulator.
+PLANNER_SRC := $(wildcard planner/*.cpp)
+build/planner/test: $(PLANNER_SRC) planner/*.hpp planner/test/*.cpp
+	@mkdir -p build/planner
+	$(CXX) -O2 -g -std=c++17 -Wall -Wextra -Iplanner -o $@ $(PLANNER_SRC) planner/test/*.cpp
+
+planner-test: build/planner/test
+	build/planner/test planner/test/worlds
 
 # Planner / steering unit tests on text maps (bot/test/maps), no emulator.
 bot-test: build/tools/lua

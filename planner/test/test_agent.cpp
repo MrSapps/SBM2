@@ -1692,3 +1692,40 @@ TEST("agent: the way's bomb would burn a wanted item: pick it up first") {
   CHECK(a.committed());
   CHECK(a.what().find("walk to (12,5)") != std::string::npos);
 }
+
+// 4-4 played on from 4-3 (a full-game run, frame 198109): P1 holds the
+// remote, and the pierce-up at (7,5) (which would cost it) is the one way
+// up to the gate (7,3). Kept off as a wall, the gate was out of reach: 20000
+// frames of no plan, the timer. Kept off as a soft block, the way bombs it.
+TEST("agent: an unwanted item in the only way is bombed, not a wall") {
+  World w;
+  std::string err;
+  CHECK(loadWorld(sbm2test::worldsDir + "/4-4_unwanted_item.txt", w, &err));
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 2; };
+  Agent a = agentFor("powerups+exit");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.committed());
+  CHECK(a.what().find("gate 7,3") != std::string::npos);
+  int bc, br, yc, yr;
+  if (o.seen.empty() || o.seen.back().path2.empty()) return;
+  bombAndCover(o.seen.back(), bc, br, yc, yr);
+  bool hits = false;
+  for (const Cell& x : blastCells(w, bc, br, w.p.fire, false)) hits |= x.c == 7 && x.r == 5;
+  CHECK(hits);
+}
+
+// 4-2 played on from 4-1 (a full-game run, frame 166259, fire 10): (26,5)
+// is lit from column 26, which also undoes (26,10)/(26,12); the other
+// todo panels (24,5)/(12,5) are behind soft blocks. Bomb a parity spot.
+TEST("agent: a panel whose every spot undoes others, more panels out of reach: parity") {
+  World w;
+  std::string err;
+  CHECK(loadWorld(sbm2test::worldsDir + "/4-2_panel_stall.txt", w, &err));
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 2; };
+  Agent a = agentFor("powerups+exit");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.committed());
+  CHECK(a.what().find("(parity)") != std::string::npos);
+}

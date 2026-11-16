@@ -1,0 +1,7 @@
+# The C++ agent plays all of world 5 from the 5-1 start through the final boss, no deaths.
+start 50
+agent 1
+budget 200000
+pass STAGE 60
+fail DEATH|agent error
+env SBM2_STOPAT=60

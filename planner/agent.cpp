@@ -721,12 +721,14 @@ std::set<int> Agent::badSoftNow() const {
 
 void Agent::decide(const World& w0, const Live& live, Oracle& o) {
   // An item that would cost the remote (another bomb kind) is kept off:
-  // a wall as far as routes go.
+  // a soft block as far as routes go (flames burn items: a blast clears it
+  // when it is in the way. 4-4 played on from 4-3: a pierce-up at (7,5) was
+  // the one way to the gate, walled off: 20000 frames of no plan, the timer).
   World w = w0;
   w.items.erase(std::remove_if(w.items.begin(), w.items.end(),
                                [&](const Item& it) {
                                  if (!unwantedItem(it.kind, w.p) || !w.inside(it.c, it.r)) return false;
-                                 if (it.c != w.p.x / 16 || it.r != w.p.y / 16) w.map[size_t(it.r * w.cols + it.c)] = '#';
+                                 if (it.c != w.p.x / 16 || it.r != w.p.y / 16) w.map[size_t(it.r * w.cols + it.c)] = '%';
                                  return true;
                                }),
                 w.items.end());

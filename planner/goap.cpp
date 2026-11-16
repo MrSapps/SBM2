@@ -904,7 +904,11 @@ std::vector<int> paritySpots(const World& w, const std::vector<int>& spots) {
         else out.push_back(m);
       }
     }
-  if (rest) return {};
+  // (what is left over must be panels still to light that no spot here
+  // reaches: they wait for later. 4-2 played on with fire 10: (26,5) lit
+  // from column 26 also undoes (26,10)/(26,12); the todo (24,5)/(12,5) are
+  // behind soft blocks, so no exact set; 12000 frames in survive.)
+  if ((rest & ~want) || out.empty()) return {};
   std::sort(out.begin(), out.end());
   return out;
 }

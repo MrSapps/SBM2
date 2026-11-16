@@ -789,6 +789,35 @@ TEST("goap: a platform spawner opens the lanes that have no platform") {
 // Mode 1 panels toggle per blast: paritySpots gives spots whose blasts,
 // XORed, light exactly the panels left (4-3 played on from 4-2 with fire 3:
 // every spot by (3,24) also covered a done panel).
+// A panel still to light that no spot reaches yet (behind soft blocks)
+// waits: the set lights the rest and undoes nothing (4-2 played on with
+// fire 10: (24,5)/(12,5) out of reach left no exact set, 12000 frames).
+TEST("goap: parity spots: a panel no spot reaches waits") {
+  World w = mk({"#######",
+                "##...g#",
+                "##.#P##",
+                "##.P.##",
+                "##P#P##",
+                "##.P.##",
+                "##P#.##",
+                "##.P.##",
+                "#######"}, 2, 1, "gate 5 1 closed\npanel 4 2 done mode=1\npanel 3 3 done mode=1\npanel 2 4 done mode=1\npanel 4 4 done mode=1\npanel 3 5 todo mode=1\npanel 2 6 done mode=1\npanel 3 7 todo mode=1\npanel 0 0 todo mode=1");
+  w.p.fire = 3;
+  std::vector<int> spots;
+  for (int k = 0; k < w.cols * w.rows; k++)
+    if (canPlaceOn(w.map[size_t(k)])) spots.push_back(k);
+  std::vector<int> set = paritySpots(w, spots);
+  CHECK(!set.empty());
+  if (set.empty()) return;
+  std::vector<int> hits(w.panels.size(), 0);
+  for (int k : set)
+    for (const Cell& x : blastCells(w, k % w.cols, k / w.cols, w.p.fire, false))
+      for (size_t i = 0; i < w.panels.size(); i++)
+        if (w.panels[i].c == x.c && w.panels[i].r == x.r) hits[i]++;
+  for (size_t i = 0; i + 1 < w.panels.size(); i++) CHECK_EQ(int(w.panels[i].done ^ (hits[i] & 1)), 1);
+  CHECK_EQ(hits.back(), 0);
+}
+
 TEST("goap: parity spots light exactly the panels left") {
   World w = mk({"#######",
                 "##...g#",

@@ -1,0 +1,78 @@
+worldview 1
+stage 43
+frame 198109
+time 0
+origin 8 0
+size 17 14
+light none
+gate 7 3 open
+player x=104 y=103 dir=- hearts=4 flash=0 bombs=9 maxbombs=9 e0=3 fire=10 pierce=0 remote=1 glove=1 softpass=0 lock=0000 ride=0 f4=0600 f60=0000
+enemy slot=4 type=C0 x=120 y=55 vx=0 vy=0 step=- target=0,0 wait=0 hp=0 f4=0C00 c0=8000 d0=0000 be=0000 bc=0000 ba=0000 off=0
+enemy slot=5 type=96 x=220 y=87 vx=-0.5 vy=0 step=l target=13,5 wait=1 hp=1 f4=0C00 c0=8000 d0=0000 be=0000 bc=0000 ba=0000 off=0 spd=0.5
+enemy slot=6 type=DC x=56 y=168 vx=0 vy=0 step=l target=3,10 wait=0 hp=0 f4=0C00 c0=8001 d0=0000 be=0000 bc=0000 ba=0000 off=0 spd=0.4062
+enemy slot=7 type=87 x=128 y=0 vx=0 vy=0 step=r target=8,10 wait=1 hp=1 f4=AC00 c0=9000 d0=0000 be=0002 bc=0000 ba=0000 off=0 spd=0.5
+enemy slot=8 type=87 x=136 y=0 vx=0 vy=0 step=u target=8,10 wait=1 hp=1 f4=AC00 c0=9000 d0=0000 be=0000 bc=0000 ba=0000 off=0 spd=0.5
+enemy slot=9 type=89 x=40 y=0 vx=0 vy=0 step=d target=2,12 wait=0 hp=1 f4=AC00 c0=1000 d0=C0E9 be=0133 bc=0000 ba=0000 off=0 spd=0.5
+enemy slot=10 type=DC x=168 y=167 vx=0 vy=0 step=l target=10,10 wait=0 hp=0 f4=0C00 c0=8001 d0=0000 be=0000 bc=0000 ba=0000 off=0 spd=0.4062
+item 7 5 item kind=1
+item 12 5 item kind=0
+map
+#################
+#################
+#################
+#######g#########
+#######%#########
+#######i####i...#
+##.##.....#######
+##.###.#.########
+##.##.....##..%##
+##.###.#.###.#%##
+##L##L...L##L..##
+##.###.#.###.#%##
+##.#########.%%##
+#################
+under
+#################
+#################
+#################
+#######g#########
+#######.#########
+#######.####....#
+##.##.....#######
+##.###.#.########
+##.##.....##...##
+##.###.#.###.#.##
+##L##L...L##L..##
+##.###.#.###.#.##
+##.#########...##
+#################
+raw
+C8 C8 C8 C8 C8 C8 C8 C8 C8 C8 C8 C8 C8 C8 C8 C8 C8
+CA CA CA CA CA CA CA CA CA CA CA CA CA CA CA CA CA
+CA CA CA CA CA CA CA CA CA CA CA CA CA CA CA CA CA
+CA CA CA CA CA CA CA 49 CA CA CA CA CA CA CA CA CA
+C8 C6 C6 C6 C8 C8 C6 C2 C6 C8 C8 C6 C6 C6 C6 C6 C6
+C8 C6 71 C6 C6 C6 C6 44 C6 C6 C6 C6 44 00 00 00 C6
+C8 C6 00 C6 C6 00 00 00 00 00 C6 C6 C6 C6 C6 C6 C6
+C8 C6 00 C6 C6 C5 00 C5 00 C5 C6 C6 C6 C6 C6 C6 C8
+C8 C6 00 C6 C6 00 00 00 00 00 C6 C6 00 00 C2 C6 C8
+C8 C6 00 C6 C6 C5 00 C5 00 C5 C6 C6 00 C5 C2 C6 C8
+C8 C6 36 C8 C8 36 00 00 00 36 C8 C8 36 00 00 C6 C8
+C8 C6 00 C6 C6 C5 00 C5 00 C5 C6 C6 00 C5 C2 C6 C8
+C8 C6 00 C6 C6 C6 C6 C6 C6 C6 C6 C6 00 C2 C2 C6 C8
+C8 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C8
+rawunder
+C8 C8 C8 C8 C8 C8 C8 C8 C8 C8 C8 C8 C8 C8 C8 C8 C8
+CA CA CA CA CA CA CA CA CA CA CA CA CA CA CA CA CA
+CA CA CA CA CA CA CA CA CA CA CA CA CA CA CA CA CA
+CA CA CA CA CA CA CA 49 CA CA CA CA CA CA CA CA CA
+C8 C6 C6 C6 C8 C8 C6 00 C6 C8 C8 C6 C6 C6 C6 C6 C6
+C8 C6 71 C6 C6 C6 C6 00 C6 C6 C6 C6 00 00 00 00 C6
+C8 C6 00 C6 C6 00 00 00 00 00 C6 C6 C6 C6 C6 C6 C6
+C8 C6 00 C6 C6 C5 00 C5 00 C5 C6 C6 C6 C6 C6 C6 C8
+C8 C6 00 C6 C6 00 00 00 00 00 C6 C6 00 00 00 C6 C8
+C8 C6 00 C6 C6 C5 00 C5 00 C5 C6 C6 00 C5 00 C6 C8
+C8 C6 36 C8 C8 36 00 00 00 36 C8 C8 36 00 00 C6 C8
+C8 C6 00 C6 C6 C5 00 C5 00 C5 C6 C6 00 C5 00 C6 C8
+C8 C6 00 C6 C6 C6 C6 C6 C6 C6 C6 C6 00 00 00 C6 C8
+C8 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C8

@@ -229,6 +229,19 @@ World captureWorld(const uint8_t* wram, int frame) {
       w.panels.push_back({c, r, pstate & 1, done});
     }
   }
+  // (C0:F428 fills $7F0300 = WRAM $10300 on regrow stages only, 0-ended)
+  for (int i = 0; i < 0x800; i += 2) {
+    int cell = rd.h(0x10300 + i);
+    if (!cell) break;
+    w.regrowCells.push_back({(cell & 0x7F) / 2, cell >> 7});
+  }
+  if (!w.regrowCells.empty()) {
+    w.regrowIn = rd.h(0x5D0A);
+    if (rd.h(0x10B00)) {
+      int cell = rd.h(0x10B02);
+      w.regrowing = std::make_pair((cell & 0x7F) / 2, cell >> 7);
+    }
+  }
   if (light != 0xFFFF) {
     int cell = rd.h(0x5AAE);
     w.lightSwitch = std::make_pair((cell & 0x7F) / 2, cell >> 7);
@@ -324,6 +337,14 @@ std::string encodeWorld(const World& w) {
   if (w.lightSwitch) {
     std::snprintf(b, sizeof b, "switch %d %d", w.lightSwitch->first, w.lightSwitch->second);
     add(b);
+  }
+  if (!w.regrowCells.empty()) {
+    std::string t = "regrow in=" + std::to_string(w.regrowIn);
+    if (w.regrowing) t += " growing=" + std::to_string(w.regrowing->first) + "," + std::to_string(w.regrowing->second);
+    t += " cells=";
+    for (size_t i = 0; i < w.regrowCells.size(); i++)
+      t += (i ? ";" : "") + std::to_string(w.regrowCells[i].first) + "," + std::to_string(w.regrowCells[i].second);
+    add(t);
   }
   for (const Item& it : w.items) {
     std::snprintf(b, sizeof b, "item %d %d %s kind=%d", it.c, it.r, it.heart ? "heart" : "item", it.kind);

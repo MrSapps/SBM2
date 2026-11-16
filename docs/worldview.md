@@ -47,6 +47,7 @@ enemy slot=5 type=93 x=214 y=96 vx=0.5 vy=0 step=r target=14,6 wait=0 hp=2 f4=00
 panel 3 12 todo           # todo | done; mode 0 ($69) or 1 (toggle)
 ride 10 4 12 9 dock_c=12 dock_r=10  # (agent-learnt, not from WRAM) boarding the rideable object on (10,4) carried P1 to (12,9); it then sat on (12,10)
 switch 5 5                # light switch cell
+regrow in=40 growing=4,4 cells=4,4;5,4  # blocks that grow back (mechanics.md 9b): countdown $5D0A, a block growing now, the listed cells
 item 4 5 heart kind=11    # visible item: heart | item; kind from the $3C48 list (-1 unknown)
 hidden 6 2 kind=0        # an item still inside the soft block there (0 bomb up, 2 fire up, 11 heart)
 magnet 7 3 dir=r          # magnet cell and pull direction

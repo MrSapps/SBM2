@@ -135,6 +135,19 @@ bool parseWorld(const std::string& text, World& w, std::string* err) {
     } else if (k == "ride") {
       w.rides.push_back({std::atoi(arg(1).c_str()), std::atoi(arg(2).c_str()), std::atoi(arg(3).c_str()),
                          std::atoi(arg(4).c_str()), dec(f, "dock_c", -1), dec(f, "dock_r", -1)});
+    } else if (k == "regrow") {
+      w.regrowIn = dec(f, "in");
+      int c = 0, r = 0;
+      auto g = f.find("growing");
+      if (g != f.end() && std::sscanf(g->second.c_str(), "%d,%d", &c, &r) == 2) w.regrowing = std::make_pair(c, r);
+      auto cl = f.find("cells");
+      if (cl != f.end())
+        for (size_t a = 0; a < cl->second.size();) {
+          size_t e = cl->second.find(';', a);
+          if (std::sscanf(cl->second.c_str() + a, "%d,%d", &c, &r) == 2) w.regrowCells.push_back({c, r});
+          if (e == std::string::npos) break;
+          a = e + 1;
+        }
     } else if (k == "switch") {
       w.lightSwitch = std::make_pair(std::atoi(arg(1).c_str()), std::atoi(arg(2).c_str()));
     } else if (k == "item") {

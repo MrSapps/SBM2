@@ -292,6 +292,67 @@ TEST("agent: boss sensing nothing: last points kept, P1 only gets in place") {
   CHECK(a.what().find("get in place") != std::string::npos);
 }
 
+// 4-8 in the world 4 run: P1 (fire 6, the remote) pinned on the top row,
+// the robot below; no timed hit lives. With the remote: lay a trap (no B
+// in the run) and take cover; frame() sets it off on a sense point.
+TEST("agent: boss with no timed hit and the remote: lay a trap") {
+  World w;
+  std::string err;
+  CHECK(loadWorld(sbm2test::worldsDir + "/4-8_robot_pinned.txt", w, &err));
+  CHECK(w.p.remote && !w.bosses.empty());
+  Plan p = plan(w, Goal{true, false, false, false});
+  CHECK(p.ok && !p.steps.empty() && p.tasks[size_t(p.steps[0].task)].kind == TaskKind::HurtBoss);
+  FakeOracle o;
+  bossAnswers(o, w, 3, 3);  // (no hit ever: the boss stays put)
+  auto inner = o.answer;
+  o.answer = [inner](const SimReq& q, SimOut& r) {
+    inner(q, r);
+    if (q.detEnd > 0) r.dead = 5;  // (a B in the run: the blast is mistimed)
+  };
+  Agent a = agentFor("exit");
+  Live l = liveOf(w);
+  l.bossHp = 3;
+  a.decide(w, l, o);
+  CHECK(a.committed());
+  CHECK(a.what().find("trap for") != std::string::npos);
+  CHECK(!o.seen.empty() && !o.seen.back().post.empty() && o.seen.back().detEnd == 0);
+}
+
+// Soft blocks grow back (C0:D8E8): with the countdown out, the first empty
+// listed cell with nothing on or next to it grows at once. A cover whose
+// walk crosses such a gap after P1 has left its side goes last (5-1: P1
+// beside (4,4) held it open, walked off to push (8,6), and (4,4) grew back
+// between P1 and every cover).
+TEST("agent: a cover past a gap that grows back goes last") {
+  World w = mk({"##########",
+                "#.......%#",
+                "####.#####",
+                "##########"}, 6, 1, "regrow in=0 cells=3,1;8,1");
+  CHECK_EQ(w.regrowCells.size(), size_t(2));
+  CHECK_EQ(w.regrowIn, 0);
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 2; r.enemies = 0; };
+  Agent a = agentFor("blocks");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.committed());
+  CHECK(!o.seen.empty());
+  int bc, br, yc, yr;
+  bombAndCover(o.seen.front(), bc, br, yc, yr);
+  CHECK_EQ(yc, 4);
+  CHECK_EQ(yr, 2);
+  // No countdown due (a long one): the nearer index comes first again.
+  World l = w;
+  l.regrowIn = 2000;
+  FakeOracle o2;
+  o2.answer = o.answer;
+  Agent b = agentFor("blocks");
+  b.decide(l, liveOf(l), o2);
+  CHECK(!o2.seen.empty());
+  bombAndCover(o2.seen.front(), bc, br, yc, yr);
+  CHECK_EQ(yc, 3);
+  CHECK_EQ(yr, 1);
+}
+
 // With a bomb of P1's already out, a new bomb counts only if the run shows
 // both hits; and the move is played only until P1 is in cover (the next
 // bomb is planned while this one ticks).
@@ -594,6 +655,35 @@ TEST("agent: remote trap: set off the oldest when an enemy is in its blast") {
   noteRemotes(x, order);
   CHECK_EQ(order.size(), size_t(1));
   CHECK_EQ(order[0], 3 * w.cols + 7);
+}
+
+// A boss is a trap's target too: a point it senses flames under (this
+// frame) in the oldest remote's blast. Not while it is hurt (no flame is
+// sensed) or senses nothing (4-8's robot with fire 6: no fused bomb's
+// timing lived, a trap set off on it did).
+TEST("agent: remote trap: set off when a boss sense point is in its blast") {
+  World w = mk({"#########",
+                "#.......#",
+                "#.#.#.#.#",
+                "#.......#",
+                "#########"}, 1, 3, "bomb c=3 r=1 fuse=0 range=2 owner=p1 remote=1");
+  std::vector<int> order;
+  noteRemotes(w, order);
+  CHECK(!remoteTrigger(w, order));
+  BossObj b;
+  b.x = 5 * 16 + 8, b.y = 1 * 16 + 8, b.hp = 3;
+  b.sense = {{0, 0}};
+  w.bosses.push_back(b);
+  CHECK(remoteTrigger(w, order));
+  World h = w;
+  h.bosses[0].hurt = true;
+  CHECK(!remoteTrigger(h, order));
+  World n = w;
+  n.bosses[0].sense.clear();
+  CHECK(!remoteTrigger(n, order));
+  World f = w;  // (out of reach: (7,1) is 4 from (3,1))
+  f.bosses[0].x = 7 * 16 + 8;
+  CHECK(!remoteTrigger(f, order));
 }
 
 // With the remote and a bomb to spare, a kill lays a trap (no B in the run)

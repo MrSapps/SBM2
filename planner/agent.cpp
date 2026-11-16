@@ -263,6 +263,13 @@ bool remoteTrigger(const World& w, const std::vector<int>& order, std::vector<ui
     if (w.intro && e.type >= 0xA4 && e.type <= 0xA8) continue;  // (no flame check in the intro)
     if (hit(e.col(), e.row())) return true;
   }
+  // A boss: one of the points it looks for flames under this frame (an
+  // empty list: it senses nothing now, a blast would be wasted).
+  for (const BossObj& b : w.bosses) {
+    if (b.hp <= 0 || b.hurt) continue;
+    for (const auto& sp : b.sense)
+      if (hit((b.x + sp.first) >> 4, (b.y + sp.second) >> 4)) return true;
+  }
   return false;
 }
 
@@ -348,6 +355,10 @@ uint16_t Agent::frame(const uint8_t* wram, int frame, Oracle& o, const char* ext
   if (trapCool_ > 0) trapCool_--;
   if (holdsRemote_ && trapCool_ == 0) {
     World tw = captureWorld(wram, frame);
+    if (extra && *extra) {  // (bosses: a trap goes off on a sense point too)
+      World x;
+      if (parseWorld("worldview 1\nsize 1 1\n" + std::string(extra) + "\nmap\n.\n", x)) tw.bosses = x.bosses;
+    }
     int why = trapCheck(tw);
     if (why == 2 && committed()) why = 0;  // (a stale one waits for the move to end)
     if (why) {
@@ -413,6 +424,7 @@ bool Agent::tryCands(std::vector<Cand>& cs, const Live& live, Oracle& o, size_t 
     for (size_t i = b; i < std::min(cs.size(), b + batchSize(bn)); i++) {
       reqs.push_back(cs[i].req);
       reqs.back().bossBase = bossBase_;
+      if (verbose && !bossBase_.empty()) reqs.back().wantBoss = true;  // (logged: boss/24)
     }
     std::vector<SimOut> out;
     o.run(reqs, out);
@@ -442,6 +454,14 @@ bool Agent::tryCands(std::vector<Cand>& cs, const Live& live, Oracle& o, size_t 
           std::string tr;
           for (size_t k = 0; k < nf; k += 24) tr += " " + std::to_string(r.trace[2 * k]) + "," + std::to_string(r.trace[2 * k + 1]);
           log("    trace/24:" + tr);
+          if (!r.btrace.empty() && !bossBase_.empty()) {  // (the first boss object, every 24 frames and at the end/death)
+            size_t nb = bossBase_.size(), bf = r.btrace.size() / (2 * nb);
+            size_t endF = r.dead >= 0 && size_t(r.dead) < bf ? size_t(r.dead) : bf - 1;
+            std::string bt;
+            for (size_t k = 0; k <= endF; k += 24) bt += " " + std::to_string(r.btrace[2 * k * nb]) + "," + std::to_string(r.btrace[2 * k * nb + 1]);
+            bt += " end " + std::to_string(r.btrace[2 * endF * nb]) + "," + std::to_string(r.btrace[2 * endF * nb + 1]);
+            log("    boss/24:" + bt);
+          }
           if (nf) log("    still from " + std::to_string(still ? still - 1 : 0) + " at (" + std::to_string(r.trace[2 * (nf - 1)]) + "," +
                       std::to_string(r.trace[2 * (nf - 1) + 1]) + "); path" + wp);
         }
@@ -832,6 +852,29 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
     }
     return false;
   };
+  // A gap that grows back (World::regrowCells, C0:D8E8) cuts a walk when
+  // the countdown runs out before P1 gets there and P1 is not on or next to
+  // it all that while (an object there holds it open: the pick waits).
+  // 5-1: P1 beside (4,4) held it open; it walked off to push (8,6) and
+  // (4,4) grew back at once, between P1 and every cover.
+  // path1 from t1, then path2 from t2 (cell indices, P1's speed fpc_).
+  auto gapCut = [&](const std::vector<int>& path1, int t1, const std::vector<int>& path2, int t2) {
+    if (w.regrowCells.empty()) return false;
+    const double due = std::max(0, w.regrowIn - 1) * eScale_;
+    std::vector<std::pair<double, int>> tl;  // (time, cell)
+    for (size_t i = 0; i < path1.size(); i++) tl.push_back({t1 + fpc_ * double(i), path1[i]});
+    for (size_t i = 0; i < path2.size(); i++) tl.push_back({t2 + fpc_ * double(i), path2[i]});
+    auto near = [&](int a, int b) { return std::abs(a % w.cols - b % w.cols) + std::abs(a / w.cols - b / w.cols) <= 1; };
+    for (size_t i = 0; i < tl.size(); i++) {
+      int x = tl[i].second, xc = x % w.cols, xr = x / w.cols;
+      if (tl[i].first <= due || w.at(xc, xr) != '.' || !w.regrowListed(xc, xr)) continue;
+      // (step j holds P1 on its cell over [t_j, t_j+1): each step that
+      // reaches past the due time must be on or next to x)
+      for (size_t j = 0; j <= i; j++)
+        if ((j == i || tl[j + 1].first > due) && !near(tl[j].second, x)) return true;
+    }
+    return false;
+  };
   auto bombCands = [&](int xc, int xr, Cand::Want want, const std::string& what, int maxY, std::vector<Cand>& out,
                        const Risk& risk = nullptr, int waitPre = 0) {
     if (dist[size_t(g.idx(xc, xr))] < 0 || !canPlaceOn(w.at(xc, xr)) || w.bombAt(xc, xr) || spoils(xc, xr)) return;
@@ -856,6 +899,7 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
       int t2 = t1 + kWalkFPT * d2[size_t(k)] + kSettle;
       if (dm.deadly(yc, yr, t2, t1 + kNewFuse + kFlameFrames + kTail)) continue;
       int key = d2[size_t(k)];
+      if (gapCut(p1, waitPre, g.pathTo(prev2, xc, xr, yc, yr), tx)) key += 1000;
       if (risk) {
         // (P1 there from about tx + its walk until the commit's tail)
         int ty = tx + int(fpc_ * d2[size_t(k)]);
@@ -1117,9 +1161,8 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
           if (y < p.size()) cs.push_back(p[y]);
       if (senseStale_) cs.clear();  // (it senses nothing now: just get in place)
       if (!cs.empty() && tryCands(cs, live, o, 10)) return;
-      // No hit from here: get in place for the next one. The cell whose
-      // blast holds a sense point on the most frames of the boss's path
-      // (out of the contact boxes), a few cells' walk at a time.
+      // No timed hit from here. The cells whose blast holds a sense point
+      // on the most frames of the boss's path (out of the contact boxes).
       cs.clear();
       std::vector<std::pair<int, int>> spots;  // (-score, idx)
       for (int k = 0; k < w.cols * w.rows; k++) {
@@ -1138,6 +1181,34 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
         if (score > 0) spots.push_back({-(score * 4 - d), k});
       }
       std::sort(spots.begin(), spots.end());
+      // With the remote: a trap on the best of them, then cover; frame()
+      // sets it off once a sense point is in its blast (4-8 in the world 4
+      // run: fire 6 left no cover a fused bomb's timing lived through).
+      const int kBossTraps = 2;
+      if (w.p.remote && w.p.bombs >= 1 && mine < kBossTraps) {
+        for (size_t i = 0; i < spots.size() && i < 3; i++) {
+          int k = spots[i].second;
+          if (w.bombAt(k % w.cols, k / w.cols)) continue;
+          size_t n0 = cs.size();
+          bombCands(k % w.cols, k / w.cols, Cand::Live, "trap for " + tname, 2, cs, risk);
+          for (size_t j = n0; j < cs.size(); j++) {
+            Cand& c = cs[j];
+            int d1 = wpSteps(c.req.path), d2 = wpSteps(c.req.path2);
+            c.req.detEnd = 0;
+            c.afterA = c.afterB = 0;
+            c.commit = kWalkFPT * (d1 + d2) + 2 * kSettle;
+            c.req.frames = c.commit + kTail;
+          }
+        }
+        if (!cs.empty() && tryCands(cs, live, o, 6)) {
+          trapSince_ = w.frame;
+          return;
+        }
+        cs.clear();
+      }
+      if (w.p.remote && mine > 0 && w.frame - trapSince_ < kTrapWait)
+        return survive(w, live, o, "traps out: waiting for the boss");
+      // Else get in place for the next hit, a few cells' walk at a time.
       for (size_t i = 0; i < spots.size() && cs.size() < 3; i++) {
         int k = spots[i].second;
         auto p = g.pathTo(prev, g.pc, g.pr, k % w.cols, k / w.cols);  // (here already: wait)

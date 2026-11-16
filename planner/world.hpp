@@ -90,6 +90,20 @@ struct World {
   std::vector<Magnet> magnets;
   std::vector<BossObj> bosses;
   std::optional<std::pair<int, int>> lightSwitch;
+  // Soft blocks that grow back (C0:D8E8; worlds 2 and 5-1..5-6): the
+  // stage's first soft cells with no item ($7F0300), the countdown to the
+  // next pick ($5D0A, logic frames; <= 1: armed, it picks the first empty
+  // listed cell with no object on or next to it, every frame till one
+  // does) and a block growing now (solid from its first step). Empty list:
+  // nothing grows back.
+  std::vector<std::pair<int, int>> regrowCells;
+  int regrowIn = 0;
+  std::optional<std::pair<int, int>> regrowing;
+  bool regrowListed(int c, int r) const {
+    for (auto& x : regrowCells)
+      if (x.first == c && x.second == r) return true;
+    return false;
+  }
   std::vector<char> map, under;  // cell classes, rows * cols
   std::vector<uint8_t> raw;      // tile codes (empty if the snapshot has none)
   std::vector<uint8_t> rawUnder; // CellItems codes (empty if none)

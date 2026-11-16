@@ -371,7 +371,35 @@ it a quarter turn clockwise).
   not needed to clear 2-2, which only needs the gold panels (sections 1
   and 4).
 * Soft blocks in world 2 reappear about 190 frames after being blown up
-  (seen on cells patrolled by enemy `$86`) **[probe]**.
+  (seen on cells patrolled by enemy `$86`) **[probe]**. The full rule is
+  in section 9b.
+
+## 9b. Soft blocks that grow back (C0:D8E8)
+
+On stages whose word in C5:E2A6 is non-zero (`$0B`, `$20`-`$25`,
+`$50`-`$55`), the stage start (C0:F428) lists every `$C2` cell with no
+item under it (`CellItems` 0) in `$7F0300` (TileMap offsets, 0-ended).
+Each frame C0:D8E8:
+
+* World 2 (`stage & $F0 == $20`, C0:D98D): every `$140` frames, the first
+  listed cell in order that is empty and passes the object check below.
+* Otherwise: the countdown `$7E5D0A` runs down. Once it reaches 1 the
+  routine adds a random step (`$0402 & $1E`) to the list index `$5D0C`
+  (wrapping to 0 at the end) and looks at that cell. It grows only if its
+  TileMap word is 0 (a bomb, an item or a block there stops it) and no
+  live object (list `$7E2620`, cell `+$A8`) is on it or next to it
+  (C0:D9F0). Otherwise it tries again the next frame. So with the
+  countdown out, an empty gap with P1 beside it grows back **the moment
+  P1 steps away** (5-1: P1 held (4,4) open, walked off, and it closed).
+* A pick sets the countdown to a random entry of C5:E366 (64, 128, 192,
+  256 x3, 320 x2, 384 x2, 448 x2, 640, 832, 1024, 1280 frames) and grows
+  the block over 16 frames (4 steps of 4, gfx from C5:E386). TileMap is
+  `$C2` from the first step.
+
+The agent reads the list, the countdown and a block growing now
+(`$7F0B00`/`$7F0B02`) into the world view's `regrow` line, and puts covers
+whose walk crosses a gap after the countdown and away from it last.
+
 
 ## 10. Remote-control bombs (all worlds)
 

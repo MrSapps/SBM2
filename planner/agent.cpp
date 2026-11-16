@@ -1134,6 +1134,21 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
       case TaskKind::PressButton:
       case TaskKind::SpawnPlatform:
         bombCands(sc, sr, Cand::Change, tname, 6, cs, ambient());
+        // The blast would burn a wanted item P1 can walk to: pick it up
+        // first (5-5 played on from 5-4: the open-way push from (7,10) burnt
+        // the fire-up at (3,10), the plan had no step for it; 22000 frames
+        // in survive, the timer ran out).
+        if (cs.empty() && dist[size_t(g.idx(sc, sr))] >= 0 && canPlaceOn(w.at(sc, sr)) && !w.bombAt(sc, sr))
+          for (const Cell& x : blastCells(w, sc, sr, w.p.fire, w.p.pierce)) {
+            if (x.c == sc && x.r == sr) continue;
+            bool item = false;
+            for (const Item& it : w.items)
+              item |= it.c == x.c && it.r == x.r && (wantedItem(it.kind) || gloveWanted(it.kind, w));
+            if (item && dist[size_t(g.idx(x.c, x.r))] >= 0) {
+              cs.push_back(walkCand(x.c, x.r, Cand::Change, tname + " (item in the blast)"));
+              break;
+            }
+          }
         // Every spot that lights it undoes a done mode 1 panel (4-3 played
         // on from 4-2 with fire 3: 13000 frames by (3,24), each blast over it
         // also over (2,23)/(2,25)): bomb a spot of a set whose blasts, XORed,

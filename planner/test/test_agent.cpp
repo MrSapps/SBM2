@@ -1603,3 +1603,19 @@ TEST("agent: final boss form 2: throw a bomb at it") {
   n.decide(ng, l, o);
   CHECK(n.what().find("(throw") == std::string::npos);
 }
+
+// 5-5 played on from 5-4 (frame 60 of the cut): the plan's one step is the
+// open-way push of (8,10) from (7,10), whose blast (fire 4) reaches the
+// fire-up at (3,10). No bomb burns a wanted item, so the step had no move
+// at all: 22000 frames in survive, then the timer. Pick the item up first.
+TEST("agent: a step's blast would burn a wanted item: pick it up first") {
+  World w;
+  std::string err;
+  CHECK(loadWorld(sbm2test::worldsDir + "/5-5_item_blast.txt", w, &err));
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 2; };
+  Agent a = agentFor("powerups+exit");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.committed());
+  CHECK(a.what().find("walk to (3,10)") != std::string::npos);
+}

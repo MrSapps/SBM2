@@ -160,7 +160,9 @@ struct Grid {
   }
   // Route to (tc,tr) where soft blocks cost extra (bombed on the way): the
   // cells, start first.
-  std::vector<int> softRoute(int tc, int tr, const std::set<int>& avoid = {}) const {
+  // avoidIn: (from, block) entries into a soft block not to take.
+  std::vector<int> softRoute(int tc, int tr, const std::set<int>& avoid = {},
+                             const std::set<std::pair<int, int>>& avoidIn = {}) const {
     size_t n = size_t(w.cols * w.rows);
     std::vector<int> d(n, INT_MAX), prev(n, -1);
     using QE = std::pair<int, int>;
@@ -188,7 +190,7 @@ struct Grid {
         }
         else if (!w.inside(nc, nr)) continue;
         else if (breakable(w.at(nc, nr))) {
-          if (avoid.count(idx(nc, nr))) continue;
+          if (avoid.count(idx(nc, nr)) || avoidIn.count({k, idx(nc, nr)})) continue;
           cost = 10;
         }
         else if (w.at(nc, nr) == 'S' || open(nc, nr, pc, pr)) cost = 1;
@@ -1063,6 +1065,26 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
       return c;
     };
 
+    // Every spot that lights a panel undoes a done mode 1 panel (4-3 played
+    // on from 4-2 with fire 3: 13000 frames by (3,24), each blast over it
+    // also over (2,23)/(2,25)): bomb a spot of a set whose blasts, XORed,
+    // light exactly what is left (paritySpots), done panels or not.
+    auto parity = [&](std::vector<Cand>& cs) {
+      undoPanels = true;
+      std::vector<int> spots;
+      for (int x = 0; x < w.cols * w.rows; x++)
+        if (dist[size_t(x)] >= 0 && canPlaceOn(w.map[size_t(x)]) && !w.bombAt(x % w.cols, x / w.cols) &&
+            !bombDropped(x) && !spoils(x % w.cols, x / w.cols))
+          spots.push_back(x);
+      std::vector<int> set = paritySpots(w, spots);
+      std::stable_sort(set.begin(), set.end(), [&](int a, int b) {
+        bool ca = covers(w, a % w.cols, a / w.cols, task.c, task.r), cb = covers(w, b % w.cols, b / w.cols, task.c, task.r);
+        return ca != cb ? ca : dist[size_t(a)] < dist[size_t(b)];
+      });
+      for (size_t i = 0; i < set.size() && i < 2; i++)
+        bombCands(set[i] % w.cols, set[i] / w.cols, Cand::Change, tname + " (parity)", 6, cs, ambient());
+      undoPanels = false;
+    };
     std::vector<Cand> cs;
     // Where the task is done from; if a soft block is in the way, bomb the
     // first one on the route instead.
@@ -1071,11 +1093,17 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
       // The first soft block on the route, from the cell before it, else
       // from any cell whose blast reaches it; a cell that failed 3 times
       // (the game won't take a bomb there) is dropped, and a soft block no
-      // cell is left for is routed around.
+      // cell is left for is routed around. One no cell by the route's way in
+      // reaches is first come at from another side (5-2 played on: the
+      // stand (16,4) for the push of (16,6) is a soft block reached from
+      // (16,3), a panel that takes no bomb, so no move; the way in from
+      // (16,5), one block more, was never tried. 10000 frames, the timer).
       std::vector<int> tried;
       std::set<int> bad = badSoftNow();
-      for (int pass = 0; pass < 4 && cs.empty(); pass++) {
-        auto route = g.softRoute(sc, sr, bad);
+      std::set<std::pair<int, int>> badIn;
+      int lastK = -1;
+      for (int pass = 0; pass < 6 && cs.empty(); pass++) {
+        auto route = g.softRoute(sc, sr, bad, badIn);
         size_t i = 1;
         while (i < route.size() && !breakable(w.at(route[i] % w.cols, route[i] / w.cols))) i++;
         if (i >= route.size()) break;
@@ -1106,8 +1134,13 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
           continue;
         }
         undoPanels = false, gateHit = false;
-        if (cs.empty()) bad.insert(k), badSoft_[k] = w.frame;
+        if (cs.empty()) badIn.insert({route[i - 1], k}), lastK = k;
       }
+      if (cs.empty() && lastK >= 0) badSoft_[lastK] = w.frame;
+      // (no way to the stand: 4-5 played on, (29,10) lit only from the soft
+      // (28,10), which only a bomb on the panel itself breaks; every spot in
+      // column 29 also undoes (29,8) and (29,6). 15000 frames, the timer.)
+      if (cs.empty() && task.kind == TaskKind::TogglePanel) parity(cs);
       if (!cs.empty() && tryCands(cs, live, o, 8)) return;
       for (int x : tried) {
         if (frame_ - bombFailAt_[x] >= 2 * kBadSoftTTL) bombFails_[x] = 0;  // (worn off: count afresh)
@@ -1149,26 +1182,7 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
               break;
             }
           }
-        // Every spot that lights it undoes a done mode 1 panel (4-3 played
-        // on from 4-2 with fire 3: 13000 frames by (3,24), each blast over it
-        // also over (2,23)/(2,25)): bomb a spot of a set whose blasts, XORed,
-        // light exactly what is left (paritySpots), done panels or not.
-        if (cs.empty() && task.kind == TaskKind::TogglePanel) {
-          undoPanels = true;
-          std::vector<int> spots;
-          for (int x = 0; x < w.cols * w.rows; x++)
-            if (dist[size_t(x)] >= 0 && canPlaceOn(w.map[size_t(x)]) && !w.bombAt(x % w.cols, x / w.cols) &&
-                !bombDropped(x) && !spoils(x % w.cols, x / w.cols))
-              spots.push_back(x);
-          std::vector<int> set = paritySpots(w, spots);
-          std::stable_sort(set.begin(), set.end(), [&](int a, int b) {
-            bool ca = covers(w, a % w.cols, a / w.cols, task.c, task.r), cb = covers(w, b % w.cols, b / w.cols, task.c, task.r);
-            return ca != cb ? ca : dist[size_t(a)] < dist[size_t(b)];
-          });
-          for (size_t i = 0; i < set.size() && i < 2; i++)
-            bombCands(set[i] % w.cols, set[i] / w.cols, Cand::Change, tname + " (parity)", 6, cs, ambient());
-          undoPanels = false;
-        }
+        if (cs.empty() && task.kind == TaskKind::TogglePanel) parity(cs);
         break;
       case TaskKind::HurtBoss: {
         // The boss's path: one run with P1 holding still, every boss object's

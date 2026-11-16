@@ -1619,3 +1619,43 @@ TEST("agent: a step's blast would burn a wanted item: pick it up first") {
   CHECK(a.committed());
   CHECK(a.what().find("walk to (3,10)") != std::string::npos);
 }
+
+// 5-2 played on from 5-1 (a world 5 run, frame 16860): the plan's first
+// step pushes (16,6) from (16,4), a soft block. The cheapest way in is from
+// (16,3), a panel: no bomb goes there, and no other cell P1 can reach now
+// has (16,4) in its blast, so the block was routed around for good and the
+// step had no move (10000 frames, the timer). Come in from (16,5) instead:
+// break (17,5) first.
+TEST("agent: a soft block no cell reaches from the route's side: come at it from another") {
+  World w;
+  std::string err;
+  CHECK(loadWorld(sbm2test::worldsDir + "/5-2_way_push.txt", w, &err));
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 2; };
+  Agent a = agentFor("powerups+exit");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.committed());
+  CHECK(!o.seen.empty());
+  int bc, br, yc, yr;
+  bombAndCover(o.seen.back(), bc, br, yc, yr);
+  bool hits = false;
+  for (const Cell& x : blastCells(w, bc, br, w.p.fire, false)) hits |= x.c == 17 && x.r == 5;
+  CHECK(hits);
+}
+
+// 4-5 played on from 4-4 (a world 4 run, frame 596 of the cut): the last
+// panel (29,10) is lit cleanly only from the soft (28,10), and only a bomb on
+// the panel itself would break that. Every reachable spot in column 29 also
+// undoes (29,8)/(29,6) (fire 5). The way to the stand had no move: 15000
+// frames in survive, the timer. Bomb a parity spot instead.
+TEST("agent: no way to a panel's stand: bomb a parity spot") {
+  World w;
+  std::string err;
+  CHECK(loadWorld(sbm2test::worldsDir + "/4-5_panel_parity.txt", w, &err));
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 2; };
+  Agent a = agentFor("powerups+exit");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.committed());
+  CHECK(a.what().find("(parity)") != std::string::npos);
+}

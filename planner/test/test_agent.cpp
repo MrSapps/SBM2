@@ -1196,3 +1196,95 @@ TEST("agent: trap: P1 a pixel off centre beside the blast is clear") {
   Agent b = agentFor("exit");
   CHECK_EQ(b.trapCheck(t), 0);
 }
+
+// A dormant enemy sits in a soft block: the move is to bomb the block (it
+// wakes, flashing and immune), judged by the map changing, not by a kill
+// (4-1: every enemy starts dormant; a kill check never passed, and the
+// agent closed in on (6,6) for 20000 frames).
+TEST("agent: a dormant enemy in a soft block: bomb the block to wake it") {
+  World w = mk({"#########",
+                "#....%..#",
+                "#.#.#.#.#",
+                "#.......#",
+                "###g#####",
+                "#########"}, 1, 1, "gate 3 4 closed\nenemy slot=4 type=87 x=88 y=24 hp=1 f4=CC00");
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 2; };
+  Agent a = agentFor("exit");
+  a.decide(w, liveOf(w), o);
+  std::string lg = a.takeLog();
+  CHECK(lg.find("wake") != std::string::npos);
+  CHECK(a.committed());
+  int bc, br, yc, yr;
+  bombAndCover(o.seen.back(), bc, br, yc, yr);
+  bool hits = false;
+  for (const Cell& x : blastCells(w, bc, br, w.p.fire, false)) hits |= x.c == 5 && x.r == 1;
+  CHECK(hits);
+}
+
+// A dormant enemy's x/y don't follow the scroll: where it was first seen
+// dormant is where it is (4-6: the $93 in the (3,7) block read as in the
+// wall over the gate after the view scrolled, and no task woke it).
+TEST("agent: a dormant enemy stays where first seen while the view scrolls") {
+  World w = mk({"#########",
+                "#....%..#",
+                "#.#.#.#.#",
+                "#.......#",
+                "###g#####",
+                "#########"}, 1, 1, "gate 3 4 closed\nenemy slot=4 type=87 x=88 y=24 hp=1 f4=CC00");
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 2; };
+  Agent a = agentFor("exit");
+  a.decide(w, liveOf(w), o);
+  a.takeLog();
+  World w2 = w;
+  w2.enemies[0].y = 72;  // (5,4): the wall, by screen + the new origin
+  w2.frame = w.frame + 600;
+  o.seen.clear();
+  a.decide(w2, liveOf(w2), o);
+  std::string lg = a.takeLog();
+  CHECK(lg.find("wake") != std::string::npos);
+  CHECK(!o.seen.empty());
+  int bc, br, yc, yr;
+  bombAndCover(o.seen.back(), bc, br, yc, yr);
+  bool hits = false;
+  for (const Cell& x : blastCells(w, bc, br, w.p.fire, false)) hits |= x.c == 5 && x.r == 1;
+  CHECK(hits);
+}
+
+// A walk over a platform lane: its far end's waypoint carries kLaneEnd (the
+// path follower holds toward it), and the move lasts the ride.
+TEST("agent: a lane ride's far end is flagged and the move lasts the ride") {
+  World w = mk({"###########",
+                "#..L###L.g#",
+                "###########"}, 1, 1, "gate 9 1 open\nenemy slot=5 type=DC x=88 y=24 hp=0 f4=0C00");
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -2; };
+  Agent a = agentFor("exit");
+  a.decide(w, liveOf(w), o);
+  CHECK(!o.seen.empty());
+  const SimReq& q = o.seen[0];
+  bool flagged = false;
+  for (size_t i = 0; i + 1 < q.path.size(); i += 2)
+    if (q.path[i] & kLaneEnd) flagged = (q.path[i] & ~kWpFlags) / 16 == 7;
+  CHECK(flagged);
+  CHECK(q.frames >= laneFrames(3));
+}
+
+// Sealed in a pocket whose every way out undoes a done mode-1 panel: undo
+// it (the plan redoes it later) rather than wait for good (4-6: 20000
+// frames in (7..9,21..24) by its four done panels).
+TEST("agent: every way out undoes a done panel: undo one") {
+  World w = mk({"########",
+                "#P..%.g#",
+                "#.######",
+                "#.######",
+                "########"}, 2, 1, "gate 6 1 open\npanel 1 1 done mode=1");
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 2; };
+  Agent a = agentFor("exit");
+  a.decide(w, liveOf(w), o);
+  std::string lg = a.takeLog();
+  CHECK(lg.find("clear the way to gate 6,1") != std::string::npos);
+  CHECK(a.committed());
+}

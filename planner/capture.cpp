@@ -40,6 +40,8 @@ struct ClassTable {
     t[0xCD] = 'K';
     t[0x4D] = 'k';
     t[0x4C] = 'S';
+    t[0x36] = 'L';
+    t[0x6A] = 'a';  // platform spawner (a flame on it: one more $DC)  // platform lane end (board cell, docs/mechanics.md 7)
     t[0x4B] = 'T';
     t[0x63] = 't';
     t[0x25] = 'c';

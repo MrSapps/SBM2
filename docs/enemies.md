@@ -274,6 +274,15 @@ cells. The bot should expect one to appear wherever such a block is
 blasted, and treat it as harmless for those 128 frames. The code that
 wakes them was not traced.
 
+**[log]** A dormant enemy's x/y (`+$10`/`+$18`, screen pixels) do not
+follow the scroll: only objects that update get moved when the view
+scrolls. In a scrolling stage, screen + origin drifts, so the enemy is
+where it was first seen dormant. 4-6 (`$45`): the `$93` in slot 6 sat at
+screen y 8. Its reading, screen + origin, went from (11,15) to (11,6) as
+the view scrolled up. It woke when the bomb at (11,14) reached the
+(11,15) block, with the view at y 88. The slot 5 `$93` (first seen in the
+(3,7) block) read as inside the wall above the gate.
+
 ## 6. Prediction cheat-sheet
 
 * Position: x/y `+$10`/`+$18` with sub-pixel parts `+$12`/`+$1A`.

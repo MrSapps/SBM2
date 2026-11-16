@@ -16,6 +16,7 @@
 // No stage names anywhere: every rule is a game rule over the world view.
 #pragma once
 #include <cstdint>
+#include <array>
 #include <map>
 #include <set>
 #include <string>
@@ -160,6 +161,8 @@ class Agent {
   std::vector<Ride> rides_;
   std::map<int, int> rideFails_;
   int dockFor_ = -1;  // the ride just probed (its dock is seen next decision)
+  // Dormant enemies where first seen dormant this stage (slot -> type, x, y).
+  std::map<int, std::array<int, 3>> dormantAt_;
   int lastPx_ = 0, lastPy_ = 0;  // cells that held a soft block this stage (gaps now, if open)
   bool senseStale_ = false;  // this frame's boss senses nothing (points remembered)
   std::vector<uint16_t> bossBase_;  // this decision's boss objects (every run reports their HP)

@@ -85,6 +85,8 @@ rawunder                  # CellItems codes, hex
 | `K` | track block | `$CD` | |
 | `k` | track | `$4D` | walkable; a `$DD` block moves along it |
 | `S` | spring pad | `$4C` | |
+| `a` | platform spawner | `$6A` | solid; a flame on it spawns one more `$DC` platform (C1:4A16) |
+| `L` | lane end | `$36` | walkable; a `$DC` platform runs from here over the walls in line to the next `L` (docs/mechanics.md 7) |
 | `T` | trap | `$4B` | costs a heart or a life; stops a blast |
 | `t` | trap | `$63` | as `T`, but a blast goes on past it |
 | `c` | crumble floor | `$25` | becomes `C` once left |

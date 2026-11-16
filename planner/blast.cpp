@@ -17,7 +17,7 @@ void cellsInto(const World& w, int c, int r, int range, bool pierce, bool throug
         out.push_back({cc, rr});
         continue;
       }
-      if (t == '%' || t == 'X' || (t == 'g' && !(w.hasGate && w.gateOpen && cc == w.gateC && rr == w.gateR))) {
+      if (t == '%' || t == 'X' || t == 'a' || (t == 'g' && !(w.hasGate && w.gateOpen && cc == w.gateC && rr == w.gateR))) {
         out.push_back({cc, rr});  // reached, and stops it
         break;
       }

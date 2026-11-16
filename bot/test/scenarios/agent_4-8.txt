@@ -1,0 +1,7 @@
+# The C++ agent beats the 4-8 boss from its start, no deaths.
+start 47
+agent 1
+budget 30000
+pass STAGE 50
+fail DEATH|agent error
+env SBM2_STOPAT=50

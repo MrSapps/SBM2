@@ -601,3 +601,43 @@ TEST("goap: 3-1: no bomb from a pocket with no cover") {
     }
   }
 }
+
+// World 4 platform lanes (docs/mechanics.md 7): board cells 'L' at both
+// ends of a run of walls, joined while a $DC platform is on the run (4-2:
+// (12,9) to (16,9) over walls (13..15,9), the only way to the gate side).
+TEST("goap: platform lanes join their ends, while a platform runs there") {
+  World w = mk({"###########",
+                "#..L###L.g#",
+                "###########"}, 1, 1, "gate 9 1 open\nenemy slot=5 type=DC x=88 y=24 hp=0 f4=0C00");
+  int ln[4][3];
+  CHECK_EQ(lanes(w, 3, 1, ln), 1);
+  CHECK_EQ(ln[0][0], 7);
+  CHECK_EQ(ln[0][1], 1);
+  CHECK_EQ(ln[0][2], 3);
+  CHECK_EQ(lanes(w, 7, 1, ln), 1);
+  CHECK_EQ(lanes(w, 2, 1, ln), 0);
+  CHECK_EQ(tasksOf(run(w, "exit")), std::string("gate 9,1"));
+  World none = w;
+  none.enemies.clear();  // (no platform on it yet)
+  CHECK_EQ(lanes(none, 3, 1, ln), 0);
+  CHECK(!run(none, "exit").ok);
+}
+
+// A $6A spawner ('a'): a flame on it spawns one more $DC, so a lane with no
+// platform yet is ridden only after bombing it (4-3: the lane (4,25) to
+// (9,25) to the gate side had none; "no plan" for 20000 frames).
+TEST("goap: a platform spawner opens the lanes that have no platform") {
+  World w = mk({"###########",
+                "#..L###L.g#",
+                "#.#########",
+                "#.a########",
+                "###########"}, 1, 1, "gate 9 1 open");
+  int ln[4][3];
+  CHECK_EQ(lanes(w, 3, 1, ln), 0);
+  CHECK_EQ(lanes(w, 3, 1, ln, true), 1);
+  CHECK_EQ(tasksOf(run(w, "exit")), std::string("spawner 2,3; gate 9,1"));
+  World none = w;
+  none.map[size_t(3 * w.cols + 2)] = '#';
+  CHECK(!run(none, "exit").ok);
+}
+

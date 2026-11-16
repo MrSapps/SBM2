@@ -125,3 +125,32 @@ TEST("path_pad: a waypoint passed in the air is not reached") {
   CHECK_EQ(path_pad_w(r.w.data(), wp.data(), 3, &at, mem), PP_UP);
   CHECK_EQ(at, 2);
 }
+
+// A platform lane's far end (PP_LANE): held toward it by the lane (the
+// platform boards when it waits there) and riding it (bit 15: never skip
+// ahead and let go, the platform shuttles back with P1), and no swapping
+// axes for want of progress (it steps off the near end: 4-2).
+TEST("path_pad: a lane ride holds toward its far end, waiting and riding") {
+  Ram r;
+  std::vector<int16_t> wp{56, 152, 200, 152, int16_t(264 | PP_LANE), 152};  // (3,9), (12,9) L, (16,9) L
+  int at = 1, mem[3] = {0, 0, -1};
+  for (int f = 0; f < 60; f++) {
+    r.p1(200, 151, 0);  // (by the lane, a pixel off its line, waiting)
+    CHECK_EQ(path_pad_w(r.w.data(), wp.data(), 3, &at, mem), PP_RIGHT);
+  }
+  CHECK_EQ(at, 2);
+  r.w[0x8003] = 0x80;  // riding
+  for (int x = 216; x < 248; x++) {
+    r.p1(x, 152, 0);
+    CHECK_EQ(path_pad_w(r.w.data(), wp.data(), 3, &at, mem), PP_RIGHT);
+  }
+  r.p1(220, 152, 0);  // (carried back)
+  CHECK_EQ(path_pad_w(r.w.data(), wp.data(), 3, &at, mem), PP_RIGHT);
+  CHECK_EQ(at, 2);
+  // Off at the far end, the bit still set: the path goes on (4-2: stood
+  // on (16,9) for 4000 frames).
+  std::vector<int16_t> on{200, 152, int16_t(264 | PP_LANE), 152, 264, 136};
+  int at2 = 1;
+  r.p1(264, 152, 0);
+  CHECK_EQ(path_pad_w(r.w.data(), on.data(), 3, &at2, mem), PP_UP);
+}

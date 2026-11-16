@@ -20,7 +20,8 @@
 namespace sbm2 {
 
 enum class TaskKind { KillEnemy, BombSoft /* or a barrel */, TogglePanel, LightCrystal, PickItem, EnterGate, HurtBoss,
-                      PushBlock /* into the hole at (c+dc, r+dr) */, PressButton };
+                      PushBlock /* into the hole at (c+dc, r+dr) */, PressButton,
+                      SpawnPlatform /* a flame on a $6A spawner: lanes with no platform get one */ };
 const char* taskName(TaskKind k);
 
 struct Task {
@@ -114,7 +115,21 @@ bool jumpHeld(const World& w, int c, int r, int lc, int lr);
 constexpr int16_t kJumpHold = 0x4000;
 // Waypoint flag (on x): a ride lets P1 off here (port/path_pad.h PP_RIDE).
 constexpr int16_t kRideEnd = 0x2000;
-constexpr int16_t kWpFlags = kJumpHold | kRideEnd;
+// Waypoint flag (on x): a platform lane ride ends here (port/path_pad.h
+// PP_LANE): held toward it, waiting by the lane and riding.
+constexpr int16_t kLaneEnd = 0x1000;
+constexpr int16_t kWpFlags = kJumpHold | kRideEnd | kLaneEnd;
+// World 4 platform lanes (docs/mechanics.md 7): a board cell 'L' ($36),
+// a straight run of walls, a board cell at the far end, and a $DC
+// platform on the run. P1 held toward the far end boards the platform when
+// it waits by the near end and steps off when it waits by the far one.
+// The far ends from (c,r) (out: col, row, lane cells); how many.
+// spawned: lanes with no platform count too (a $6A spawner was bombed:
+// World4Update C1:4A16 spawns one more $DC).
+int lanes(const World& w, int c, int r, int out[4][3], bool spawned = false);
+// Frames a lane ride of n wall cells may take: the platform's worst wait
+// plus the ride (0.406 px/f: ~40 frames a cell, 64 frames at each end).
+inline int laneFrames(int n) { return 3 * 64 + 3 * 40 * n + 32; }
 // Each panel's state once the bombs already out have gone off (docs/
 // mechanics.md 4): mode 1 toggles once per blast over it (parity), mode 0
 // is done by any.

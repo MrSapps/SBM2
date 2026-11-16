@@ -28,7 +28,8 @@ int baseCost(TaskKind k) {
     case TaskKind::TogglePanel:
     case TaskKind::LightCrystal:
     case TaskKind::PushBlock:
-    case TaskKind::PressButton: return kBombCost;
+    case TaskKind::PressButton:
+    case TaskKind::SpawnPlatform: return kBombCost;
     default: return 0;
   }
 }
@@ -55,13 +56,14 @@ class Search {
     for (size_t i = 0; i < tasks_.size(); i++) {
       const Task& t = tasks_[i];
       if (t.kind == TaskKind::BombSoft || t.kind == TaskKind::TogglePanel || t.kind == TaskKind::LightCrystal ||
-          t.kind == TaskKind::PressButton)
+          t.kind == TaskKind::PressButton || t.kind == TaskKind::SpawnPlatform)
         staticAt_[size_t(t.r * w.cols + t.c)].push_back(int(i));
       if (t.kind == TaskKind::PushBlock) {
         blockTasks_[t.r * w.cols + t.c].push_back(int(i));
         holeTasks_[(t.r + t.dr) * w.cols + t.c + t.dc].push_back(int(i));
       }
       if (t.kind == TaskKind::PressButton) buttons_.push_back(int(i));
+      if (t.kind == TaskKind::SpawnPlatform) spawners_.push_back(int(i));
       if (t.kind == TaskKind::BombSoft) softAt_[size_t(t.r * w.cols + t.c)] = int(i);
       if (t.kind == TaskKind::PickItem) itemAt_[t.r * w.cols + t.c].push_back(int(i));
       if (t.kind == TaskKind::TogglePanel) hasPanels_ = true;
@@ -187,7 +189,8 @@ class Search {
       case TaskKind::HurtBoss: return goal_.exit || goal_.enemies;
       case TaskKind::TogglePanel: return goal_.exit && !gateOpen(n);
       case TaskKind::PushBlock:
-      case TaskKind::PressButton: return false;  // (enablers: done when they open the way)
+      case TaskKind::PressButton:
+      case TaskKind::SpawnPlatform: return false;  // (enablers: done when they open the way)
       case TaskKind::LightCrystal:
         // KillAllType8F: crystals are the only way to kill $8F enemies.
         for (size_t i = 0; i < tasks_.size(); i++)
@@ -217,6 +220,11 @@ class Search {
   bool filled(const Node& n, int c, int r) const { return anyDone(n, holeTasks_, cellIdx(c, r)); }
   bool pressed(const Node& n) const {
     for (int i : buttons_)
+      if (n.done[size_t(i)]) return true;
+    return false;
+  }
+  bool spawned(const Node& n) const {
+    for (int i : spawners_)
       if (n.done[size_t(i)]) return true;
     return false;
   }
@@ -262,13 +270,18 @@ class Search {
       if (dist > rt.d[size_t(i)]) continue;
       int c = i % w_.cols, r = i / w_.cols;
       int land[kMaxJumps][2], nj = jumps(w_, c, r, land);
-      for (int di = 0; di < (nj >= 0 ? nj : 4); di++) {
+      int ln[4][3], nl = nj >= 0 ? 0 : lanes(w_, c, r, ln, spawned(n));
+      for (int di = 0; di < (nj >= 0 ? nj : 4 + nl); di++) {
         auto& dd = kDirs[di % 4];
         int cc = c + dd[0], rr = r + dd[1];
         int step = kFPT;
         if (nj >= 0) {  // only a jump leaves a pad (or a jump-pad object's cell)
           cc = land[di][0], rr = land[di][1];
           step = kSpringFrames;
+        }
+        else if (di >= 4) {  // a platform lane's ride, from its end
+          cc = ln[di - 4][0], rr = ln[di - 4][1];
+          step = laneFrames(ln[di - 4][2]);
         }
         else if (!w_.inside(cc, rr)) continue;
         else if (w_.at(cc, rr) == 'S') {}
@@ -429,7 +442,7 @@ class Search {
         int cc = c + dd[0] * k, rr = r + dd[1] * k;
         if (!w_.inside(cc, rr)) break;
         char x = cls(n, cc, rr);
-        if (breakable(x) || x == 'y' || x == 'P' || x == 'v') mark(cc, rr);
+        if (breakable(x) || x == 'y' || x == 'P' || x == 'v' || x == 'a') mark(cc, rr);
         if (x == 'X' || x == 'x') {  // pushed the blast's way, if a hole is there
           auto it = blockTasks_.find(cellIdx(cc, rr));
           if (it != blockTasks_.end())
@@ -457,7 +470,7 @@ class Search {
       // route itself). The gate ends the stage, so it comes last.
       if (t.kind == TaskKind::EnterGate ? (!open || !goal_.exit || !restDone(n))
           : t.kind == TaskKind::PushBlock ? !pushable(n, t)
-          : t.kind != TaskKind::PressButton && !required(n, t))
+          : t.kind != TaskKind::PressButton && t.kind != TaskKind::SpawnPlatform && !required(n, t))
         continue;
       int c, r, dist;
       if (!standCell(n, rt, t, c, r, dist)) continue;
@@ -552,7 +565,7 @@ class Search {
   std::unordered_map<int, std::vector<int>> blockTasks_, holeTasks_;  // push tasks by block / hole cell
   std::unordered_map<int, std::vector<int>> itemAt_;                  // item tasks by cell
   std::set<int> donePanel_;  // cells of mode 1 panels done (a blast over one undoes it)
-  std::vector<int> buttons_;
+  std::vector<int> buttons_, spawners_;
   std::vector<std::vector<int>> staticAt_;  // static bomb tasks per cell
   bool hasPanels_ = false;
   std::vector<Node> nodes_;
@@ -570,6 +583,7 @@ const char* taskName(TaskKind k) {
     case TaskKind::HurtBoss: return "boss";
     case TaskKind::PushBlock: return "push";
     case TaskKind::PressButton: return "button";
+    case TaskKind::SpawnPlatform: return "spawner";
   }
   return "?";
 }
@@ -711,6 +725,24 @@ int jumps(const World& w, int c, int r, int out[kMaxJumps][2]) {
   return -1;
 }
 
+int lanes(const World& w, int c, int r, int out[4][3], bool spawned) {
+  if (!w.inside(c, r) || w.at(c, r) != 'L') return 0;
+  int n = 0;
+  for (auto& d : kDirs) {
+    int k = 1;
+    while (w.inside(c + k * d[0], r + k * d[1]) && w.at(c + k * d[0], r + k * d[1]) == '#') k++;
+    int tc = c + k * d[0], tr = r + k * d[1];
+    if (k < 2 || !w.inside(tc, tr) || w.at(tc, tr) != 'L' || w.bombAt(tc, tr)) continue;
+    bool platform = spawned;  // (one may come later: World4Update spawns them)
+    for (const Enemy& e : w.enemies)
+      if (e.type == 0xDC && e.col() >= std::min(c, tc) && e.col() <= std::max(c, tc) && e.row() >= std::min(r, tr) &&
+          e.row() <= std::max(r, tr))
+        platform = true;
+    if (platform) out[n][0] = tc, out[n][1] = tr, out[n][2] = k - 1, n++;
+  }
+  return n;
+}
+
 bool jumpHeld(const World& w, int c, int r, int lc, int lr) {
   if (!w.inside(c, r) || w.at(c, r) != 'S') return false;
   int dc = (lc > c) - (lc < c), dr = (lr > r) - (lr < r), x, y;
@@ -719,7 +751,7 @@ bool jumpHeld(const World& w, int c, int r, int lc, int lr) {
 
 bool canPlaceOn(char c) { return walkableClass(c) && std::string("Py^sbgvn").find(c) == std::string::npos; }
 
-bool walkableClass(char c) { return std::string(".i^Pyspf=ktTcCg*vn").find(c) != std::string::npos; }
+bool walkableClass(char c) { return std::string(".i^Pyspf=ktTcCg*vnL").find(c) != std::string::npos; }
 
 std::vector<uint8_t> panelsDone(const World& w) {
   std::vector<uint8_t> hits(w.panels.size(), 0), out(w.panels.size(), 0);
@@ -746,6 +778,7 @@ std::vector<Task> worldTasks(const World& w) {
       if (breakable(x)) out.push_back({TaskKind::BombSoft, c, r, -1, false, false});
       if (x == 'y') out.push_back({TaskKind::LightCrystal, c, r, -1, false, false});
       if (x == 'v') out.push_back({TaskKind::PressButton, c, r, -1, false, false});
+      if (x == 'a') out.push_back({TaskKind::SpawnPlatform, c, r, -1, false, false});
       if (x == 'X' || x == 'x')
         for (auto& d : kDirs)
           if (w.inside(c + d[0], r + d[1]) && w.at(c + d[0], r + d[1]) == 'O') {

@@ -34,7 +34,7 @@ int wpSteps(const std::vector<int16_t>& wp) {
   int n = 0;
   for (size_t i = 2; i + 1 < wp.size(); i += 2) {
     int d = std::abs((wp[i] & ~kWpFlags) - (wp[i - 2] & ~kWpFlags)) / 16 + std::abs(wp[i + 1] - wp[i - 1]) / 16;
-    n += d > 1 ? kSpringFrames / kWalkFPT : 1;
+    n += (wp[i] & kLaneEnd) ? laneFrames(d - 1) / kWalkFPT : d > 1 ? kSpringFrames / kWalkFPT : 1;
   }
   return n;
 }
@@ -62,13 +62,15 @@ struct Grid {
   void steps(int c, int r, int c0, int r0, F f) const {
     int land[kMaxJumps][2], nj = jumps(w, c, r, land);
     if (nj >= 0) {
-      for (int i = 0; i < nj; i++) f(land[i][0], land[i][1], true);
+      for (int i = 0; i < nj; i++) f(land[i][0], land[i][1], kSpringFrames / kWalkFPT);
       return;
     }
     for (auto& d : kDirs) {
       int nc = c + d[0], nr = r + d[1];
-      if (w.inside(nc, nr) && (w.at(nc, nr) == 'S' || open(nc, nr, c0, r0))) f(nc, nr, false);
+      if (w.inside(nc, nr) && (w.at(nc, nr) == 'S' || open(nc, nr, c0, r0))) f(nc, nr, 1);
     }
+    int ln[4][3], nl = lanes(w, c, r, ln);  // (and a lane's ride, from its end)
+    for (int i = 0; i < nl; i++) f(ln[i][0], ln[i][1], laneFrames(ln[i][2]) / kWalkFPT);
   }
   // Shorten a cell path to n cells, but never to end on a pad or a jump-pad
   // object's cell (P1 is thrown on: 3-6, a walk cut on (5,13) bounced
@@ -84,17 +86,23 @@ struct Grid {
     dist.assign(size_t(w.cols * w.rows), -1);
     prev.assign(size_t(w.cols * w.rows), -1);
     if (!w.inside(c0, r0)) return;
-    std::deque<int> q{idx(c0, r0)};
+    // (Dijkstra: jumps and lane rides cost more than a step; a lane's far
+    // end is walked to when that is shorter)
+    using QE = std::pair<int, int>;
+    std::priority_queue<QE, std::vector<QE>, std::greater<QE>> q;
+    q.push({0, idx(c0, r0)});
     dist[size_t(idx(c0, r0))] = 0;
     while (!q.empty()) {
-      int k = q.front();
-      q.pop_front();
+      auto [dk, k] = q.top();
+      q.pop();
+      if (dk != dist[size_t(k)]) continue;
       int c = k % w.cols, r = k / w.cols;
-      steps(c, r, c0, r0, [&](int nc, int nr, bool jump) {
-        if (dist[size_t(idx(nc, nr))] >= 0) return;
-        dist[size_t(idx(nc, nr))] = dist[size_t(k)] + (jump ? kSpringFrames / kWalkFPT : 1);
-        prev[size_t(idx(nc, nr))] = k;
-        q.push_back(idx(nc, nr));
+      steps(c, r, c0, r0, [&, dk = dk, k = k](int nc, int nr, int cost) {
+        int j = idx(nc, nr);
+        if (dist[size_t(j)] >= 0 && dist[size_t(j)] <= dk + cost) return;
+        dist[size_t(j)] = dk + cost;
+        prev[size_t(j)] = k;
+        q.push({dk + cost, j});
       });
     }
     for (int k = 0; k < w.cols * w.rows; k++)
@@ -117,7 +125,9 @@ struct Grid {
       int k = cells[i], p = i ? cells[i - 1] : -1;
       bool hold = p >= 0 && jumpHeld(w, p % w.cols, p / w.cols, k % w.cols, k / w.cols);
       bool ride = p >= 0 && (rideableAt(w, p % w.cols, p / w.cols) || rideDock(w, p % w.cols, p / w.cols));
-      wp.push_back(int16_t(((k % w.cols) * 16 + 8) | (hold ? kJumpHold : 0) | (ride ? kRideEnd : 0)));
+      bool lane = p >= 0 && w.at(p % w.cols, p / w.cols) == 'L' &&
+                  std::abs(k % w.cols - p % w.cols) + std::abs(k / w.cols - p / w.cols) > 1;
+      wp.push_back(int16_t(((k % w.cols) * 16 + 8) | (hold ? kJumpHold : 0) | (ride ? kRideEnd : 0) | (lane ? kLaneEnd : 0)));
       wp.push_back(int16_t((k / w.cols) * 16 + 8));
     }
     return wp;
@@ -137,13 +147,18 @@ struct Grid {
       if (g != d[size_t(k)]) continue;
       int c = k % w.cols, r = k / w.cols;
       int land[kMaxJumps][2], nj = jumps(w, c, r, land);
-      for (int di = 0; di < (nj >= 0 ? nj : 4); di++) {
+      int ln[4][3], nl = nj >= 0 ? 0 : lanes(w, c, r, ln);
+      for (int di = 0; di < (nj >= 0 ? nj : 4 + nl); di++) {
         auto& dd = kDirs[di % 4];
         int nc = c + dd[0], nr = r + dd[1];
         int cost;
         if (nj >= 0) {
           nc = land[di][0], nr = land[di][1];
           cost = kSpringFrames / kWalkFPT;
+        }
+        else if (di >= 4) {
+          nc = ln[di - 4][0], nr = ln[di - 4][1];
+          cost = laneFrames(ln[di - 4][2]) / kWalkFPT;
         }
         else if (!w.inside(nc, nr)) continue;
         else if (breakable(w.at(nc, nr))) {
@@ -624,7 +639,22 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
   if (lastEnemies_ >= 0 && live.enemies < lastEnemies_) trapSince_ = w.frame;  // (a kill: the traps work)
   lastEnemies_ = live.enemies;
   if (w.stage != stage_) stage_ = w.stage, bombFails_.clear(), bombFailAt_.clear(), badSoft_.clear(), itemFails_.clear(), softSeen_.clear(), rides_.clear(),
-                            rideFails_.clear(), dockFor_ = -1;
+                            rideFails_.clear(), dockFor_ = -1, dormantAt_.clear();
+  // A dormant enemy has no update, and the scroll moves only the objects
+  // that update: its x/y (screen pixels) stay put while the view scrolls,
+  // so screen + origin drifts. It is where it was first seen dormant, and
+  // a flame there wakes it (4-6: the $93 in the (3,7) block read as inside
+  // the wall over the gate once the view had scrolled; the $93 in the
+  // (11,15) block woke when (11,15) was bombed, with the view at y 88).
+  for (Enemy& e : w.enemies) {
+    auto it = dormantAt_.find(e.slot);
+    if (!e.dormant()) {
+      if (it != dormantAt_.end()) dormantAt_.erase(it);
+      continue;
+    }
+    if (it != dormantAt_.end() && it->second[0] == e.type) e.x = it->second[1], e.y = it->second[2];
+    else dormantAt_[e.slot] = {e.type, e.x, e.y};
+  }
   // The ride just probed let P1 off: its object sits next to P1 now, where
   // it can be boarded back (its dock).
   if (dockFor_ >= 0 && dockFor_ < int(rides_.size())) {
@@ -788,11 +818,12 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
   // item burns it (goap.cpp's Harm): no bomb there, unless the item is out
   // of reach (then the plan has priced burning it in).
   std::vector<uint8_t> panelsNow = panelsDone(w);
+  bool undoPanels = false;  // (no other way out: undo one, the plan redoes it)
   auto spoils = [&](int xc, int xr) {
     for (const Cell& x : blastCells(w, xc, xr, w.p.fire, w.p.pierce)) {
       if (w.hasGate && x.c == w.gateC && x.r == w.gateR) return true;
       for (size_t i = 0; i < w.panels.size(); i++)  // (a done mode 1 panel: undone)
-        if (w.panels[i].mode == 1 && panelsNow[i] && w.panels[i].c == x.c && w.panels[i].r == x.r) return true;
+        if (!undoPanels && w.panels[i].mode == 1 && panelsNow[i] && w.panels[i].c == x.c && w.panels[i].r == x.r) return true;
       for (const Item& it : w.items)
         if (it.c == x.c && it.r == x.r && wantedItem(it.kind) && dist[size_t(g.idx(x.c, x.r))] >= 0 &&
             !(x.c == xc && x.r == xr))  // (one on the bomb's cell: P1 picks it up placing it)
@@ -916,6 +947,13 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
         bombCands(x % w.cols, x / w.cols, Cand::Change, "clear the way to " + tname, 4, cs, ambient());
         if (cs.size() > n0) tried.push_back(x);
       }
+      // (sealed in by done panels, every way out undoes one: 4-6, the
+      // (7..9,21..24) pocket, 20000 frames by its done panels)
+      if (cs.empty() && !undoPanels) {
+        undoPanels = true, pass--;
+        continue;
+      }
+      undoPanels = false;
       if (cs.empty()) bad.insert(k), badSoft_[k] = w.frame;
     }
     if (!cs.empty() && tryCands(cs, live, o, 8)) return;
@@ -942,6 +980,7 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
     case TaskKind::LightCrystal:
     case TaskKind::PushBlock:
     case TaskKind::PressButton:
+    case TaskKind::SpawnPlatform:
       bombCands(sc, sr, Cand::Change, tname, 6, cs, ambient());
       break;
     case TaskKind::HurtBoss: {
@@ -1084,6 +1123,24 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
     }
     case TaskKind::KillEnemy: {
       killSlot_ = task.ref >= 0 && w.enemies[size_t(task.ref)].slot >= 4 ? w.enemies[size_t(task.ref)].slot - 4 : -1;
+      // A dormant enemy sits in a soft block (docs/enemies.md): a blast
+      // there only wakes it (flashing, immune for 128 frames), so the
+      // step is the block, not a kill (4-1: every enemy starts so, and
+      // "closing in" on one looped for 20000 frames).
+      if (task.ref >= 0) {
+        const Enemy& z = w.enemies[size_t(task.ref)];
+        if (z.dormant() && w.inside(z.col(), z.row()) && breakable(w.at(z.col(), z.row()))) {
+          std::vector<std::pair<int, int>> xs;
+          for (int x = 0; x < w.cols * w.rows; x++)
+            if (dist[size_t(x)] >= 0 && !bombDropped(x) && covers(w, x % w.cols, x / w.cols, z.col(), z.row()))
+              xs.push_back({dist[size_t(x)], x});
+          std::sort(xs.begin(), xs.end());
+          for (size_t i = 0; i < xs.size() && i < 2; i++)
+            bombCands(xs[i].second % w.cols, xs[i].second / w.cols, Cand::Change, "wake " + tname, 4, cs, ambient());
+          if (!cs.empty() && tryCands(cs, live, o, 8)) return;
+          cs.clear();
+        }
+      }
       // The remote with a bomb to spare: lay a trap where enemies are likely
       // to walk (the model's odds an enemy enters its blast within kTrapH),
       // go to cover and leave it; frame() sets it off when one is in. Traps

@@ -14,7 +14,13 @@ enum { PP_HOLD = 0x4000 };
  * path skips to that waypoint; with none ahead the path is over (the ride
  * goes where it goes: the agent learns where). */
 enum { PP_RIDE = 0x2000 };
-#define PP_X(wp, i) ((wp)[2 * (i)] & ~(PP_HOLD | PP_RIDE))
+/* PP_LANE (planner kLaneEnd): the far end of a world 4 platform lane
+ * (docs/mechanics.md 7). Held toward it from the near end, P1 boards the
+ * platform when it waits there, rides it (back and forth) and steps off
+ * when it waits by the far end: press only that way, by the lane and on
+ * the platform, never the other axis. */
+enum { PP_LANE = 0x1000 };
+#define PP_X(wp, i) ((wp)[2 * (i)] & ~(PP_HOLD | PP_RIDE | PP_LANE))
 
 /* P1 on a spring pad ($4C at its cell): a $0801 lock there is the pad's,
  * not a death (docs/mechanics.md 5). */
@@ -55,7 +61,10 @@ static inline uint16_t path_pad_w(const uint8_t *wram, const int16_t *wp, int n,
     while (!air && *at < n && abs(PP_X(wp, *at) - x) <= 1 && abs(wp[2 * *at + 1] - y) <= 1) (*at)++;
     if (*at >= n) return 0;
     /* (a jump pad object's throw sets the bit too, but locks P1: not a ride) */
-    if ((wram[0x8003] & 0x80) && !(wram[0x8052] & 1)) {
+    /* (and just off one: the bit is still set on the far end's cell, 4-2:
+     * stood on (16,9) for 4000 frames, the path read as over) */
+    int lane = (wp[2 * *at] & PP_LANE) != 0 || (*at > 0 && (wp[2 * (*at - 1)] & PP_LANE));
+    if ((wram[0x8003] & 0x80) && !(wram[0x8052] & 1) && !lane) {
         int k = *at;
         while (k < n && !(wp[2 * k] & PP_RIDE)) k++;
         *at = k;
@@ -72,6 +81,11 @@ static inline uint16_t path_pad_w(const uint8_t *wram, const int16_t *wp, int n,
     if (held)
         while (*at + 1 < n && PP_X(wp, *at) / 16 == x / 16 && wp[2 * *at + 1] / 16 == y / 16) (*at)++;
     int dx = PP_X(wp, *at) - x, dy = wp[2 * *at + 1] - y;
+    if (lane && (abs(dx) <= 4 || abs(dy) <= 4)) {
+        if (mem) mem[1] = 0, mem[2] = -1;
+        if (abs(dx) > abs(dy)) return dx > 0 ? PP_RIGHT : PP_LEFT;
+        return dy > 0 ? PP_DOWN : PP_UP;
+    }
     if (mem) {  /* mem: best distance, frames since it got better, waypoint index */
         int d = abs(dx) + abs(dy);
         /* (held, no progress is no sign of being stuck: the other axis

@@ -1676,3 +1676,19 @@ TEST("agent: every spot for a push undoes a done panel: push anyway") {
   CHECK(a.committed());
   CHECK(a.what().find("push 4,4") != std::string::npos);
 }
+
+// 5-6 played on from 5-5 (a world 5 run): the gate (9,3) is open over the
+// hole (9,4); the plan pushes (11,4) in from (13,4), a soft block bombed
+// from (12,4), and that blast reaches the fire-up at (12,5). The way had no
+// move: 17000 frames in survive, the timer. Pick the item up first.
+TEST("agent: the way's bomb would burn a wanted item: pick it up first") {
+  World w;
+  std::string err;
+  CHECK(loadWorld(sbm2test::worldsDir + "/5-6_way_item.txt", w, &err));
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 2; };
+  Agent a = agentFor("powerups+exit");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.committed());
+  CHECK(a.what().find("walk to (12,5)") != std::string::npos);
+}

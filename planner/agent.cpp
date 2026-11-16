@@ -1085,6 +1085,24 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
         bombCands(set[i] % w.cols, set[i] / w.cols, Cand::Change, tname + " (parity)", 6, cs, ambient());
       undoPanels = false;
     };
+    // The blast of a bomb at (xc,xr) would burn a wanted item P1 can walk
+    // to: pick it up first (5-5 played on from 5-4: the open-way push from
+    // (7,10) burnt the fire-up at (3,10), the plan had no step for it; 22000
+    // frames in survive, the timer ran out. 5-6 played on: the way to the
+    // push of (11,4) bombs (13,4) from (12,4), over the fire-up at (12,5)).
+    auto itemFirst = [&](int xc, int xr, std::vector<Cand>& cs) {
+      if (dist[size_t(g.idx(xc, xr))] < 0 || !canPlaceOn(w.at(xc, xr)) || w.bombAt(xc, xr)) return;
+      for (const Cell& x : blastCells(w, xc, xr, w.p.fire, w.p.pierce)) {
+        if (x.c == xc && x.r == xr) continue;
+        bool item = false;
+        for (const Item& it : w.items)
+          item |= it.c == x.c && it.r == x.r && (wantedItem(it.kind) || gloveWanted(it.kind, w));
+        if (item && dist[size_t(g.idx(x.c, x.r))] >= 0) {
+          cs.push_back(walkCand(x.c, x.r, Cand::Change, tname + " (item in the blast)"));
+          return;
+        }
+      }
+    };
     std::vector<Cand> cs;
     // Where the task is done from; if a soft block is in the way, bomb the
     // first one on the route instead.
@@ -1101,7 +1119,7 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
       std::vector<int> tried;
       std::set<int> bad = badSoftNow();
       std::set<std::pair<int, int>> badIn;
-      int lastK = -1;
+      int lastK = -1, firstX = -1;  // (the first route's bomb cell)
       for (int pass = 0; pass < 6 && cs.empty(); pass++) {
         auto route = g.softRoute(sc, sr, bad, badIn);
         size_t i = 1;
@@ -1109,6 +1127,7 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
         if (i >= route.size()) break;
         int k = route[i], kc = k % w.cols, kr = k / w.cols;
         std::vector<std::pair<int, int>> xs{{-1, route[i - 1]}};
+        if (firstX < 0) firstX = route[i - 1];
         for (int x = 0; x < w.cols * w.rows; x++)
           if (x != route[i - 1] && dist[size_t(x)] >= 0 && covers(w, x % w.cols, x / w.cols, kc, kr))
             xs.push_back({dist[size_t(x)], x});
@@ -1141,6 +1160,7 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
       // (28,10), which only a bomb on the panel itself breaks; every spot in
       // column 29 also undoes (29,8) and (29,6). 15000 frames, the timer.)
       if (cs.empty() && task.kind == TaskKind::TogglePanel) parity(cs);
+      if (cs.empty() && firstX >= 0) itemFirst(firstX % w.cols, firstX / w.cols, cs);
       if (!cs.empty() && tryCands(cs, live, o, 8)) return;
       for (int x : tried) {
         if (frame_ - bombFailAt_[x] >= 2 * kBadSoftTTL) bombFails_[x] = 0;  // (worn off: count afresh)
@@ -1167,21 +1187,7 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
       case TaskKind::PressButton:
       case TaskKind::SpawnPlatform:
         bombCands(sc, sr, Cand::Change, tname, 6, cs, ambient());
-        // The blast would burn a wanted item P1 can walk to: pick it up
-        // first (5-5 played on from 5-4: the open-way push from (7,10) burnt
-        // the fire-up at (3,10), the plan had no step for it; 22000 frames
-        // in survive, the timer ran out).
-        if (cs.empty() && dist[size_t(g.idx(sc, sr))] >= 0 && canPlaceOn(w.at(sc, sr)) && !w.bombAt(sc, sr))
-          for (const Cell& x : blastCells(w, sc, sr, w.p.fire, w.p.pierce)) {
-            if (x.c == sc && x.r == sr) continue;
-            bool item = false;
-            for (const Item& it : w.items)
-              item |= it.c == x.c && it.r == x.r && (wantedItem(it.kind) || gloveWanted(it.kind, w));
-            if (item && dist[size_t(g.idx(x.c, x.r))] >= 0) {
-              cs.push_back(walkCand(x.c, x.r, Cand::Change, tname + " (item in the blast)"));
-              break;
-            }
-          }
+        if (cs.empty()) itemFirst(sc, sr, cs);
         if (cs.empty() && task.kind == TaskKind::TogglePanel) parity(cs);
         // Every spot for it undoes a done mode 1 panel: so be it, the plan
         // lights it again (5-5 played on with fire 6: the push of (4,4) into

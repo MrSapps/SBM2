@@ -30,7 +30,8 @@ int baseCost(TaskKind k) {
     case TaskKind::LightCrystal:
     case TaskKind::PushBlock:
     case TaskKind::PressButton:
-    case TaskKind::SpawnPlatform: return kBombCost;
+    case TaskKind::SpawnPlatform:
+    case TaskKind::FlipSwitch: return kBombCost;
     default: return 0;
   }
 }
@@ -58,12 +59,13 @@ class Search {
  public:
   Search(const World& w, const Goal& goal, const PlanOptions& o) : w_(w), goal_(goal), o_(o) {
     tasks_ = worldTasks(w);
+    switchRight_ = switchFlip(w) == 0;
     softAt_.assign(size_t(w.cols * w.rows), -1);
     staticAt_.assign(size_t(w.cols * w.rows), {});
     for (size_t i = 0; i < tasks_.size(); i++) {
       const Task& t = tasks_[i];
       if (t.kind == TaskKind::BombSoft || t.kind == TaskKind::TogglePanel || t.kind == TaskKind::LightCrystal ||
-          t.kind == TaskKind::PressButton || t.kind == TaskKind::SpawnPlatform)
+          t.kind == TaskKind::PressButton || t.kind == TaskKind::SpawnPlatform || t.kind == TaskKind::FlipSwitch)
         staticAt_[size_t(t.r * w.cols + t.c)].push_back(int(i));
       if (t.kind == TaskKind::PushBlock) blockCell_.push_back(t.r * w.cols + t.c), blockTask_.push_back(int(i));
       if (t.kind == TaskKind::PressButton) buttons_.push_back(int(i));
@@ -197,6 +199,9 @@ class Search {
       case TaskKind::PushBlock:
       case TaskKind::PressButton:
       case TaskKind::SpawnPlatform: return false;  // (enablers: done when they open the way)
+      // (5-1, seed 2: three $8A, fast chasers with the light off, 2 HP each,
+      // boxed P1 into column 14 till the timer; flipped, they wander at 0.5)
+      case TaskKind::FlipSwitch: return goal_.powerups && t.powerup;
       case TaskKind::LightCrystal:
         // KillAllType8F: crystals are the only way to kill $8F enemies.
         for (size_t i = 0; i < tasks_.size(); i++)
@@ -448,6 +453,7 @@ class Search {
         char x = cls(n, cc, rr);
         if (w_.hasGate && cc == w_.gateC && rr == w_.gateR) h.gate = true;
         if (donePanel_.count(cellIdx(cc, rr))) h.cost += kBurnCost;  // (toggled back: todo again, unplanned)
+        if (switchRight_ && w_.lightSwitch && cc == w_.lightSwitch->first && rr == w_.lightSwitch->second) h.cost += kBurnCost;
         for (int t : staticAt_[size_t(cellIdx(cc, rr))])  // (one the plan has lit: the same; 5-2: (27,3) lit
           if (n.done[size_t(t)] && tasks_[size_t(t)].kind == TaskKind::TogglePanel && tasks_[size_t(t)].ref >= 0 &&
               w_.panels[size_t(tasks_[size_t(t)].ref)].mode == 1 && required(n, tasks_[size_t(t)]))  // (26,3), (28,3) by turns)
@@ -490,7 +496,7 @@ class Search {
         int cc = c + dd[0] * k, rr = r + dd[1] * k;
         if (!w_.inside(cc, rr)) break;
         char x = solidCls(n, cc, rr);
-        if (breakable(x) || x == 'y' || x == 'P' || x == 'v' || x == 'a') mark(cc, rr);
+        if (breakable(x) || x == 'y' || x == 'P' || x == 'v' || x == 'a' || x == 's') mark(cc, rr);
         if (x == 'X' || x == 'x') {  // pushed the blast's way (into a hole)
           int b = blockOn(n, cellIdx(cc, rr));
           if (b >= 0 && b != skipBlock && canPush(n, size_t(b))) {
@@ -654,6 +660,7 @@ class Search {
   std::vector<int> buttons_, spawners_;
   std::vector<std::vector<int>> staticAt_;  // static bomb tasks per cell
   bool hasPanels_ = false;
+  bool switchRight_ = false;  // (the light switch is as wanted: a flame on it undoes that)
   std::vector<Node> nodes_;
 };
 }  // namespace
@@ -670,6 +677,7 @@ const char* taskName(TaskKind k) {
     case TaskKind::PushBlock: return "push";
     case TaskKind::PressButton: return "button";
     case TaskKind::SpawnPlatform: return "spawner";
+    case TaskKind::FlipSwitch: return "switch";
   }
   return "?";
 }
@@ -771,20 +779,50 @@ bool rideableAt(const World& w, int c, int r) {
 
 bool rideDock(const World& w, int c, int r) {
   // Rides boardable now (an object on their cell), then those boardable
-  // where one of those docks (taking it brings the object there), ...
-  std::vector<uint8_t> ok(w.rides.size(), 0);
-  for (bool more = true; more;) {
-    more = false;
-    for (size_t i = 0; i < w.rides.size(); i++) {
-      if (ok[i]) continue;
-      const Ride& a = w.rides[i];
-      bool b = rideableAt(w, a.c, a.r);
-      for (size_t j = 0; j < w.rides.size() && !b; j++) b = ok[j] && w.rides[j].dc == a.c && w.rides[j].dr == a.r;
-      if (b) ok[i] = 1, more = true;
+  // where one of those docks (taking it brings the object there), ... Only
+  // rides P1 can get to count: walking, and by the rides counted so far
+  // (3-5, seed 0: the sub for (12,10) up to (10,3) sat docked at (10,4);
+  // the chain "ride it down first" counted it, but P1 was below with no
+  // way up: 20000 frames on a plan through it, the timer ran out).
+  // (kept for the same map, P1 cell, objects and rides: jumps() asks per cell)
+  uint64_t h = 1469598103934665603ull;
+  auto mix = [&](uint64_t v) { h = (h ^ v) * 1099511628211ull; };
+  for (char x : w.map) mix(uint8_t(x));
+  mix(uint64_t(w.p.col()) << 16 | uint64_t(w.p.row()));
+  for (const Enemy& e : w.enemies)
+    if (isRideable(e.type)) mix(uint64_t(e.col()) << 16 | uint64_t(e.row()));
+  for (const Ride& rd : w.rides) mix(uint64_t(rd.c) << 48 | uint64_t(rd.r) << 32 | uint64_t(rd.dc + 1) << 16 | uint64_t(rd.dr + 1));
+  static uint64_t memoKey = 0;
+  static std::vector<uint8_t> memoOk;
+  if (h != memoKey) {
+    std::vector<uint8_t> ok(w.rides.size(), 0), reach(size_t(w.cols * w.rows), 0);
+    std::vector<int> q;
+    auto add = [&](int cc, int rr) {
+      if (w.inside(cc, rr) && !reach[size_t(rr * w.cols + cc)]) reach[size_t(rr * w.cols + cc)] = 1, q.push_back(rr * w.cols + cc);
+    };
+    add(w.p.col(), w.p.row());
+    for (bool more = true; more;) {
+      more = false;
+      for (size_t i = 0; i < q.size(); i++)
+        for (auto& d : kDirs) {
+          int cc = q[i] % w.cols + d[0], rr = q[i] / w.cols + d[1];
+          if (w.inside(cc, rr) && walkableClass(w.at(cc, rr)) && !w.bombAt(cc, rr)) add(cc, rr);
+        }
+      for (size_t i = 0; i < w.rides.size(); i++) {
+        if (ok[i]) continue;
+        const Ride& a = w.rides[i];
+        bool at = reach[size_t(a.r * w.cols + a.c)] != 0;
+        for (auto& d : kDirs) at |= w.inside(a.c + d[0], a.r + d[1]) && reach[size_t((a.r + d[1]) * w.cols + a.c + d[0])];
+        if (!at) continue;
+        bool b = rideableAt(w, a.c, a.r);
+        for (size_t j = 0; j < w.rides.size() && !b; j++) b = ok[j] && w.rides[j].dc == a.c && w.rides[j].dr == a.r;
+        if (b) ok[i] = 1, more = true, add(a.tc, a.tr);
+      }
     }
+    memoKey = h, memoOk = ok;
   }
   for (size_t j = 0; j < w.rides.size(); j++)
-    if (ok[j] && w.rides[j].dc == c && w.rides[j].dr == r) return true;
+    if (memoOk[j] && w.rides[j].dc == c && w.rides[j].dr == r) return true;
   return false;
 }
 
@@ -847,6 +885,21 @@ bool jumpHeld(const World& w, int c, int r, int lc, int lr) {
 bool throwOnly(const BossObj& b) { return b.state == 0xCCD139 || b.state == 0xCCD2E7; }
 
 bool canPlaceOn(char c) { return walkableClass(c) && std::string("Py^sbgvnkC").find(c) == std::string::npos; }
+
+int switchFlip(const World& w) {
+  if (!w.lightSwitch || w.light == "none") return -1;
+  int n8A = 0, n97 = 0;
+  for (const Enemy& e : w.enemies) {
+    if (e.hp <= 0) continue;
+    n8A += e.type == 0x8A, n97 += e.type == 0x97;
+  }
+  if (n8A + n97 == 0) return -1;
+  bool odd = w.light == "on";
+  for (const Bomb& b : w.bombs)  // (a bomb out over it flips it once more)
+    for (const Cell& x : blastCells(w, b.c, b.r, b.range, b.pierce))
+      if (x.c == w.lightSwitch->first && x.r == w.lightSwitch->second) odd = !odd;
+  return odd != (n8A >= n97);
+}
 
 bool walkableClass(char c) { return std::string(".i^Pyspf=ktTcCg*vnL").find(c) != std::string::npos; }
 
@@ -930,6 +983,8 @@ std::vector<Task> worldTasks(const World& w) {
       if (x == 'a') out.push_back({TaskKind::SpawnPlatform, c, r, -1, false, false});
       if (x == 'X' || x == 'x') out.push_back({TaskKind::PushBlock, c, r, -1, false, false});  // (the planner pushes it)
     }
+  // (wanted as a power-up is: worth a detour, never a reason the plan fails)
+  if (switchFlip(w) == 1) out.push_back({TaskKind::FlipSwitch, w.lightSwitch->first, w.lightSwitch->second, -1, false, false, true});
   std::vector<uint8_t> pd = panelsDone(w);
   for (size_t i = 0; i < w.panels.size(); i++)
     if (!pd[i]) out.push_back({TaskKind::TogglePanel, w.panels[i].c, w.panels[i].r, int(i), false, false});
@@ -1182,7 +1237,8 @@ Plan plan(const World& w, const Goal& g, const PlanOptions& o) {
   for (const Task& t : p.tasks) {
     bool want = t.kind == TaskKind::TogglePanel || t.kind == TaskKind::EnterGate || t.kind == TaskKind::LightCrystal ||
                 t.kind == TaskKind::HurtBoss || (t.kind == TaskKind::KillEnemy && (g.enemies || t.blocksExit)) ||
-                (t.kind == TaskKind::PickItem && (g.items || (g.powerups && t.powerup)));
+                (t.kind == TaskKind::PickItem && (g.items || (g.powerups && t.powerup))) ||
+                (t.kind == TaskKind::FlipSwitch && g.powerups);
     if (!want || !w.inside(t.c, t.r)) continue;
     std::vector<int> cells{t.r * w.cols + t.c};
     for (auto& d : kDirs)

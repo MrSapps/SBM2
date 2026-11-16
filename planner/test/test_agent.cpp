@@ -967,13 +967,13 @@ TEST("agent: rides: probe an unknown one, then use it") {
   CHECK(rode);
 }
 
-// Back by a ride's dock (no sub there yet: the one P1 came on docks there):
-// the landing waypoint says where the ride lets P1 off.
+// Back by a ride's dock (the sub P1 came on sits there): the landing
+// waypoint says where the ride lets P1 off.
 TEST("agent: rides: a dock's ride is flagged too") {
   World w = mk({"###########",
                 "#i..^#^...#",
                 "###########"}, 8, 1,
-               "enemy slot=5 type=DA x=" + std::to_string(4 * 16 + 8) + " y=" + std::to_string(1 * 16 + 8) +
+               "enemy slot=5 type=DA x=" + std::to_string(6 * 16 + 8) + " y=" + std::to_string(1 * 16 + 8) +
                    "\nride 4 1 8 1 dock_c=6 dock_r=1\nride 6 1 2 1 dock_c=4 dock_r=1\nitem 1 1 item kind=2");
   FakeOracle o;
   o.answer = [](const SimReq& q, SimOut& r) {
@@ -1728,4 +1728,98 @@ TEST("agent: a panel whose every spot undoes others, more panels out of reach: p
   a.decide(w, liveOf(w), o);
   CHECK(a.committed());
   CHECK(a.what().find("(parity)") != std::string::npos);
+}
+
+// 2-2 (seed 1): a way's own blast still burning when its commit ended; a
+// 60-frame survive let the gap it opened at (3,11) grow back (regrow in=81)
+// before P1 got there, and that looped till the timer. With flames out,
+// survive plays a short slice and looks again.
+TEST("agent: flames in the way: survive briefly, then look again") {
+  World w;
+  std::string err;
+  CHECK(loadWorld(sbm2test::worldsDir + "/2-2_flame_wait.txt", w, &err));
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; };
+  Agent a = agentFor("powerups+exit");
+  a.decide(w, liveOf(w), o);
+  std::string lg = a.takeLog();
+  CHECK(lg.find("survive (way to panel 3,10)") != std::string::npos);
+  CHECK(a.what() == "survive" && a.pending() <= 12);
+}
+
+// 2-4 (seed 0, after the flame fix): a trap's cover at (3,9), in the
+// column-3 pocket whose ways out, (3,7) and (4,8), are gaps that grow back.
+// They did, and with fire 4 every bomb there reached the whole pocket: P1
+// sat sealed in till the timer. Covers regrowth can seal in go last: here
+// (5,2) is the nearest cover for the bomb on (7,3), but once the gap (5,3)
+// grows back P1 can't bomb out of (5,1)-(5,2).
+TEST("agent: no cover in a pocket regrowth can seal") {
+  World w = mk({"#########",
+                "#####.###",
+                "#####.###",
+                "#......%#",
+                "#########"}, 1, 3, "regrow in=2000 cells=5,3");
+  w.p.fire = 1;  // (the bomb goes on (6,3); covers (5,2) and (4,3) are 2 steps)
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapChanged = true; };
+  Agent a = agentFor("blocks");
+  a.decide(w, liveOf(w), o);
+  a.takeLog();
+  CHECK(!o.seen.empty() && o.seen[0].path2.size() >= 2);
+  int bc, br, yc, yr;
+  bombAndCover(o.seen[0], bc, br, yc, yr);
+  CHECK(!(yc == 5 && yr <= 2));
+}
+
+// 3-5 (seed 0): the sub for the way back sat docked at the far end, where
+// only a ride from there brings it over. P1 had no way there, but "ride it
+// over first" counted it: 20000 frames on a plan through it, the timer ran
+// out. A ride counts only if P1 can get to it (then an unknown ride is
+// probed: the sub P1 came on).
+TEST("agent: rides: a sub docked out of reach is no way back") {
+  World w = mk({"###########",
+                "#i..^#^...#",
+                "###########"}, 8, 1,
+               "enemy slot=5 type=DA x=" + std::to_string(4 * 16 + 8) + " y=" + std::to_string(1 * 16 + 8) +
+                   "\nride 4 1 8 1 dock_c=6 dock_r=1\nride 6 1 2 1 dock_c=4 dock_r=1\nitem 1 1 item kind=2");
+  CHECK(!rideDock(w, 6, 1));
+  World l = w;  // (P1 on the sub's side: ride it over, then back from the dock)
+  l.p.x = 2 * 16 + 8;
+  CHECK(rideDock(l, 6, 1));
+}
+
+// 3-5 (seed 0), live: below with the way-back sub docked up top, the sub P1
+// came down on is probed for where it goes.
+TEST("agent: rides: the sub P1 came on is probed for the way back") {
+  World w;
+  std::string err;
+  CHECK(loadWorld(sbm2test::worldsDir + "/3-5_sub_back.txt", w, &err));
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; };
+  Agent a = agentFor("powerups+exit");
+  a.decide(w, liveOf(w), o);
+  a.takeLog();
+  bool probed = false;
+  for (const SimReq& q : o.seen)
+    if (q.path.size() >= 2 && (q.path[q.path.size() - 2] & ~kWpFlags) == 18 * 16 + 8 && q.path.back() == 10 * 16 + 8) probed = true;
+  CHECK(probed);
+}
+
+// 4-4 (seed 2): a move ended with P1 on a platform out over its lane
+// ((4,10), between the ends (2,10) and (5,10)). The step off to (5,10) was a
+// plain step, and riding nothing was pressed: P1 shuttled 18000 frames. It
+// is a lane step: held toward the end, P1 steps off when the platform waits.
+TEST("agent: on a platform mid-lane, the step off is a lane step") {
+  World w;
+  std::string err;
+  CHECK(loadWorld(sbm2test::worldsDir + "/4-4_on_lane.txt", w, &err));
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; };
+  Agent a = agentFor("powerups+exit");
+  a.decide(w, liveOf(w), o);
+  a.takeLog();
+  CHECK(!o.seen.empty() && o.seen[0].path.size() >= 4);
+  const SimReq& q = o.seen[0];
+  CHECK((q.path[2] & ~kWpFlags) == 5 * 16 + 8 && q.path[3] == 10 * 16 + 8);
+  CHECK((q.path[2] & kLaneEnd) != 0);
 }

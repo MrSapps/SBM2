@@ -870,3 +870,30 @@ TEST("goap: a hidden glove is fetched before the exit in 5-7 only") {
   CHECK(tasksOf(run(o, "powerups+exit")).find("item 3,1") == std::string::npos);
 }
 
+
+// World 5's light switch: while it makes most of the live $8A/$97 fast
+// chasers, a flame on it is worth a detour (5-1, seed 2: three fast $8A,
+// 2 HP each, boxed P1 into column 14 till the timer). Right as it is, it is
+// left alone; with none of them about, it is nothing.
+TEST("goap: the light switch is flipped while it makes the $8A fast") {
+  const std::string e8A = "enemy type=8A x=104 y=24 hp=2\n";
+  World w = mk({"#########",
+                "#.......#",
+                "#.#.#.#.#",
+                "#..s#..g#",
+                "#########"}, 1, 1, "gate 7 3 open\nlight off\nswitch 3 3\n" + e8A);
+  CHECK_EQ(switchFlip(w), 1);
+  Plan p = run(w, "powerups+exit");
+  CHECK(p.ok);
+  CHECK(tasksOf(p).find("switch 3,3") != std::string::npos);
+  World on = w;
+  on.light = "on";  // (odd: the $8A wander)
+  CHECK_EQ(switchFlip(on), 0);
+  CHECK(tasksOf(run(on, "powerups+exit")).find("switch") == std::string::npos);
+  World v = w;  // (a $97 is the other way round)
+  v.enemies[0].type = 0x97;
+  CHECK_EQ(switchFlip(v), 0);
+  World none = w;
+  none.enemies.clear();
+  CHECK_EQ(switchFlip(none), -1);
+}

@@ -184,8 +184,9 @@ def run(a):
     for sc in scs:
         if a.budget:
             sc['budget'] = a.budget
-    if a.seeds > 1:
-        scs = [dict(sc, seed=str(k), name=f'{sc["name"]}/s{k}') for sc in scs for k in range(a.seeds)]
+    if a.seeds > 1 or a.seed_from:
+        scs = [dict(sc, seed=str(k), name=f'{sc["name"]}/s{k}') for sc in scs
+               for k in range(a.seed_from, a.seed_from + a.seeds)]
     fails = 0
     with concurrent.futures.ThreadPoolExecutor(a.jobs) as ex:
         for name, ok, why, dt, out in ex.map(lambda s: run_one(s, a.verbose), scs):
@@ -207,7 +208,8 @@ def main():
     r.add_argument('names', nargs='*'); r.add_argument('-j', '--jobs', type=int, default=8)
     r.add_argument('-v', '--verbose', action='store_true')
     r.add_argument('-b', '--budget', help='override every scenario\'s budget (frames)')
-    r.add_argument('-s', '--seeds', type=int, default=1, help='run each scenario with seeds 0..N-1')
+    r.add_argument('-s', '--seeds', type=int, default=1, help='run each scenario with seeds 0..N-1 (from --seed-from)')
+    r.add_argument('--seed-from', type=int, default=0, help='first seed for -s')
     a = ap.parse_args()
     make(a) if a.cmd == 'make' else run(a)
 

@@ -153,6 +153,11 @@ struct Grid {
       bool ride = p >= 0 && (rideableAt(w, p % w.cols, p / w.cols) || rideDock(w, p % w.cols, p / w.cols));
       bool lane = p >= 0 && w.at(p % w.cols, p / w.cols) == 'L' &&
                   std::abs(k % w.cols - p % w.cols) + std::abs(k / w.cols - p / w.cols) > 1;
+      // (P1 starts on a platform out over its lane: the step off is a lane
+      // step too, held toward the end; as a plain step, riding, nothing was
+      // pressed. 4-4, seed 2: a kill's move ended on the platform; it shuttled
+      // P1 between (3,10) and (4,10) for 18000 frames, the timer ran out.)
+      lane |= i == 1 && w.p.ride && !walkableClass(w.at(p % w.cols, p / w.cols)) && w.at(k % w.cols, k / w.cols) == 'L';
       wp.push_back(int16_t(((k % w.cols) * 16 + 8) | (hold ? kJumpHold : 0) | (ride ? kRideEnd : 0) | (lane ? kLaneEnd : 0)));
       wp.push_back(int16_t((k / w.cols) * 16 + 8));
     }
@@ -618,6 +623,50 @@ bool Agent::tryCands(std::vector<Cand>& cs, const Live& live, Oracle& o, size_t 
 
 // Nothing for the task lives (or there is no task): move to a cell nearby
 // that lives, else the one that lives longest; play a little, decide again.
+// Regrowth can seal P1 in (World::regrowCells, docs/mechanics.md 9b): with
+// every empty listed gap grown back, is cell k in a pocket P1 can't bomb
+// its way out of (no spot whose blast breaks a block with a cell of the
+// pocket out of that blast)? 2-4, seed 0: a trap's cover in the column-3
+// pocket, (3,7) and (4,8) grew back, and with fire 4 every bomb there
+// reached the whole pocket: 20000 frames to the timer.
+// `sealed`: w with those gaps as blocks (sealedView).
+static World sealedView(const World& w) {
+  World s = w;
+  for (const auto& [c, r] : w.regrowCells)
+    if (s.inside(c, r) && s.at(c, r) == '.') s.map[size_t(r * s.cols + c)] = '%';
+  return s;
+}
+static bool sealedIn(const World& sealed, int k) {
+  const int kBig = 40;  // (a pocket this big has a way out)
+  std::vector<int> region{k};
+  std::vector<uint8_t> seen(size_t(sealed.cols * sealed.rows), 0);
+  seen[size_t(k)] = 1;
+  for (size_t h = 0; h < region.size() && region.size() < size_t(kBig); h++)
+    for (auto& d : kDirs) {
+      int c = region[h] % sealed.cols + d[0], r = region[h] / sealed.cols + d[1];
+      if (!sealed.inside(c, r)) continue;
+      int x = r * sealed.cols + c;
+      if (seen[size_t(x)] || !walkableClass(sealed.at(c, r)) || sealed.bombAt(c, r)) continue;
+      seen[size_t(x)] = 1;
+      region.push_back(x);
+    }
+  if (region.size() >= size_t(kBig)) return false;
+  for (int sp : region) {
+    int sc = sp % sealed.cols, sr = sp / sealed.cols;
+    if (!canPlaceOn(sealed.at(sc, sr))) continue;
+    std::vector<uint8_t> in(seen.size(), 0);
+    bool breaks = false;
+    for (const Cell& x : blastCells(sealed, sc, sr, sealed.p.fire, sealed.p.pierce)) {
+      in[size_t(x.r * sealed.cols + x.c)] = 1;
+      breaks |= breakable(sealed.at(x.c, x.r));
+    }
+    if (!breaks) continue;
+    for (int y : region)
+      if (!in[size_t(y)]) return false;
+  }
+  return true;
+}
+
 void Agent::survive(const World& w, const Live& live, Oracle& o, const char* why) {
   if (deferSurvive_ && std::string(why).rfind("traps out", 0) != 0) {  // (a trap wait is a move)
     deferWhy_ = why;
@@ -697,6 +746,12 @@ void Agent::survive(const World& w, const Live& live, Oracle& o, const char* why
   // (a run that lived: play all but its last tail_ frames, at most 60)
   int n = bestDead == INT_MAX ? std::clamp(int(keep[size_t(best)].pads.size()) - tail_, 24, 60)
                               : std::max(1, std::min(8, bestDead / 2));
+  // Flames out: they may be all that is in the way, and they die down soon:
+  // look again then (2-2: a way's own blast still burning when its commit
+  // ended; 60 frames of survive and the gap it opened grew back first).
+  bool flames = false;
+  for (int x = 0; x < w.cols * w.rows && !flames; x++) flames = w.at(x % w.cols, x / w.cols) == '*';
+  if (flames && bestDead == INT_MAX) n = std::min(n, 12);
   pads_.resize(std::min(pads_.size(), size_t(n)));
   trace_.resize(pads_.size() * 2);
   at_ = 0;
@@ -943,8 +998,10 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
     std::vector<uint8_t> panelsNow = panelsDone(w);
     bool undoPanels = false;  // (no other way out: undo one, the plan redoes it)
     bool gateHit = false;     // (no other way to the gate: bring enemies back, kill them again)
+    const bool switchRight = switchFlip(w) == 0;  // (a flame on it would make the $8A/$97 fast again)
     auto spoils = [&](int xc, int xr) {
       for (const Cell& x : blastCells(w, xc, xr, w.p.fire, w.p.pierce)) {
+        if (switchRight && !undoPanels && x.c == w.lightSwitch->first && x.r == w.lightSwitch->second) return true;
         if (!gateHit && w.hasGate && x.c == w.gateC && x.r == w.gateR) return true;
         for (size_t i = 0; i < w.panels.size(); i++)  // (a done mode 1 panel: undone)
           if (!undoPanels && w.panels[i].mode == 1 && panelsNow[i] && w.panels[i].c == x.c && w.panels[i].r == x.r) return true;
@@ -978,6 +1035,7 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
       }
       return false;
     };
+    const World sealedW = w.regrowCells.empty() ? World() : sealedView(w);
     auto bombCands = [&](int xc, int xr, Cand::Want want, const std::string& what, int maxY, std::vector<Cand>& out,
                          const Risk& risk = nullptr, int waitPre = 0) {
       if (dist[size_t(g.idx(xc, xr))] < 0 || !canPlaceOn(w.at(xc, xr)) || w.bombAt(xc, xr) || spoils(xc, xr)) return;
@@ -1003,6 +1061,7 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
         if (dm.deadly(yc, yr, t2, t1 + kNewFuse + kFlameFrames + kTail)) continue;
         int key = d2[size_t(k)];
         if (gapCut(p1, waitPre, g.pathTo(prev2, xc, xr, yc, yr), tx)) key += 1000;
+        if (!w.regrowCells.empty() && sealedIn(sealedW, k)) key += 1000;
         if (risk) {
           // (P1 there from about tx + its walk until the commit's tail)
           int ty = tx + int(fpc_ * d2[size_t(k)]);
@@ -1188,6 +1247,7 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
       case TaskKind::PushBlock:
       case TaskKind::PressButton:
       case TaskKind::SpawnPlatform:
+      case TaskKind::FlipSwitch:
         bombCands(sc, sr, Cand::Change, tname, 6, cs, ambient());
         if (cs.empty()) itemFirst(sc, sr, cs);
         if (cs.empty() && task.kind == TaskKind::TogglePanel) parity(cs);

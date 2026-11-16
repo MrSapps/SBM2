@@ -20,6 +20,17 @@ local VERBOSE = (os.getenv("SBM2_AGVERBOSE") or "0") ~= "0"
 -- SBM2_STOPAT=XX: stop on entering stage XX (hex); else with STOPEARLY on
 -- entering the next one.
 local STOPAT = tonumber(os.getenv("SBM2_STOPAT") or "", 16)
+-- SBM2_SEED=N (N > 0; scenario.py -s): idle 0..63 frames (picked from N and
+-- the stage) at each stage start before the agent plays. The game's RNG
+-- runs every frame, so enemies choose differently: other playthroughs of
+-- the same stages, to tell luck from skill. 0 = no wait.
+local SEED = tonumber(os.getenv("SBM2_SEED") or "0") or 0
+local function seedWait(st)
+  if SEED <= 0 then return 0 end
+  local h = (SEED * 2654435761 + st * 40503) & 0xFFFFFFFF
+  h = ((h ~ (h >> 15)) * 2246822519) & 0xFFFFFFFF
+  return (h >> 13) % 64
+end
 
 local function r16(a) return emu.read16(a, WRAM, false) end
 local function s16(v) return v >= 0x8000 and v - 0x10000 or v end
@@ -64,6 +75,7 @@ end
 
 local frame, loaded, stage, deadAt, lockAt = FRAME0, LOAD == nil, nil, nil, nil
 local deaths = 0
+local holdUntil = 0
 local T0 = emu.now()
 if loaded then inputlog.start(nil) end
 
@@ -96,6 +108,8 @@ emu.addEventCallback(function()
     end
     stage = st
     log(string.format("%6d STAGE %02X hearts %02X", frame, st, emu.read(0x80EF, WRAM, false)))
+    local w = seedWait(st)
+    if w > 0 then holdUntil = frame + w; log(string.format("%6d SEED %d wait %d", frame, SEED, w)) end
   end
   -- A death: P1 locked as C0:A675 leaves it ($52 & $F809 == $0801), not
   -- on the exit, and still locked 90 frames on: a spring pad, a jump pad's
@@ -120,6 +134,12 @@ emu.addEventCallback(function()
     deadAt = nil
   end
   Boss.frame()
+  if frame < holdUntil then
+    emu.setInput({})
+    frame = frame + 1
+    if frame >= FRAMES then return finish(0, "budget") end
+    return
+  end
   local ok, pad, text = pcall(emu.agent, frame, GOAL, bossLines())
   if not ok then
     log(string.format("%6d agent error: %s", frame, tostring(pad)))

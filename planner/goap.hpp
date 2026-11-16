@@ -21,7 +21,8 @@ namespace sbm2 {
 
 enum class TaskKind { KillEnemy, BombSoft /* or a barrel */, TogglePanel, LightCrystal, PickItem, EnterGate, HurtBoss,
                       PushBlock /* into the hole at (c+dc, r+dr) */, PressButton,
-                      SpawnPlatform /* a flame on a $6A spawner: lanes with no platform get one */ };
+                      SpawnPlatform /* a flame on a $6A spawner: lanes with no platform get one */,
+                      FlipSwitch /* world 5's light switch: a flame on it slows the $8A/$97 */ };
 const char* taskName(TaskKind k);
 
 struct Task {
@@ -90,6 +91,12 @@ struct PlanOptions {
 };
 
 // Rules shared with the lower layers.
+// World 5's light switch ($7E5AAC bit 0, docs/mechanics.md 4; docs/
+// enemies.md $8A/$97): odd makes the $8A slow wanderers and the $97 fast
+// x-ray chasers, even the other way round. 1: a flame on it now slows more
+// of the live ones than it speeds up; 0: it is right (a flame undoes it);
+// -1: no switch, or none of them.
+int switchFlip(const World& w);
 bool walkableClass(char c);  // P1 can stand here (soft blocks excepted)
 bool canPlaceOn(char c);     // ...and drop a bomb here
 // A blast clears it: soft blocks and barrels (a barrel bursts, C1:26AA).

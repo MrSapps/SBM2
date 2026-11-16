@@ -17,6 +17,7 @@ constexpr int kFPT = 20;          // frames per cell walked (bot.lua FPT)
 constexpr int kBombCost = 40;     // place a bomb and step out of its line
 constexpr int kEnemyCost = 120;   // line up on a moving enemy
 constexpr int kSoftCross = 190;   // bomb a soft block in the way: fuse 150 + flames
+constexpr int kMaxPushes = 6;      // a block pushed down a line of floor into a hole: at most
 constexpr int kBurnCost = 3000;   // a blast burns an item the goal wants: only if nothing else does
 const int kDirs[4][2] = {{0, -1}, {0, 1}, {-1, 0}, {1, 0}};
 
@@ -45,7 +46,13 @@ struct Node {
   int g, h, parent, step;     // step: task index taken to get here (-1 root)
   int standC, standR, stepCost;
   std::vector<int> via;  // soft blocks bombed on the way (cell indices)
+  // Push blocks where they are now (cell index), or | kSunk: in the hole
+  // there (it fills it). In Search::blockCell_ order.
+  std::vector<int16_t> blk = {};
+  int pdc = 0, pdr = 0, pushes = 0;  // (a push step: Step::dc/dr/pushes)
+  bool sinks = false;
 };
+constexpr int16_t kSunk = 0x4000;
 
 class Search {
  public:
@@ -58,10 +65,7 @@ class Search {
       if (t.kind == TaskKind::BombSoft || t.kind == TaskKind::TogglePanel || t.kind == TaskKind::LightCrystal ||
           t.kind == TaskKind::PressButton || t.kind == TaskKind::SpawnPlatform)
         staticAt_[size_t(t.r * w.cols + t.c)].push_back(int(i));
-      if (t.kind == TaskKind::PushBlock) {
-        blockTasks_[t.r * w.cols + t.c].push_back(int(i));
-        holeTasks_[(t.r + t.dr) * w.cols + t.c + t.dc].push_back(int(i));
-      }
+      if (t.kind == TaskKind::PushBlock) blockCell_.push_back(t.r * w.cols + t.c), blockTask_.push_back(int(i));
       if (t.kind == TaskKind::PressButton) buttons_.push_back(int(i));
       if (t.kind == TaskKind::SpawnPlatform) spawners_.push_back(int(i));
       if (t.kind == TaskKind::BombSoft) softAt_[size_t(t.r * w.cols + t.c)] = int(i);
@@ -79,6 +83,7 @@ class Search {
     Plan out;
     out.tasks = tasks_;
     Node root{cellIdx(w_.p.col(), w_.p.row()), std::vector<uint8_t>(tasks_.size(), 0), 0, 0, -1, -1, 0, 0, 0, {}};
+    for (int k : blockCell_) root.blk.push_back(int16_t(k));
     root.h = heuristic(root);
     nodes_.push_back(root);
     auto cmp = [&](int a, int b) {
@@ -121,6 +126,7 @@ class Search {
   std::string key(const Node& n) const {
     std::string k(reinterpret_cast<const char*>(&n.at), sizeof n.at);
     k.append(n.done.begin(), n.done.end());
+    k.append(reinterpret_cast<const char*>(n.blk.data()), n.blk.size() * sizeof(int16_t));
     return k;
   }
 
@@ -215,9 +221,18 @@ class Search {
       if (n.done[size_t(i)]) return true;
     return false;
   }
-  // A push block that has left its cell; a hole a block has filled.
-  bool moved(const Node& n, int c, int r) const { return anyDone(n, blockTasks_, cellIdx(c, r)); }
-  bool filled(const Node& n, int c, int r) const { return anyDone(n, holeTasks_, cellIdx(c, r)); }
+  // The push block on cell k now (index into Node::blk), or -1; a hole a
+  // block has filled.
+  int blockOn(const Node& n, int k) const {
+    for (size_t i = 0; i < n.blk.size(); i++)
+      if (n.blk[i] == k) return int(i);
+    return -1;
+  }
+  bool filled(const Node& n, int c, int r) const {
+    for (int16_t b : n.blk)
+      if (b == (cellIdx(c, r) | kSunk)) return true;
+    return false;
+  }
   bool pressed(const Node& n) const {
     for (int i : buttons_)
       if (n.done[size_t(i)]) return true;
@@ -228,26 +243,42 @@ class Search {
       if (n.done[size_t(i)]) return true;
     return false;
   }
-  // Can a blast push it now: still there, the hole still open, and a
-  // dormant $F5 woken by the button.
-  bool pushable(const Node& n, const Task& t) const {
-    if (moved(n, t.c, t.r) || filled(n, t.c + t.dc, t.r + t.dr)) return false;
-    return w_.at(t.c, t.r) == 'X' || pressed(n);
+  // Can a blast push block b: not sunk, and a dormant $F5 woken by the
+  // button.
+  bool canPush(const Node& n, size_t b) const {
+    if (n.blk[b] & kSunk) return false;
+    return w_.map[size_t(blockCell_[b])] == 'X' || pressed(n);
+  }
+  // Where a blast going (dc,dr) leaves the block on cell k, as far as
+  // plans go: the next cell when it is an open hole (the block fills it:
+  // | kSunk); else -1. (A push onto floor is openWay()'s business.)
+  int pushTo(const Node& n, int k, int dc, int dr) const {
+    int c = k % w_.cols + dc, r = k / w_.cols + dr;
+    if (!w_.inside(c, r)) return -1;
+    if (w_.at(c, r) == 'O' && !filled(n, c, r)) return cellIdx(c, r) | kSunk;
+    return -1;
+  }
+  // Floor a block can be pushed over (PushBlockTargetOk C1:27D5: $00 with
+  // no bomb or enemy, or $D3).
+  bool floorFor(const Node& n, int c, int r) const {
+    return cls(n, c, r) == '.' && blockOn(n, cellIdx(c, r)) < 0 && !w_.bombAt(c, r) && !(w_.hasGate && c == w_.gateC && r == w_.gateR);
   }
 
   bool walkable(const Node& n, int c, int r) const {
     if (!w_.inside(c, r)) return false;
+    if (blockOn(n, cellIdx(c, r)) >= 0) return false;
     char t = w_.at(c, r);
     if (breakable(t)) {
       int s = softAt_[size_t(cellIdx(c, r))];
       return w_.p.softpass || (s >= 0 && n.done[size_t(s)]);
     }
-    if (t == 'X' || t == 'x') return moved(n, c, r);
+    if (t == 'X' || t == 'x') return true;  // (moved off: blockOn above)
     if (t == 'O') return filled(n, c, r);
     return walkableClass(t);
   }
   char cls(const Node& n, int c, int r) const {
     char t = w_.at(c, r);
+    if (int b = blockOn(n, cellIdx(c, r)); b >= 0) return w_.map[size_t(blockCell_[size_t(b)])];
     if ((breakable(t) || t == 'X' || t == 'x' || t == 'O') && walkable(n, c, r)) return '.';
     return t;
   }
@@ -301,7 +332,7 @@ class Search {
 
   // Cheapest cell to do task t from: the cell itself for items and the gate,
   // else a cell in line within bomb range with nothing stopping the blast.
-  bool standCell(const Node& n, const Routes& rt, const Task& t, int& bc, int& br, int& dist) const {
+  bool standCell(const Node& n, const Routes& rt, const Task& t, int& bc, int& br, int& dist, int pdc = 0, int pdr = 0) const {
     dist = INT_MAX;
     auto consider = [&](int c, int r) {
       int x = rt.d[size_t(cellIdx(c, r))];
@@ -318,9 +349,9 @@ class Search {
       if (w_.inside(t.c, t.r)) consider(t.c, t.r);
       return dist != INT_MAX;
     }
-    if (t.kind == TaskKind::PushBlock) {  // in line on the far side from the hole
+    if (t.kind == TaskKind::PushBlock) {  // (t.c,t.r: where it is now) in line on the far side from the hole
       for (int k = 1; k <= std::max(1, w_.p.fire); k++) {
-        int c = t.c - t.dc * k, r = t.r - t.dr * k;
+        int c = t.c - pdc * k, r = t.r - pdr * k;
         if (w_.inside(c, r) && breakable(w_.at(c, r)) && !walkable(n, c, r)) {
           consider(c, r);  // the route bombs it first, then P1 stands there
           break;
@@ -405,6 +436,10 @@ class Search {
         char x = cls(n, cc, rr);
         if (w_.hasGate && cc == w_.gateC && rr == w_.gateR) h.gate = true;
         if (donePanel_.count(cellIdx(cc, rr))) h.cost += kBurnCost;  // (toggled back: todo again, unplanned)
+        for (int t : staticAt_[size_t(cellIdx(cc, rr))])  // (one the plan has lit: the same; 5-2: (27,3) lit
+          if (n.done[size_t(t)] && tasks_[size_t(t)].kind == TaskKind::TogglePanel && tasks_[size_t(t)].ref >= 0 &&
+              w_.panels[size_t(tasks_[size_t(t)].ref)].mode == 1 && required(n, tasks_[size_t(t)]))  // (26,3), (28,3) by turns)
+            h.cost += kBurnCost;
         auto it = itemAt_.find(cellIdx(cc, rr));
         if (it != itemAt_.end() && !breakable(x)) {
           for (int i : it->second)
@@ -428,7 +463,8 @@ class Search {
   // A bomb at (c,r) also does every static task its blast reaches: soft
   // blocks, panels, crystals (blast rules as in blast.cpp). Enemies move, so
   // they count only when targeted.
-  void blastMarks(const Node& n, int c, int r, std::vector<uint8_t>& done) const {
+  void blastMarks(const Node& n, int c, int r, Node& s, int skipBlock = -1) const {
+    std::vector<uint8_t>& done = s.done;
     auto mark = [&](int cc, int rr) {
       for (int t : staticAt_[size_t(cellIdx(cc, rr))]) {
         const Task& k = tasks_[size_t(t)];
@@ -443,13 +479,15 @@ class Search {
         if (!w_.inside(cc, rr)) break;
         char x = cls(n, cc, rr);
         if (breakable(x) || x == 'y' || x == 'P' || x == 'v' || x == 'a') mark(cc, rr);
-        if (x == 'X' || x == 'x') {  // pushed the blast's way, if a hole is there
-          auto it = blockTasks_.find(cellIdx(cc, rr));
-          if (it != blockTasks_.end())
-            for (int i : it->second) {
-              const Task& t = tasks_[size_t(i)];
-              if (t.dc == dd[0] && t.dr == dd[1] && pushable(n, t)) done[size_t(i)] = 1;
+        if (x == 'X' || x == 'x') {  // pushed the blast's way (into a hole)
+          int b = blockOn(n, cellIdx(cc, rr));
+          if (b >= 0 && b != skipBlock && canPush(n, size_t(b))) {
+            int to = pushTo(n, cellIdx(cc, rr), dd[0], dd[1]);
+            if (to >= 0) {
+              s.blk[size_t(b)] = int16_t(to);
+              if (to & kSunk) done[size_t(blockTask_[size_t(b)])] = 1;
             }
+          }
           break;
         }
         if (x == 'B') break;  // (its burst does more; not counted)
@@ -463,19 +501,13 @@ class Search {
     const Node n = nodes_[size_t(ni)];
     Routes rt = distances(n);
     bool open = gateOpen(n);
-    for (size_t i = 0; i < tasks_.size(); i++) {
-      const Task& t = tasks_[i];
-      if (n.done[i] || t.needsCrystals) continue;  // $8F: immune to bombs
-      // Only what the goal needs (soft blocks in the way are bombed by the
-      // route itself). The gate ends the stage, so it comes last.
-      if (t.kind == TaskKind::EnterGate ? (!open || !goal_.exit || !restDone(n))
-          : t.kind == TaskKind::PushBlock ? !pushable(n, t)
-          : t.kind != TaskKind::PressButton && t.kind != TaskKind::SpawnPlatform && !required(n, t))
-        continue;
-      int c, r, dist;
-      if (!standCell(n, rt, t, c, r, dist)) continue;
-      Node s{cellIdx(c, r), n.done, 0, 0, ni, int(i), c, r, 0, {}};
-      s.done[i] = 1;
+    // Task i done from (c,r); pushB >= 0: a push step, block pushB ends on
+    // pushTo (its own blast's push: not again in blastMarks).
+    auto make = [&](int i, int c, int r, int dist, int pushB = -1, int to = 0, int pdc = 0, int pdr = 0, int pushes = 0) {
+      const Task& t = tasks_[size_t(i)];
+      Node s{cellIdx(c, r), n.done, 0, 0, ni, i, c, r, 0, {}};
+      s.blk = n.blk;
+      if (pushB < 0 || (to & kSunk)) s.done[size_t(i)] = 1;
       for (int j = cellIdx(c, r); j >= 0; j = rt.prev[size_t(j)])
         if (breakable(w_.map[size_t(j)])) {
           int k = softAt_[size_t(j)];
@@ -486,16 +518,57 @@ class Search {
         }
       std::reverse(s.via.begin(), s.via.end());
       if (isBombTask(t.kind)) {
-        blastMarks(n, c, r, s.done);
+        blastMarks(n, c, r, s, pushB);
         for (int b : harm(n, c, r).burnt) s.done[size_t(b)] = 1;  // (gone: its cost is in dist)
+      }
+      if (pushB >= 0) {
+        s.blk[size_t(pushB)] = int16_t(to);
+        s.pdc = pdc, s.pdr = pdr, s.pushes = pushes, s.sinks = (to & kSunk) != 0;
       }
       if (allDone(s, TaskKind::LightCrystal))
         for (size_t j = 0; j < tasks_.size(); j++)
           if (tasks_[j].needsCrystals) s.done[j] = 1;  // Check8FPanels -> KillAllType8F
-      s.stepCost = dist + baseCost(t.kind);
+      s.stepCost = dist + baseCost(t.kind) * std::max(1, pushes);
       s.g = n.g + s.stepCost;
       s.h = heuristic(s);
       out.push_back(std::move(s));
+    };
+    for (size_t i = 0; i < tasks_.size(); i++) {
+      const Task& t = tasks_[i];
+      if (n.done[i] || t.needsCrystals) continue;  // $8F: immune to bombs
+      // Only what the goal needs (soft blocks in the way are bombed by the
+      // route itself). The gate ends the stage, so it comes last.
+      if (t.kind == TaskKind::PushBlock) continue;  // (below: per block, by where it is now)
+      if (t.kind == TaskKind::EnterGate ? (!open || !goal_.exit || !restDone(n))
+          : t.kind != TaskKind::PressButton && t.kind != TaskKind::SpawnPlatform && !required(n, t))
+        continue;
+      int c, r, dist;
+      if (!standCell(n, rt, t, c, r, dist)) continue;
+      make(int(i), c, r, dist);
+    }
+    // Pushes (enablers: worth it when they open a way): down a line of
+    // floor into an open hole, a push per cell (5-2: (20,8) goes down three
+    // into (20,11), the way east).
+    for (size_t b = 0; b < n.blk.size(); b++) {
+      if (!canPush(n, b)) continue;
+      int p = n.blk[b], pc = p % w_.cols, pr = p / w_.cols;
+      for (auto& d : kDirs) {
+        int pushes = 0, hole = -1;
+        for (int k = 1; k <= kMaxPushes; k++) {
+          int qc = pc + d[0] * k, qr = pr + d[1] * k;
+          if (!w_.inside(qc, qr)) break;
+          if (w_.at(qc, qr) == 'O' && !filled(n, qc, qr)) {
+            pushes = k, hole = cellIdx(qc, qr);
+            break;
+          }
+          if (!floorFor(n, qc, qr)) break;
+        }
+        Task t = tasks_[size_t(blockTask_[b])];
+        t.c = pc, t.r = pr;
+        int c, r, dist;
+        if (hole < 0 || !standCell(n, rt, t, c, r, dist, d[0], d[1])) continue;
+        make(blockTask_[b], c, r, dist, int(b), hole | kSunk, d[0], d[1], pushes);
+      }
     }
     return out;
   }
@@ -508,6 +581,7 @@ class Search {
     for (int i = n; nodes_[size_t(i)].parent >= 0; i = nodes_[size_t(i)].parent) {
       const Node& x = nodes_[size_t(i)];
       Step st{x.step, x.standC, x.standR, x.stepCost, {}};
+      st.dc = x.pdc, st.dr = x.pdr, st.pushes = x.pushes, st.sinks = x.sinks;
       for (int v : x.via) st.via.push_back({v % w_.cols, v / w_.cols});
       out.steps.push_back(st);
     }
@@ -562,7 +636,7 @@ class Search {
   PlanOptions o_;
   std::vector<Task> tasks_;
   std::vector<int> softAt_;
-  std::unordered_map<int, std::vector<int>> blockTasks_, holeTasks_;  // push tasks by block / hole cell
+  std::vector<int> blockCell_, blockTask_;  // push blocks: start cells, their PushBlock tasks
   std::unordered_map<int, std::vector<int>> itemAt_;                  // item tasks by cell
   std::set<int> donePanel_;  // cells of mode 1 panels done (a blast over one undoes it)
   std::vector<int> buttons_, spawners_;
@@ -749,7 +823,11 @@ bool jumpHeld(const World& w, int c, int r, int lc, int lr) {
   return !(springLanding(w, c, r, dc, dr, x, y) && x == lc && y == lr);
 }
 
-bool canPlaceOn(char c) { return walkableClass(c) && std::string("Py^sbgvn").find(c) == std::string::npos; }
+// (C0:30C8 refuses a bomb on a tile with bit 6: the track $4D 'k' and the
+// cracked floor $65 'C' too. 4-6: bombs on the (5,23) track for the panel
+// at (7,23) never went down, and the $DD moving on it changed the map, so
+// each looked done: 18000 frames.)
+bool canPlaceOn(char c) { return walkableClass(c) && std::string("Py^sbgvnkC").find(c) == std::string::npos; }
 
 bool walkableClass(char c) { return std::string(".i^Pyspf=ktTcCg*vnL").find(c) != std::string::npos; }
 
@@ -827,19 +905,21 @@ std::vector<Task> worldTasks(const World& w) {
       if (x == 'y') out.push_back({TaskKind::LightCrystal, c, r, -1, false, false});
       if (x == 'v') out.push_back({TaskKind::PressButton, c, r, -1, false, false});
       if (x == 'a') out.push_back({TaskKind::SpawnPlatform, c, r, -1, false, false});
-      if (x == 'X' || x == 'x')
-        for (auto& d : kDirs)
-          if (w.inside(c + d[0], r + d[1]) && w.at(c + d[0], r + d[1]) == 'O') {
-            Task t{TaskKind::PushBlock, c, r, -1, false, false};
-            t.dc = d[0], t.dr = d[1];
-            out.push_back(t);
-          }
+      if (x == 'X' || x == 'x') out.push_back({TaskKind::PushBlock, c, r, -1, false, false});  // (the planner pushes it)
     }
   std::vector<uint8_t> pd = panelsDone(w);
   for (size_t i = 0; i < w.panels.size(); i++)
     if (!pd[i]) out.push_back({TaskKind::TogglePanel, w.panels[i].c, w.panels[i].r, int(i), false, false});
-  for (size_t i = 0; i < w.items.size(); i++)
-    out.push_back({TaskKind::PickItem, w.items[i].c, w.items[i].r, int(i), false, false, wantedItem(w.items[i].kind), false});
+  // (a speed item lying out within a few cells, P1 at the slowest speed:
+  // world 5 starts so, slower than its 1.25 px/f $8A; 5-1 boxed in beside
+  // one. Not hidden ones nor far ones: a detour for one in 2-7 lost to its
+  // $A6, which takes speed off again.)
+  const int kSpeedNear = 3;
+  for (size_t i = 0; i < w.items.size(); i++) {
+    const Item& it = w.items[i];
+    bool speed = it.kind == kItemSpeed && w.p.e0 <= 1 && std::abs(it.c - w.p.col()) + std::abs(it.r - w.p.row()) <= kSpeedNear;
+    out.push_back({TaskKind::PickItem, it.c, it.r, int(i), false, false, wantedItem(it.kind) || speed, false});
+  }
   // Wanted items still in their blocks: picked up where the block was (the
   // route bombs it first). Unwanted hidden ones are no task.
   for (const Item& it : w.hidden)
@@ -858,6 +938,266 @@ std::vector<Task> worldTasks(const World& w) {
   return out;
 }
 
-Plan plan(const World& w, const Goal& g, const PlanOptions& o) { return Search(w, g, o).run(); }
+namespace {
+// openWay's search state: the map (classes) and P1's region in it.
+struct WayState {
+  std::vector<char> map;
+  std::vector<uint8_t> region;
+  int g = 0, depth = 0, parent = -1, bomb = -1;
+  long f = 0;
+};
+}  // namespace
+
+std::vector<int> openWay(const World& w0, const std::vector<std::vector<int>>& goals, int maxStates) {
+  const int N = w0.cols * w0.rows;
+  const int kBombCost = 2, kAvoidCost = 6, kHWeight = 8;
+  World w = w0;  // (its map: the state's, for blastCells)
+  auto walk = [&](const std::vector<char>& m, int k) { return walkableClass(m[size_t(k)]) && m[size_t(k)] != 'S'; };
+  auto regionOf = [&](const std::vector<char>& m, int k0) {
+    std::vector<uint8_t> in(size_t(N), 0);
+    std::vector<int> q{k0};
+    in[size_t(k0)] = 1;
+    for (size_t h = 0; h < q.size(); h++)
+      for (auto& d : kDirs) {
+        int c = q[h] % w.cols + d[0], r = q[h] / w.cols + d[1];
+        if (!w.inside(c, r)) continue;
+        int k = r * w.cols + c;
+        if (!in[size_t(k)] && walk(m, k)) in[size_t(k)] = 1, q.push_back(k);
+      }
+    return in;
+  };
+  std::vector<uint8_t> done0 = panelsDone(w0);
+  std::set<int> avoid;  // done mode 1 panels: a blast undoes one
+  for (size_t i = 0; i < w0.panels.size(); i++)
+    if (w0.panels[i].mode == 1 && done0[i]) avoid.insert(w0.panels[i].r * w0.cols + w0.panels[i].c);
+  // Relaxed distance from the region to each goal (soft blocks 1, push
+  // blocks and holes 2: a BFS by buckets), summed.
+  auto hcost = [&](const std::vector<char>& m, const std::vector<uint8_t>& reg) {
+    std::vector<int> dist(size_t(N), INT_MAX);
+    std::vector<std::vector<int>> bk(1);
+    for (int k = 0; k < N; k++)
+      if (reg[size_t(k)]) dist[size_t(k)] = 0, bk[0].push_back(k);
+    for (size_t n = 0; n < bk.size(); n++)
+      for (size_t i = 0; i < bk[n].size(); i++) {
+        int k = bk[n][i];
+        if (dist[size_t(k)] != int(n)) continue;
+        for (auto& d : kDirs) {
+          int c = k % w.cols + d[0], r = k / w.cols + d[1];
+          if (!w.inside(c, r)) continue;
+          int j = r * w.cols + c, wt;
+          char t = m[size_t(j)];
+          if (walk(m, j)) wt = 0;
+          else if (breakable(t)) wt = 1;
+          else if (t == 'X' || t == 'x' || t == 'O') wt = 2;
+          else continue;
+          if (int(n) + wt < dist[size_t(j)]) {
+            dist[size_t(j)] = int(n) + wt;
+            if (bk.size() <= n + size_t(wt)) bk.resize(n + size_t(wt) + 1);
+            bk[n + size_t(wt)].push_back(j);
+          }
+        }
+      }
+    int h = 0;
+    for (const std::vector<int>& gl : goals) {
+      int best = 40;
+      for (int k : gl) best = std::min(best, dist[size_t(k)]);
+      h += best;
+    }
+    return h;
+  };
+  // A bomb at k on map m: the map after (soft blocks broken, blocks pushed
+  // one cell its way onto floor or into a hole), and the blast's cells.
+  auto effect = [&](const std::vector<char>& m, int k, std::vector<char>& out, std::vector<int>& blast) {
+    w.map = m;
+    out = m;
+    blast.clear();
+    bool any = false;
+    int bc = k % w.cols, br = k / w.cols;
+    for (const Cell& x : blastCells(w, bc, br, w.p.fire, w.p.pierce)) {
+      int j = x.r * w.cols + x.c;
+      blast.push_back(j);
+      char t = m[size_t(j)];
+      if (breakable(t)) out[size_t(j)] = '.', any = true;
+      if (t == 'X') {
+        int dc = (x.c > bc) - (x.c < bc), dr = (x.r > br) - (x.r < br), tc = x.c + dc, tr = x.r + dr;
+        if (!w.inside(tc, tr) || w0.bombAt(tc, tr)) continue;
+        char y = m[size_t(tr * w.cols + tc)];
+        if (y == '.' || y == 'O') out[size_t(j)] = '.', out[size_t(tr * w.cols + tc)] = y == 'O' ? '.' : 'X', any = true;
+      }
+    }
+    return any;
+  };
+  // Somewhere out of the blast within 7 steps.
+  auto escapable = [&](const std::vector<char>& m, int k, const std::vector<int>& blast) {
+    std::vector<int> d(size_t(N), -1);
+    std::vector<uint8_t> in(size_t(N), 0);
+    for (int j : blast) in[size_t(j)] = 1;
+    std::vector<int> q{k};
+    d[size_t(k)] = 0;
+    for (size_t h = 0; h < q.size(); h++) {
+      if (!in[size_t(q[h])]) return true;
+      if (d[size_t(q[h])] >= 7) continue;
+      for (auto& dd : kDirs) {
+        int c = q[h] % w.cols + dd[0], r = q[h] / w.cols + dd[1];
+        if (!w.inside(c, r)) continue;
+        int j = r * w.cols + c;
+        if (d[size_t(j)] < 0 && walk(m, j)) d[size_t(j)] = d[size_t(q[h])] + 1, q.push_back(j);
+      }
+    }
+    return false;
+  };
+  int k0 = w0.p.row() * w0.cols + w0.p.col();
+  if (!w0.inside(w0.p.col(), w0.p.row())) return {};
+  std::vector<WayState> st(1);
+  st[0].map = w0.map;
+  st[0].region = regionOf(w0.map, k0);
+  const std::vector<uint8_t> reach0 = st[0].region;
+  auto keyOf = [&](const WayState& s) {
+    std::string key(s.map.begin(), s.map.end());
+    for (int k = 0; k < N; k++)
+      if (s.region[size_t(k)]) {
+        key += std::to_string(k);
+        break;
+      }
+    return key;
+  };
+  auto plansOf = [&](int i) {
+    std::vector<int> out;
+    for (; st[size_t(i)].parent >= 0; i = st[size_t(i)].parent) out.push_back(st[size_t(i)].bomb);
+    std::reverse(out.begin(), out.end());
+    return out;
+  };
+  // Done: every goal has a cell the region reaches through soft blocks.
+  auto allNear = [&](const std::vector<char>& m, const std::vector<uint8_t>& reg) {
+    std::vector<uint8_t> in = reg;
+    std::vector<int> q;
+    for (int k = 0; k < N; k++)
+      if (reg[size_t(k)]) q.push_back(k);
+    for (size_t h = 0; h < q.size(); h++)
+      for (auto& d : kDirs) {
+        int c = q[h] % w.cols + d[0], r = q[h] / w.cols + d[1], j = r * w.cols + c;
+        if (w.inside(c, r) && !in[size_t(j)] && (walk(m, j) || breakable(m[size_t(j)]))) in[size_t(j)] = 1, q.push_back(j);
+      }
+    for (const std::vector<int>& gl : goals) {
+      bool any = false;
+      for (int k : gl) any |= in[size_t(k)] != 0;
+      if (!any) return false;
+    }
+    return true;
+  };
+  if (allNear(st[0].map, st[0].region)) return {};  // (nothing to open)
+  auto cmp = [&](int a, int b) { return st[size_t(a)].f > st[size_t(b)].f; };
+  std::priority_queue<int, std::vector<int>, decltype(cmp)> open(cmp);
+  std::unordered_map<std::string, int> best;
+  best[keyOf(st[0])] = 0;
+  open.push(0);
+  int sealed = -1, exp = 0;
+  while (!open.empty()) {
+    int i = open.top();
+    open.pop();
+    if (st[size_t(i)].depth > 0 && allNear(st[size_t(i)].map, st[size_t(i)].region)) {
+      bool back = false;
+      for (int k = 0; k < N && !back; k++) back = st[size_t(i)].region[size_t(k)] && reach0[size_t(k)];
+      {
+        // (5-5, bot.lua: pushes that shut P1 in the lower left, the last
+        // panel beyond: kept only as a fallback)
+        if (back) return plansOf(i);
+        if (sealed < 0) sealed = i;
+      }
+    }
+    if (++exp > maxStates) break;
+    std::vector<char> m2;
+    std::vector<int> blast;
+    for (int k = 0; k < N; k++) {
+      if (!st[size_t(i)].region[size_t(k)] || !canPlaceOn(st[size_t(i)].map[size_t(k)]) || w0.bombAt(k % w.cols, k / w.cols)) continue;
+      if (!effect(st[size_t(i)].map, k, m2, blast) || !escapable(st[size_t(i)].map, k, blast)) continue;
+      WayState s;
+      s.map = m2;
+      s.region = regionOf(m2, k);
+      s.parent = i, s.bomb = k, s.depth = st[size_t(i)].depth + 1;
+      s.g = st[size_t(i)].g + kBombCost;
+      for (int j : blast)
+        if (avoid.count(j)) s.g += kAvoidCost;
+      std::string key = keyOf(s);
+      auto it = best.find(key);
+      if (it != best.end() && it->second <= s.g) continue;
+      best[key] = s.g;
+      // (weighted A*, deepest first among equals: pure greedy on the
+      // distance dived into plateaus of pointless pushes)
+      s.f = long(s.g + kHWeight * hcost(s.map, s.region)) * 1000 - s.depth;
+      st.push_back(std::move(s));
+      open.push(int(st.size() - 1));
+    }
+  }
+  return sealed >= 0 ? plansOf(sealed) : std::vector<int>{};
+}
+
+Plan plan(const World& w, const Goal& g, const PlanOptions& o) {
+  Plan p = Search(w, g, o).run();
+  if (p.ok || !o.openWay || std::find(w.map.begin(), w.map.end(), 'X') == w.map.end()) return p;
+  // Nothing plans and there are push blocks: open a way to the tasks P1
+  // can't get near even with every soft block gone.
+  std::vector<uint8_t> near(w.map.size(), 0);
+  {
+    std::vector<int> q;
+    int k0 = w.p.row() * w.cols + w.p.col();
+    if (w.inside(w.p.col(), w.p.row())) q.push_back(k0), near[size_t(k0)] = 1;
+    for (size_t h = 0; h < q.size(); h++)
+      for (auto& d : kDirs) {
+        int c = q[h] % w.cols + d[0], r = q[h] / w.cols + d[1], k = r * w.cols + c;
+        if (w.inside(c, r) && !near[size_t(k)] && (walkableClass(w.map[size_t(k)]) || breakable(w.map[size_t(k)])))
+          near[size_t(k)] = 1, q.push_back(k);
+      }
+  }
+  std::vector<std::vector<int>> goals;
+  for (const Task& t : p.tasks) {
+    bool want = t.kind == TaskKind::TogglePanel || t.kind == TaskKind::EnterGate || t.kind == TaskKind::LightCrystal ||
+                t.kind == TaskKind::HurtBoss || (t.kind == TaskKind::KillEnemy && (g.enemies || t.blocksExit)) ||
+                (t.kind == TaskKind::PickItem && (g.items || (g.powerups && t.powerup)));
+    if (!want || !w.inside(t.c, t.r)) continue;
+    std::vector<int> cells{t.r * w.cols + t.c};
+    for (auto& d : kDirs)
+      if (w.inside(t.c + d[0], t.r + d[1])) cells.push_back((t.r + d[1]) * w.cols + t.c + d[0]);
+    bool reach = false;
+    for (int k : cells) reach |= near[size_t(k)] != 0;
+    if (!reach) goals.push_back(cells);
+  }
+  if (goals.empty()) return p;
+  // (a search takes ~0.5 s on 5-5, and the agent asks again for each goal
+  // variant and each decision on the same map: kept for the same inputs)
+  static std::vector<std::pair<std::string, std::vector<int>>> memo;
+  std::string key(w.map.begin(), w.map.end());
+  key += "@" + std::to_string(w.p.row() * w.cols + w.p.col()) + "f" + std::to_string(w.p.fire) + (w.p.pierce ? "p" : "");
+  for (const Bomb& b : w.bombs) key += "b" + std::to_string(b.r * w.cols + b.c);
+  for (const auto& gl : goals) key += "," + std::to_string(gl[0]);
+  std::vector<int> way;
+  auto hit = std::find_if(memo.begin(), memo.end(), [&](const auto& e) { return e.first == key; });
+  if (hit != memo.end()) way = hit->second;
+  else {
+    way = openWay(w, goals);
+    memo.insert(memo.begin(), {key, way});
+    if (memo.size() > 8) memo.pop_back();
+  }
+  if (way.empty()) return p;
+  int k = way[0], bc = k % w.cols, br = k / w.cols;
+  // (the step's task: a push block or soft block its blast reaches)
+  int ti = -1;
+  World m = w;
+  for (const Cell& x : blastCells(m, bc, br, w.p.fire, w.p.pierce))
+    for (size_t i = 0; i < p.tasks.size() && ti < 0; i++)
+      if ((p.tasks[i].kind == TaskKind::PushBlock || p.tasks[i].kind == TaskKind::BombSoft) && p.tasks[i].c == x.c &&
+          p.tasks[i].r == x.r)
+        ti = int(i);
+  if (ti < 0) return p;
+  Plan q;
+  q.tasks = p.tasks;
+  q.ok = true;
+  q.why = "open way";
+  q.expanded = p.expanded;
+  q.done.assign(q.tasks.size(), 0);
+  Step s{ti, bc, br, 0, {}};
+  q.steps.push_back(s);
+  return q;
+}
 
 }  // namespace sbm2

@@ -1437,3 +1437,103 @@ TEST("agent: wake spots that burn an item are passed over for the next") {
   std::string lg = a.takeLog();
   CHECK(lg.find("wake kill 12,25") != std::string::npos);
 }
+
+// A first plan step with no move that lives gives way to a later one P1
+// can walk to (5-1, snapshot at 1336: P1 boxed in the top-left corner by a
+// regrown (4,4), a $8A patrolling column 2: step 1 "kill 12,4" needs (4,4)
+// broken and every cover is down column 2. P1 sat 600 frames in survive
+// and died; the $8A itself was step 6).
+TEST("agent: a first step that only dies gives way to a later one") {
+  World w;
+  std::string err;
+  CHECK(loadWorld(sbm2test::worldsDir + "/5-1_corner.txt", w, &err));
+  Goal gl;
+  Goal::parse("powerups+exit", gl);
+  Plan p = plan(w, gl);
+  CHECK(p.ok && p.steps.size() > 3);
+  CHECK(p.tasks[size_t(p.steps[0].task)].kind == TaskKind::KillEnemy && p.tasks[size_t(p.steps[0].task)].c == 12);
+  FakeOracle o;
+  o.answer = [](const SimReq& q, SimOut& r) {
+    r.dead = 40;
+    r.mapSig = 2;
+    r.enemies = 3;
+    if (q.path.size() >= 2 && q.path2.size() >= 2 && q.path[q.path.size() - 2] / 16 != 3) r.dead = -1;  // (any bomb not at (3,4) lives)
+  };
+  Agent a = agentFor("powerups+exit");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.committed());
+  CHECK(a.what() != "survive");
+}
+
+// A trap ($4B 'T') with no heart is the life (PlayerOnTrap C1:40B9): P1
+// bombs it like a soft block rather than walk over it (5-1: every move to
+// the panel at (4,11) crossed the $4B at (2,11) and died there). While P1
+// flashes it is free.
+TEST("agent: a trap is bombed, not walked over") {
+  World w = mk({"#######",
+                "#..T.g#",
+                "#.#####",
+                "#.#####",
+                "#######"}, 1, 1, "gate 5 1 open");
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 2; r.enemies = 0; };
+  Agent a = agentFor("exit");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.committed());
+  CHECK(a.what().find("bomb at (2,1)") != std::string::npos);
+  w.p.flash = 100;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -2; };  // (the walk ends on the gate)
+  Agent b = agentFor("exit");
+  b.decide(w, liveOf(w), o);
+  CHECK(b.what().find("walk to (5,1)") != std::string::npos);
+}
+
+// A trap's B mid-move: the oracle plays B then the rest of the move first
+// (world 3, 3-7: B on the (4,11) trap mid-move stirred the RNG; the $B0
+// came on where the move's run had it turn, and P1 died). Dies: the trap
+// waits, the move goes on; lives: P1 plays that run, B first.
+TEST("agent: a trap mid-move goes off only if the rest of the move lives") {
+  World w = mk({"#######",
+                "#.....#",
+                "#.....g#",
+                "#######"}, 1, 1, "gate 5 2 open");
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -2; };
+  Agent a = agentFor("exit");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.committed());
+  std::vector<uint16_t> before = a.pads();
+  int left = a.pending();
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = 9; };
+  CHECK(!a.trapMidMove(o));
+  CHECK(a.pads() == before && a.pending() == left);
+  CHECK(!o.seen.empty() && o.seen.back().pre.size() == size_t(4 + left) && o.seen.back().pre[0] == kPadB);
+  o.answer = [](const SimReq& q, SimOut& r) {
+    r.dead = -1;
+    for (size_t i = 0; i < q.pre.size(); i++) r.pads[i] = q.pre[i];
+  };
+  CHECK(a.trapMidMove(o));
+  CHECK(a.committed() && a.pending() == 4 + left && a.pads()[0] == kPadB);
+}
+
+// Survive keeping P1 on one cell kStuckFrames moves it off (5-3: P1 stood 9000
+// frames two cells from a $91 waiting to flame it, till the timer ran out).
+TEST("agent: survive stuck on one cell moves off it") {
+  World w = mk({"#######",
+                "#.....#",
+                "#######"}, 3, 1, "gate 5 1 closed");
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; };
+  Agent a = agentFor("exit");
+  std::string last;
+  for (int f = 0; f <= 600; f += 60) {
+    w.frame = f;
+    a.decide(w, liveOf(w), o);
+    last = a.takeLog();
+  }
+  CHECK(last.find("survive") != std::string::npos && last.find("toward (3,1)") == std::string::npos);
+  Agent b = agentFor("exit");
+  w.frame = 0;
+  b.decide(w, liveOf(w), o);
+  CHECK(b.takeLog().find("toward (3,1)") != std::string::npos);  // (at first it stays)
+}

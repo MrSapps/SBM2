@@ -1,0 +1,7 @@
+# The C++ agent clears 5-4 from its start, no deaths.
+start 53
+agent 1
+budget 20000
+pass STAGE 54
+fail DEATH|agent error
+env SBM2_STOPAT=54

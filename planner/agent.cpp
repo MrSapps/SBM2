@@ -20,6 +20,7 @@ namespace {
 constexpr int kWalkFPT = 22;     // frames per cell budgeted for a walk (P1 ~16-20)
 constexpr int kNewFuse = 150;    // a fresh bomb's fuse (bot.lua NEW_FUSE)
 constexpr int kTail = 60;        // frames past the commit the oracle must also live
+constexpr int kStuckFrames = 480;  // survive on one cell this long: move off it
 constexpr int kSettle = 20;
 constexpr int kRideProbe = 360;  // frames a ride may take (3-5's subs: ~170-250)
 const int kDirs[4][2] = {{0, -1}, {0, 1}, {-1, 0}, {1, 0}};
@@ -361,6 +362,21 @@ uint16_t Agent::frame(const uint8_t* wram, int frame, Oracle& o, const char* ext
     }
     int why = trapCheck(tw);
     if (why == 2 && committed()) why = 0;  // (a stale one waits for the move to end)
+    if (why == 1 && committed()) {
+      if (!trapMidMove(o)) {
+        log("trap: B now would end the move dead; it waits");
+        trapCool_ = 8;
+        why = 0;
+      }
+      else {
+        int k = remoteOrder_[0];
+        char b[128];
+        std::snprintf(b, sizeof b, "trap: B sets off the remote bomb at (%d,%d) on an enemy, mid-move", k % tw.cols, k / tw.cols);
+        log(b);
+        trapCool_ = 24;
+        return pads_[size_t(at_++)];
+      }
+    }
     if (why) {
       int k = remoteOrder_[0];
       char b[128];
@@ -393,6 +409,23 @@ uint16_t Agent::frame(const uint8_t* wram, int frame, Oracle& o, const char* ext
   for (const BossObj& b : w.bosses) live.bossHp += b.hp;
   decide(w, live, o);
   return committed() ? pads_[size_t(at_++)] : 0;
+}
+
+bool Agent::trapMidMove(Oracle& o) {
+  const int kB = 4;  // (as trapB_: held 4 frames)
+  SimReq q;
+  q.pre.assign(kB, kPadB);
+  q.pre.insert(q.pre.end(), pads_.begin() + at_, pads_.end());
+  q.frames = int(q.pre.size()) + kTail;
+  std::vector<SimOut> out;
+  o.run({q}, out);
+  sims_++;
+  size_t n = q.pre.size();
+  if (out.empty() || out[0].dead >= 0 || out[0].pads.size() < n || out[0].trace.size() < 2 * n) return false;
+  pads_.assign(out[0].pads.begin(), out[0].pads.begin() + long(n));
+  trace_.assign(out[0].trace.begin(), out[0].trace.begin() + long(2 * n));
+  at_ = 0;
+  return true;
 }
 
 // Oracle batch sizes: the first option alone (it is the best guess and
@@ -545,6 +578,10 @@ bool Agent::tryCands(std::vector<Cand>& cs, const Live& live, Oracle& o, size_t 
 // Nothing for the task lives (or there is no task): move to a cell nearby
 // that lives, else the one that lives longest; play a little, decide again.
 void Agent::survive(const World& w, const Live& live, Oracle& o, const char* why) {
+  if (deferSurvive_ && std::string(why).rfind("traps out", 0) != 0) {  // (a trap wait is a move)
+    deferWhy_ = why;
+    return;
+  }
   // Nothing to do but stay alive with traps out: they may be what is in the
   // way (a bomb is a wall). frame() sets the oldest off once P1 is clear.
   trapStuck_ = !remoteOrder_.empty() && std::string(why).rfind("traps out", 0) != 0;
@@ -570,6 +607,15 @@ void Agent::survive(const World& w, const Live& live, Oracle& o, const char* why
     return 4 * dm.deadly(c, r, 0, 400) + 2 * inTrap(c, r) + near;
   };
   std::stable_sort(cells.begin(), cells.end(), [&](auto& a, auto& b) { return rank(a.second) < rank(b.second); });
+  // Survive has kept P1 on one cell kStuckFrames: that cell goes last (5-3:
+  // a $91 two cells up stops while P1 is in its line, to flame P1 once next
+  // to it; staying lived, each move toward it died: 9000 frames on (10,23)
+  // till the timer ran out, never a step out of its line).
+  int here = g.idx(g.pc, g.pr);
+  if (here != stayCell_ || frame_ - lastSurvive_ > 120) stayCell_ = here, staySince_ = frame_;
+  lastSurvive_ = frame_;
+  if (frame_ - staySince_ >= kStuckFrames)
+    std::stable_partition(cells.begin(), cells.end(), [&](auto& c) { return c.second != here; });
   std::vector<SimReq> reqs;
   std::vector<int> ends;
   for (auto& [d, k] : cells) {
@@ -650,6 +696,13 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
   if (riding)
     for (char& ch : w.map)
       if (ch == 'S') ch = '.';
+  // A trap ($4B 'T', $63 't', world 5) costs a heart, or the life with
+  // none (PlayerOnTrap C1:40B9; free while P1 flashes): to P1 it is a soft
+  // block, a blast clears it (docs/mechanics.md 3). (5-1: every move to
+  // the panel at (4,11) walked over the $4B at (2,11) and died there.)
+  if (w.p.flash == 0)
+    for (char& ch : w.map)
+      if (ch == 'T' || ch == 't') ch = '%';
   decisions_++;
   frame_ = w.frame;
   killSlot_ = -1;
@@ -817,644 +870,669 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
       if (ch == '\n') ch = ';';
     log("  plan: " + ps.substr(0, 400));
   }
-  const Step& st = gp.steps[si];
-  const Task& task = gp.tasks[size_t(st.task)];
-  auto itemFailed = [&] {
-    if (task.kind == TaskKind::PickItem && task.powerup) itemFails_[g.idx(task.c, task.r)]++;
-  };
-  // Every bomb is out: a bomb task waits for one to come back.
-  bool needsBomb = (task.kind != TaskKind::PickItem && task.kind != TaskKind::EnterGate) ||
-                   dist[size_t(g.idx(st.standC, st.standR))] < 0;
-  if (needsBomb && w.p.bombs <= 0 && !w.bombs.empty()) return survive(w, live, o, "no bomb left");
-  char tb[96];
-  std::snprintf(tb, sizeof tb, "%s %d,%d", taskName(task.kind), task.c, task.r);
-  std::string tname = tb;
+  // One plan step: its moves, else survive. A first step with no move that
+  // lives gives way to the next two P1 can walk to (5-1: P1 boxed in the top-left corner
+  // by a regrown gap, with a $8A coming up column 2: step 1 "kill 12,4"
+  // needs (4,4) broken and every cover is down that column, so P1 waited
+  // 600 frames in survive and never tried the $8A itself, or the item at
+  // (2,8), both a walk away).
+  auto doStep = [&](const Step& st) {
+    const Task& task = gp.tasks[size_t(st.task)];
+    auto itemFailed = [&] {
+      if (task.kind == TaskKind::PickItem && task.powerup) itemFails_[g.idx(task.c, task.r)]++;
+    };
+    // Every bomb is out: a bomb task waits for one to come back.
+    bool needsBomb = (task.kind != TaskKind::PickItem && task.kind != TaskKind::EnterGate) ||
+                     dist[size_t(g.idx(st.standC, st.standR))] < 0;
+    if (needsBomb && w.p.bombs <= 0 && !w.bombs.empty()) return survive(w, live, o, "no bomb left");
+    char tb[96];
+    std::snprintf(tb, sizeof tb, "%s %d,%d", taskName(task.kind), task.c, task.r);
+    std::string tname = tb;
 
-  // Bomb at x, then cover: candidates for every safe cell near x.
-  // (risk: odds an enemy comes by a cover cell in [t0, t1], if known:
-  // risky covers go last; waitPre: frames P1 stands before it sets off)
-  using Risk = std::function<double(int, int, int, int)>;
-  // A blast that reaches the gate brings enemies back; one that reaches an
-  // item burns it (goap.cpp's Harm): no bomb there, unless the item is out
-  // of reach (then the plan has priced burning it in).
-  std::vector<uint8_t> panelsNow = panelsDone(w);
-  bool undoPanels = false;  // (no other way out: undo one, the plan redoes it)
-  bool gateHit = false;     // (no other way to the gate: bring enemies back, kill them again)
-  auto spoils = [&](int xc, int xr) {
-    for (const Cell& x : blastCells(w, xc, xr, w.p.fire, w.p.pierce)) {
-      if (!gateHit && w.hasGate && x.c == w.gateC && x.r == w.gateR) return true;
-      for (size_t i = 0; i < w.panels.size(); i++)  // (a done mode 1 panel: undone)
-        if (!undoPanels && w.panels[i].mode == 1 && panelsNow[i] && w.panels[i].c == x.c && w.panels[i].r == x.r) return true;
-      for (const Item& it : w.items)
-        if (it.c == x.c && it.r == x.r && wantedItem(it.kind) && dist[size_t(g.idx(x.c, x.r))] >= 0 &&
-            !(x.c == xc && x.r == xr))  // (one on the bomb's cell: P1 picks it up placing it)
-          return true;
-    }
-    return false;
-  };
-  // A gap that grows back (World::regrowCells, C0:D8E8) cuts a walk when
-  // the countdown runs out before P1 gets there and P1 is not on or next to
-  // it all that while (an object there holds it open: the pick waits).
-  // 5-1: P1 beside (4,4) held it open; it walked off to push (8,6) and
-  // (4,4) grew back at once, between P1 and every cover.
-  // path1 from t1, then path2 from t2 (cell indices, P1's speed fpc_).
-  auto gapCut = [&](const std::vector<int>& path1, int t1, const std::vector<int>& path2, int t2) {
-    if (w.regrowCells.empty()) return false;
-    const double due = std::max(0, w.regrowIn - 1) * eScale_;
-    std::vector<std::pair<double, int>> tl;  // (time, cell)
-    for (size_t i = 0; i < path1.size(); i++) tl.push_back({t1 + fpc_ * double(i), path1[i]});
-    for (size_t i = 0; i < path2.size(); i++) tl.push_back({t2 + fpc_ * double(i), path2[i]});
-    auto near = [&](int a, int b) { return std::abs(a % w.cols - b % w.cols) + std::abs(a / w.cols - b / w.cols) <= 1; };
-    for (size_t i = 0; i < tl.size(); i++) {
-      int x = tl[i].second, xc = x % w.cols, xr = x / w.cols;
-      if (tl[i].first <= due || w.at(xc, xr) != '.' || !w.regrowListed(xc, xr)) continue;
-      // (step j holds P1 on its cell over [t_j, t_j+1): each step that
-      // reaches past the due time must be on or next to x)
-      for (size_t j = 0; j <= i; j++)
-        if ((j == i || tl[j + 1].first > due) && !near(tl[j].second, x)) return true;
-    }
-    return false;
-  };
-  auto bombCands = [&](int xc, int xr, Cand::Want want, const std::string& what, int maxY, std::vector<Cand>& out,
-                       const Risk& risk = nullptr, int waitPre = 0) {
-    if (dist[size_t(g.idx(xc, xr))] < 0 || !canPlaceOn(w.at(xc, xr)) || w.bombAt(xc, xr) || spoils(xc, xr)) return;
-    auto p1 = g.pathTo(prev, g.pc, g.pr, xc, xr);
-    int tx = waitPre + int(fpc_ * double(p1.size() - 1) + 0.5) + 2;  // the press, by P1's speed
-    int t1 = kWalkFPT * wpSteps(g.waypoints(p1)) + kSettle;
-    std::vector<int> d2, prev2;
-    g.bfs(xc, xr, d2, prev2);
-    DangerMap dm(w);
-    dm.addBomb(xc, xr, w.p.fire, w.p.pierce, t1 + kNewFuse);
-    for (const Bomb& b : w.bombs)  // (P1's remote bombs out: set off first, by the same B presses)
-      if (b.remote && !b.enemyOwned) dm.addBomb(b.c, b.r, b.range, b.pierce, t1 + kNewFuse);
-    // A bomb under a furnace (2-5: the $DF takes it in) sets the fuse
-    // lines alight: every 'f' cell burns a while later (World2FuseIgnite
-    // C1:4922), so no cover on one (2-5: all four covers died at A+88).
-    bool underFurnace = w.inside(xc, xr - 1) && w.at(xc, xr - 1) == 'F';
-    std::vector<std::pair<int, int>> ys;
-    for (int k = 0; k < w.cols * w.rows; k++) {
-      if (d2[size_t(k)] <= 0) continue;
-      int yc = k % w.cols, yr = k / w.cols;
-      if (underFurnace && w.at(yc, yr) == 'f') continue;
-      int t2 = t1 + kWalkFPT * d2[size_t(k)] + kSettle;
-      if (dm.deadly(yc, yr, t2, t1 + kNewFuse + kFlameFrames + kTail)) continue;
-      int key = d2[size_t(k)];
-      if (gapCut(p1, waitPre, g.pathTo(prev2, xc, xr, yc, yr), tx)) key += 1000;
-      if (risk) {
-        // (P1 there from about tx + its walk until the commit's tail)
-        int ty = tx + int(fpc_ * d2[size_t(k)]);
-        if (risk(yc, yr, ty - 8, tx + kNewFuse + kFlameFrames + kTail) > 0.2) key += 1000;
+    // Bomb at x, then cover: candidates for every safe cell near x.
+    // (risk: odds an enemy comes by a cover cell in [t0, t1], if known:
+    // risky covers go last; waitPre: frames P1 stands before it sets off)
+    using Risk = std::function<double(int, int, int, int)>;
+    // A blast that reaches the gate brings enemies back; one that reaches an
+    // item burns it (goap.cpp's Harm): no bomb there, unless the item is out
+    // of reach (then the plan has priced burning it in).
+    std::vector<uint8_t> panelsNow = panelsDone(w);
+    bool undoPanels = false;  // (no other way out: undo one, the plan redoes it)
+    bool gateHit = false;     // (no other way to the gate: bring enemies back, kill them again)
+    auto spoils = [&](int xc, int xr) {
+      for (const Cell& x : blastCells(w, xc, xr, w.p.fire, w.p.pierce)) {
+        if (!gateHit && w.hasGate && x.c == w.gateC && x.r == w.gateR) return true;
+        for (size_t i = 0; i < w.panels.size(); i++)  // (a done mode 1 panel: undone)
+          if (!undoPanels && w.panels[i].mode == 1 && panelsNow[i] && w.panels[i].c == x.c && w.panels[i].r == x.r) return true;
+        for (const Item& it : w.items)
+          if (it.c == x.c && it.r == x.r && wantedItem(it.kind) && dist[size_t(g.idx(x.c, x.r))] >= 0 &&
+              !(x.c == xc && x.r == xr))  // (one on the bomb's cell: P1 picks it up placing it)
+            return true;
       }
-      ys.push_back({key, k});
-    }
-    std::sort(ys.begin(), ys.end());
-    int n = 0;
-    for (auto& [key, k] : ys) {
-      if (n++ >= maxY) break;
-      int d = key % 1000;
+      return false;
+    };
+    // A gap that grows back (World::regrowCells, C0:D8E8) cuts a walk when
+    // the countdown runs out before P1 gets there and P1 is not on or next to
+    // it all that while (an object there holds it open: the pick waits).
+    // 5-1: P1 beside (4,4) held it open; it walked off to push (8,6) and
+    // (4,4) grew back at once, between P1 and every cover.
+    // path1 from t1, then path2 from t2 (cell indices, P1's speed fpc_).
+    auto gapCut = [&](const std::vector<int>& path1, int t1, const std::vector<int>& path2, int t2) {
+      if (w.regrowCells.empty()) return false;
+      const double due = std::max(0, w.regrowIn - 1) * eScale_;
+      std::vector<std::pair<double, int>> tl;  // (time, cell)
+      for (size_t i = 0; i < path1.size(); i++) tl.push_back({t1 + fpc_ * double(i), path1[i]});
+      for (size_t i = 0; i < path2.size(); i++) tl.push_back({t2 + fpc_ * double(i), path2[i]});
+      auto near = [&](int a, int b) { return std::abs(a % w.cols - b % w.cols) + std::abs(a / w.cols - b / w.cols) <= 1; };
+      for (size_t i = 0; i < tl.size(); i++) {
+        int x = tl[i].second, xc = x % w.cols, xr = x / w.cols;
+        if (tl[i].first <= due || w.at(xc, xr) != '.' || !w.regrowListed(xc, xr)) continue;
+        // (step j holds P1 on its cell over [t_j, t_j+1): each step that
+        // reaches past the due time must be on or next to x)
+        for (size_t j = 0; j <= i; j++)
+          if ((j == i || tl[j + 1].first > due) && !near(tl[j].second, x)) return true;
+      }
+      return false;
+    };
+    auto bombCands = [&](int xc, int xr, Cand::Want want, const std::string& what, int maxY, std::vector<Cand>& out,
+                         const Risk& risk = nullptr, int waitPre = 0) {
+      if (dist[size_t(g.idx(xc, xr))] < 0 || !canPlaceOn(w.at(xc, xr)) || w.bombAt(xc, xr) || spoils(xc, xr)) return;
+      auto p1 = g.pathTo(prev, g.pc, g.pr, xc, xr);
+      int tx = waitPre + int(fpc_ * double(p1.size() - 1) + 0.5) + 2;  // the press, by P1's speed
+      int t1 = kWalkFPT * wpSteps(g.waypoints(p1)) + kSettle;
+      std::vector<int> d2, prev2;
+      g.bfs(xc, xr, d2, prev2);
+      DangerMap dm(w);
+      dm.addBomb(xc, xr, w.p.fire, w.p.pierce, t1 + kNewFuse);
+      for (const Bomb& b : w.bombs)  // (P1's remote bombs out: set off first, by the same B presses)
+        if (b.remote && !b.enemyOwned) dm.addBomb(b.c, b.r, b.range, b.pierce, t1 + kNewFuse);
+      // A bomb under a furnace (2-5: the $DF takes it in) sets the fuse
+      // lines alight: every 'f' cell burns a while later (World2FuseIgnite
+      // C1:4922), so no cover on one (2-5: all four covers died at A+88).
+      bool underFurnace = w.inside(xc, xr - 1) && w.at(xc, xr - 1) == 'F';
+      std::vector<std::pair<int, int>> ys;
+      for (int k = 0; k < w.cols * w.rows; k++) {
+        if (d2[size_t(k)] <= 0) continue;
+        int yc = k % w.cols, yr = k / w.cols;
+        if (underFurnace && w.at(yc, yr) == 'f') continue;
+        int t2 = t1 + kWalkFPT * d2[size_t(k)] + kSettle;
+        if (dm.deadly(yc, yr, t2, t1 + kNewFuse + kFlameFrames + kTail)) continue;
+        int key = d2[size_t(k)];
+        if (gapCut(p1, waitPre, g.pathTo(prev2, xc, xr, yc, yr), tx)) key += 1000;
+        if (risk) {
+          // (P1 there from about tx + its walk until the commit's tail)
+          int ty = tx + int(fpc_ * d2[size_t(k)]);
+          if (risk(yc, yr, ty - 8, tx + kNewFuse + kFlameFrames + kTail) > 0.2) key += 1000;
+        }
+        ys.push_back({key, k});
+      }
+      std::sort(ys.begin(), ys.end());
+      int n = 0;
+      for (auto& [key, k] : ys) {
+        if (n++ >= maxY) break;
+        int d = key % 1000;
+        Cand c;
+        c.req.path = g.waypoints(p1);
+        c.req.post = {kPadA, kPadA};
+        c.req.path2 = g.waypoints(g.pathTo(prev2, xc, xr, k % w.cols, k / w.cols));
+        c.req.detEnd = w.p.remote ? 1 + mine : 0;
+        int t2 = kWalkFPT * d + kSettle;
+        int wait = int((w.p.remote ? 30 + kFlameFrames : kNewFuse + kFlameFrames) * eScale_ + 0.5);  // (logic frames: lag stretches them)
+        c.commit = t1 + 2 + t2 + wait;
+        c.req.frames = c.commit + kTail;
+        // (play to the flames' end by the real press, not the walk budget)
+        if (w.p.remote) c.afterB = int((30 + kFlameFrames) * eScale_ + 0.5);
+        else c.afterA = 2 + wait + 4;
+        // A bomb to spare: once in cover P1 is free to plan the next (the run
+        // still covers the whole blast).
+        if (!w.p.remote && w.p.bombs >= 2 && want == Cand::Change) c.commit = t1 + 2 + t2 + kSettle, c.afterA = 0;
+        c.endC = k % w.cols;
+        c.endR = k / w.cols;
+        c.want = want;
+        char b[160];
+        std::snprintf(b, sizeof b, "%s: bomb at (%d,%d), cover (%d,%d)", what.c_str(), xc, xr, c.endC, c.endR);
+        c.what = b;
+        out.push_back(c);
+      }
+    };
+    // Covers enemies are likely to come by go last for every bomb move, not
+    // just kills: the enemy model rolled once with no bomb, P1 where it is
+    // (2-2: a cover at the end of a dead end, a $86 walked in after P1).
+    std::vector<EnemyRun> amb;
+    bool ambRolled = false;
+    auto ambient = [&]() -> Risk {
+      if (!ambRolled) {
+        ambRolled = true;
+        bool any = false;
+        for (const Enemy& q : w.enemies)
+          if (EnemyModel::modelled(q) && std::abs(q.col() - g.pc) + std::abs(q.row() - g.pr) <= 16) any = true;
+        if (any) amb = EnemyModel(w, 700, uint32_t(w.frame) * 2654435761u + 7, eScale_).roll(nullptr, g.pc, g.pr, 16);
+      }
+      if (amb.empty()) return nullptr;
+      return [&amb](int c, int r, int t0, int t1) { return EnemyModel::nearOdds(amb, c, r, t0, t1); };
+    };
+    auto walkCand = [&](int tc, int tr, Cand::Want want, const std::string& what) {
       Cand c;
-      c.req.path = g.waypoints(p1);
-      c.req.post = {kPadA, kPadA};
-      c.req.path2 = g.waypoints(g.pathTo(prev2, xc, xr, k % w.cols, k / w.cols));
-      c.req.detEnd = w.p.remote ? 1 + mine : 0;
-      int t2 = kWalkFPT * d + kSettle;
-      int wait = int((w.p.remote ? 30 + kFlameFrames : kNewFuse + kFlameFrames) * eScale_ + 0.5);  // (logic frames: lag stretches them)
-      c.commit = t1 + 2 + t2 + wait;
+      auto p = g.pathTo(prev, g.pc, g.pr, tc, tr);
+      c.req.path = g.waypoints(p);
+      c.commit = kWalkFPT * wpSteps(c.req.path) + kSettle;
       c.req.frames = c.commit + kTail;
-      // (play to the flames' end by the real press, not the walk budget)
-      if (w.p.remote) c.afterB = int((30 + kFlameFrames) * eScale_ + 0.5);
-      else c.afterA = 2 + wait + 4;
-      // A bomb to spare: once in cover P1 is free to plan the next (the run
-      // still covers the whole blast).
-      if (!w.p.remote && w.p.bombs >= 2 && want == Cand::Change) c.commit = t1 + 2 + t2 + kSettle, c.afterA = 0;
-      c.endC = k % w.cols;
-      c.endR = k / w.cols;
       c.want = want;
-      char b[160];
-      std::snprintf(b, sizeof b, "%s: bomb at (%d,%d), cover (%d,%d)", what.c_str(), xc, xr, c.endC, c.endR);
-      c.what = b;
-      out.push_back(c);
-    }
-  };
-  // Covers enemies are likely to come by go last for every bomb move, not
-  // just kills: the enemy model rolled once with no bomb, P1 where it is
-  // (2-2: a cover at the end of a dead end, a $86 walked in after P1).
-  std::vector<EnemyRun> amb;
-  bool ambRolled = false;
-  auto ambient = [&]() -> Risk {
-    if (!ambRolled) {
-      ambRolled = true;
-      bool any = false;
-      for (const Enemy& q : w.enemies)
-        if (EnemyModel::modelled(q) && std::abs(q.col() - g.pc) + std::abs(q.row() - g.pr) <= 16) any = true;
-      if (any) amb = EnemyModel(w, 700, uint32_t(w.frame) * 2654435761u + 7, eScale_).roll(nullptr, g.pc, g.pr, 16);
-    }
-    if (amb.empty()) return nullptr;
-    return [&amb](int c, int r, int t0, int t1) { return EnemyModel::nearOdds(amb, c, r, t0, t1); };
-  };
-  auto walkCand = [&](int tc, int tr, Cand::Want want, const std::string& what) {
-    Cand c;
-    auto p = g.pathTo(prev, g.pc, g.pr, tc, tr);
-    c.req.path = g.waypoints(p);
-    c.commit = kWalkFPT * wpSteps(c.req.path) + kSettle;
-    c.req.frames = c.commit + kTail;
-    c.want = want;
-    if (want != Cand::Exit) c.endC = tc, c.endR = tr;
-    c.what = what + ": walk to (" + std::to_string(tc) + "," + std::to_string(tr) + ")";
-    return c;
-  };
+      if (want != Cand::Exit) c.endC = tc, c.endR = tr;
+      c.what = what + ": walk to (" + std::to_string(tc) + "," + std::to_string(tr) + ")";
+      return c;
+    };
 
-  std::vector<Cand> cs;
-  // Where the task is done from; if a soft block is in the way, bomb the
-  // first one on the route instead.
-  int sc = st.standC, sr = st.standR;
-  if (dist[size_t(g.idx(sc, sr))] < 0) {
-    // The first soft block on the route, from the cell before it, else
-    // from any cell whose blast reaches it; a cell that failed 3 times
-    // (the game won't take a bomb there) is dropped, and a soft block no
-    // cell is left for is routed around.
-    std::vector<int> tried;
-    std::set<int> bad = badSoftNow();
-    for (int pass = 0; pass < 4 && cs.empty(); pass++) {
-      auto route = g.softRoute(sc, sr, bad);
-      size_t i = 1;
-      while (i < route.size() && !breakable(w.at(route[i] % w.cols, route[i] / w.cols))) i++;
-      if (i >= route.size()) break;
-      int k = route[i], kc = k % w.cols, kr = k / w.cols;
-      std::vector<std::pair<int, int>> xs{{-1, route[i - 1]}};
-      for (int x = 0; x < w.cols * w.rows; x++)
-        if (x != route[i - 1] && dist[size_t(x)] >= 0 && covers(w, x % w.cols, x / w.cols, kc, kr))
-          xs.push_back({dist[size_t(x)], x});
-      std::sort(xs.begin(), xs.end());
-      for (auto& [d, x] : xs) {
-        if (bombDropped(x) || tried.size() >= 2) continue;
-        size_t n0 = cs.size();
-        bombCands(x % w.cols, x / w.cols, Cand::Change, "clear the way to " + tname, 4, cs, ambient());
-        if (cs.size() > n0) tried.push_back(x);
-      }
-      // (sealed in by done panels, every way out undoes one: 4-6, the
-      // (7..9,21..24) pocket, 20000 frames by its done panels)
-      if (cs.empty() && !undoPanels) {
-        undoPanels = true, pass--;
-        continue;
-      }
-      // (the blocks before the gate are broken only by a blast that reaches
-      // it: 4-4 played on with a pierce bomb, fire 4: (7,6) was the one
-      // spot for (7,5)/(7,4) and its flame went on to the gate (7,3);
-      // 18000 frames by it. The enemies it brings back are planned again.)
-      if (cs.empty() && !gateHit && task.kind == TaskKind::EnterGate) {
-        gateHit = true, pass--;
-        continue;
-      }
-      undoPanels = false, gateHit = false;
-      if (cs.empty()) bad.insert(k), badSoft_[k] = w.frame;
-    }
-    if (!cs.empty() && tryCands(cs, live, o, 8)) return;
-    for (int x : tried) {
-      if (frame_ - bombFailAt_[x] >= 2 * kBadSoftTTL) bombFails_[x] = 0;  // (worn off: count afresh)
-      bombFails_[x]++, bombFailAt_[x] = frame_;
-    }
-    itemFailed();
-    return survive(w, live, o, ("way to " + tname).c_str());
-  }
-  switch (task.kind) {
-    case TaskKind::EnterGate:
-      // Riding and the gate still shut (the plan has nothing left to
-      // kill): the mount's own $99 rider is parked dormant while P1 rides
-      // (3-1: 10000 frames by the shut gate on a $98).
-      if (riding && !w.gateOpen && getOff()) return;
-      cs.push_back(walkCand(task.c, task.r, Cand::Exit, tname));
-      break;
-    case TaskKind::PickItem:
-      cs.push_back(walkCand(task.c, task.r, Cand::Change, tname));
-      break;
-    case TaskKind::BombSoft:
-    case TaskKind::TogglePanel:
-    case TaskKind::LightCrystal:
-    case TaskKind::PushBlock:
-    case TaskKind::PressButton:
-    case TaskKind::SpawnPlatform:
-      bombCands(sc, sr, Cand::Change, tname, 6, cs, ambient());
-      // Every spot that lights it undoes a done mode 1 panel (4-3 played
-      // on from 4-2 with fire 3: 13000 frames by (3,24), each blast over it
-      // also over (2,23)/(2,25)): bomb a spot of a set whose blasts, XORed,
-      // light exactly what is left (paritySpots), done panels or not.
-      if (cs.empty() && task.kind == TaskKind::TogglePanel) {
-        undoPanels = true;
-        std::vector<int> spots;
+    std::vector<Cand> cs;
+    // Where the task is done from; if a soft block is in the way, bomb the
+    // first one on the route instead.
+    int sc = st.standC, sr = st.standR;
+    if (dist[size_t(g.idx(sc, sr))] < 0) {
+      // The first soft block on the route, from the cell before it, else
+      // from any cell whose blast reaches it; a cell that failed 3 times
+      // (the game won't take a bomb there) is dropped, and a soft block no
+      // cell is left for is routed around.
+      std::vector<int> tried;
+      std::set<int> bad = badSoftNow();
+      for (int pass = 0; pass < 4 && cs.empty(); pass++) {
+        auto route = g.softRoute(sc, sr, bad);
+        size_t i = 1;
+        while (i < route.size() && !breakable(w.at(route[i] % w.cols, route[i] / w.cols))) i++;
+        if (i >= route.size()) break;
+        int k = route[i], kc = k % w.cols, kr = k / w.cols;
+        std::vector<std::pair<int, int>> xs{{-1, route[i - 1]}};
         for (int x = 0; x < w.cols * w.rows; x++)
-          if (dist[size_t(x)] >= 0 && canPlaceOn(w.map[size_t(x)]) && !w.bombAt(x % w.cols, x / w.cols) &&
-              !bombDropped(x) && !spoils(x % w.cols, x / w.cols))
-            spots.push_back(x);
-        std::vector<int> set = paritySpots(w, spots);
-        std::stable_sort(set.begin(), set.end(), [&](int a, int b) {
-          bool ca = covers(w, a % w.cols, a / w.cols, task.c, task.r), cb = covers(w, b % w.cols, b / w.cols, task.c, task.r);
-          return ca != cb ? ca : dist[size_t(a)] < dist[size_t(b)];
-        });
-        for (size_t i = 0; i < set.size() && i < 2; i++)
-          bombCands(set[i] % w.cols, set[i] / w.cols, Cand::Change, tname + " (parity)", 6, cs, ambient());
-        undoPanels = false;
-      }
-      break;
-    case TaskKind::HurtBoss: {
-      // The boss's path: one run with P1 holding still, every boss object's
-      // position per frame. A bomb at x (reached in d cells after `wait`)
-      // hurts it if, while the flames are out, one of its sense points is
-      // in the blast, and none was on x from the drop to the blast (a bomb
-      // on a sense point is eaten, BossEatBomb CC:A2C4). Earliest first;
-      // the oracle checks each (a boss reacts to P1, e.g. 1-8's strikes).
-      const int kMaxD = 12, kMaxWait = 120;
-      const int fuse = int(kNewFuse * eScale_ + 0.5), flame = int(kFlameFrames * eScale_ + 0.5);
-      SimReq probe;
-      probe.path = g.waypoints({g.idx(g.pc, g.pr)});
-      probe.frames = int(fpc_ * kMaxD) + kMaxWait + 4 + fuse + flame;
-      probe.bossBase = bossBase_;
-      probe.wantBoss = true;
-      std::vector<SimOut> pout;
-      o.run({probe}, pout);
-      sims_++;
-      if (pout.empty() || pout[0].btrace.empty()) return survive(w, live, o, tname.c_str());
-      const std::vector<int16_t>& bt = pout[0].btrace;
-      const int nb = int(bossBase_.size()), pf = int(bt.size()) / (2 * nb);
-      // Sense cells at frame f (cell index per point), from the last frame's points.
-      auto senseCells = [&](int f, std::vector<int>& out) {
-        out.clear();
-        for (int b = 0; b < nb; b++) {
-          const BossObj& bo = w.bosses[size_t(b)];
-          int x = bt[size_t(2 * (nb * f + b))], y = bt[size_t(2 * (nb * f + b) + 1)];
-          for (auto& sp : bo.sense) {
-            int c = (x + sp.first) >> 4, r = (y + sp.second) >> 4;
-            if (w.inside(c, r)) out.push_back(g.idx(c, r));
-          }
-        }
-      };
-      std::vector<std::vector<int>> sense(static_cast<size_t>(pf));
-      for (int f = 0; f < pf; f++) senseCells(f, sense[size_t(f)]);
-      // (the contact boxes, for covers: a cell any box reaches in [t0, t1])
-      auto boxed = [&](int c, int r, int t0, int t1) {
-        int px = c * 16 + 8, py = r * 16 + 8;
-        for (int f = std::max(0, t0); f <= std::min(pf - 1, t1); f += 2)
-          for (int b = 0; b < nb; b++) {
-            const BossObj& bo = w.bosses[size_t(b)];
-            if (!bo.hasBox) continue;
-            int x = bt[size_t(2 * (nb * f + b))], y = bt[size_t(2 * (nb * f + b) + 1)];
-            if (x + bo.box[0] - 8 < px && px <= x + bo.box[1] + 7 && y + bo.box[2] - 8 < py && py <= y + bo.box[3] + 7)
-              return 1.0;
-          }
-        return 0.0;
-      };
-      std::vector<uint8_t> inBlast(size_t(w.cols * w.rows));
-      struct X { int boom, d, k, wait; };
-      std::vector<X> xs;
-      for (int k = 0; k < w.cols * w.rows; k++) {
-        int d = dist[size_t(k)];
-        if (d < 0 || d > kMaxD) continue;
-        int xc = k % w.cols, xr = k / w.cols;
-        if (!canPlaceOn(w.at(xc, xr)) || w.bombAt(xc, xr)) continue;
-        std::fill(inBlast.begin(), inBlast.end(), 0);
-        for (const Cell& x : blastCells(w, xc, xr, w.p.fire, w.p.pierce)) inBlast[size_t(g.idx(x.c, x.r))] = 1;
-        for (int wait = 0; wait <= kMaxWait; wait += 8) {
-          int tp = wait + int(fpc_ * d + 0.5) + 2, boom = tp + fuse;
-          if (boom + flame / 2 >= pf) break;
-          bool eaten = false;
-          for (int f = tp; f <= boom && !eaten; f++)
-            for (int q : sense[size_t(f)]) eaten |= q == k;
-          if (eaten) continue;
-          int hits = 0;
-          for (int f = boom; f < boom + flame * 3 / 4; f++) {
-            bool h = false;
-            for (int q : sense[size_t(f)]) h |= inBlast[size_t(q)] != 0;
-            hits += h;
-          }
-          if (hits >= 6) {
-            xs.push_back({boom, d, k, wait});
-            break;
-          }
-        }
-      }
-      std::sort(xs.begin(), xs.end(), [](const X& a, const X& b) { return a.boom != b.boom ? a.boom < b.boom : a.d < b.d; });
-      if (xs.size() > 6) xs.resize(6);
-      Risk risk = boxed;
-      // (two covers each: the boss strikes back where P1 hides, so the
-      // second is often the one that lives)
-      std::vector<std::vector<Cand>> per;
-      // P1's bombs already out: the run must show their hits too, and this
-      // one's. A run is played only until P1 is in cover; the next bomb
-      // is planned while this one ticks (the run lived through its blast).
-      int out = 0;
-      for (const Bomb& b : w.bombs) out += !b.enemyOwned && b.fuse > 0;
-      for (const X& x : xs) {
-        per.emplace_back();
-        bombCands(x.k % w.cols, x.k / w.cols, Cand::BossHit, tname + " (wait " + std::to_string(x.wait) + ")", 2, per.back(),
-                  risk, x.wait);
-        for (Cand& c : per.back()) {
-          c.req.pre.assign(size_t(x.wait), 0);
-          c.req.frames += x.wait;
-          int d1 = wpSteps(c.req.path), d2 = wpSteps(c.req.path2);
-          c.commit = x.wait + kWalkFPT * (d1 + d2) + 2 * kSettle;
-          c.drop = 1 + out;
-          if (out) c.what += " (+" + std::to_string(out) + " out)";
-        }
-      }
-      for (size_t y = 0; y < 2; y++)
-        for (auto& p : per)
-          if (y < p.size()) cs.push_back(p[y]);
-      if (senseStale_) cs.clear();  // (it senses nothing now: just get in place)
-      if (!cs.empty() && tryCands(cs, live, o, 10)) return;
-      // No timed hit from here. The cells whose blast holds a sense point
-      // on the most frames of the boss's path (out of the contact boxes).
-      cs.clear();
-      std::vector<std::pair<int, int>> spots;  // (-score, idx)
-      for (int k = 0; k < w.cols * w.rows; k++) {
-        int d = dist[size_t(k)];
-        if (d < 0 || d > kMaxD) continue;
-        int xc = k % w.cols, xr = k / w.cols;
-        if (!canPlaceOn(w.at(xc, xr)) || boxed(xc, xr, 0, pf - 1) > 0) continue;
-        std::fill(inBlast.begin(), inBlast.end(), 0);
-        for (const Cell& x : blastCells(w, xc, xr, w.p.fire, w.p.pierce)) inBlast[size_t(g.idx(x.c, x.r))] = 1;
-        int score = 0;
-        for (int f = 0; f < pf; f += 2) {
-          bool h = false, on = false;
-          for (int q : sense[size_t(f)]) h |= inBlast[size_t(q)] != 0, on |= q == k;
-          score += h && !on;
-        }
-        if (score > 0) spots.push_back({-(score * 4 - d), k});
-      }
-      std::sort(spots.begin(), spots.end());
-      // With the remote: a trap on the best of them, then cover; frame()
-      // sets it off once a sense point is in its blast (4-8 in the world 4
-      // run: fire 6 left no cover a fused bomb's timing lived through).
-      const int kBossTraps = 2;
-      if (w.p.remote && w.p.bombs >= 1 && mine < kBossTraps) {
-        for (size_t i = 0; i < spots.size() && i < 3; i++) {
-          int k = spots[i].second;
-          if (w.bombAt(k % w.cols, k / w.cols)) continue;
+          if (x != route[i - 1] && dist[size_t(x)] >= 0 && covers(w, x % w.cols, x / w.cols, kc, kr))
+            xs.push_back({dist[size_t(x)], x});
+        std::sort(xs.begin(), xs.end());
+        for (auto& [d, x] : xs) {
+          if (bombDropped(x) || tried.size() >= 2) continue;
           size_t n0 = cs.size();
-          bombCands(k % w.cols, k / w.cols, Cand::Live, "trap for " + tname, 2, cs, risk);
-          for (size_t j = n0; j < cs.size(); j++) {
-            Cand& c = cs[j];
-            int d1 = wpSteps(c.req.path), d2 = wpSteps(c.req.path2);
-            c.req.detEnd = 0;
-            c.afterA = c.afterB = 0;
-            c.commit = kWalkFPT * (d1 + d2) + 2 * kSettle;
-            c.req.frames = c.commit + kTail;
-          }
+          bombCands(x % w.cols, x / w.cols, Cand::Change, "clear the way to " + tname, 4, cs, ambient());
+          if (cs.size() > n0) tried.push_back(x);
         }
-        if (!cs.empty() && tryCands(cs, live, o, 6)) {
-          trapSince_ = w.frame;
-          return;
+        // (sealed in by done panels, every way out undoes one: 4-6, the
+        // (7..9,21..24) pocket, 20000 frames by its done panels)
+        if (cs.empty() && !undoPanels) {
+          undoPanels = true, pass--;
+          continue;
         }
-        cs.clear();
+        // (the blocks before the gate are broken only by a blast that reaches
+        // it: 4-4 played on with a pierce bomb, fire 4: (7,6) was the one
+        // spot for (7,5)/(7,4) and its flame went on to the gate (7,3);
+        // 18000 frames by it. The enemies it brings back are planned again.)
+        if (cs.empty() && !gateHit && task.kind == TaskKind::EnterGate) {
+          gateHit = true, pass--;
+          continue;
+        }
+        undoPanels = false, gateHit = false;
+        if (cs.empty()) bad.insert(k), badSoft_[k] = w.frame;
       }
-      if (w.p.remote && mine > 0 && w.frame - trapSince_ < kTrapWait)
-        return survive(w, live, o, "traps out: waiting for the boss");
-      // Else get in place for the next hit, a few cells' walk at a time.
-      for (size_t i = 0; i < spots.size() && cs.size() < 3; i++) {
-        int k = spots[i].second;
-        auto p = g.pathTo(prev, g.pc, g.pr, k % w.cols, k / w.cols);  // (here already: wait)
-        g.cut(p, 5);
-        Cand c = walkCand(p.back() % w.cols, p.back() / w.cols, Cand::Live, tname + " (get in place)");
-        c.commit = p.size() == 1 ? 30 : hasJump(c.req.path) ? c.commit : std::min(c.commit, 60);
-        cs.push_back(c);
+      if (!cs.empty() && tryCands(cs, live, o, 8)) return;
+      for (int x : tried) {
+        if (frame_ - bombFailAt_[x] >= 2 * kBadSoftTTL) bombFails_[x] = 0;  // (worn off: count afresh)
+        bombFails_[x]++, bombFailAt_[x] = frame_;
       }
-      if (!cs.empty() && tryCands(cs, live, o, 3)) return;
-      survive(w, live, o, tname.c_str());
-      return;
+      itemFailed();
+      return survive(w, live, o, ("way to " + tname).c_str());
     }
-    case TaskKind::KillEnemy: {
-      killSlot_ = task.ref >= 0 && w.enemies[size_t(task.ref)].slot >= 4 ? w.enemies[size_t(task.ref)].slot - 4 : -1;
-      // A dormant enemy sits in a soft block (docs/enemies.md): a blast
-      // there only wakes it (flashing, immune for 128 frames), so the
-      // step is the block, not a kill (4-1: every enemy starts so, and
-      // "closing in" on one looped for 20000 frames).
-      if (task.ref >= 0) {
-        const Enemy& z = w.enemies[size_t(task.ref)];
-        if (z.dormant() && w.inside(z.col(), z.row()) && breakable(w.at(z.col(), z.row()))) {
-          std::vector<std::pair<int, int>> xs;
+    switch (task.kind) {
+      case TaskKind::EnterGate:
+        // Riding and the gate still shut (the plan has nothing left to
+        // kill): the mount's own $99 rider is parked dormant while P1 rides
+        // (3-1: 10000 frames by the shut gate on a $98).
+        if (riding && !w.gateOpen && getOff()) return;
+        cs.push_back(walkCand(task.c, task.r, Cand::Exit, tname));
+        break;
+      case TaskKind::PickItem:
+        cs.push_back(walkCand(task.c, task.r, Cand::Change, tname));
+        break;
+      case TaskKind::BombSoft:
+      case TaskKind::TogglePanel:
+      case TaskKind::LightCrystal:
+      case TaskKind::PushBlock:
+      case TaskKind::PressButton:
+      case TaskKind::SpawnPlatform:
+        bombCands(sc, sr, Cand::Change, tname, 6, cs, ambient());
+        // Every spot that lights it undoes a done mode 1 panel (4-3 played
+        // on from 4-2 with fire 3: 13000 frames by (3,24), each blast over it
+        // also over (2,23)/(2,25)): bomb a spot of a set whose blasts, XORed,
+        // light exactly what is left (paritySpots), done panels or not.
+        if (cs.empty() && task.kind == TaskKind::TogglePanel) {
+          undoPanels = true;
+          std::vector<int> spots;
           for (int x = 0; x < w.cols * w.rows; x++)
-            if (dist[size_t(x)] >= 0 && !bombDropped(x) && covers(w, x % w.cols, x / w.cols, z.col(), z.row()))
-              xs.push_back({dist[size_t(x)], x});
-          std::sort(xs.begin(), xs.end());
-          // (the 2 nearest that give a move: 4-6, the two nearest spots
-          // burnt the heart at (11,25), and the one on it was never tried)
-          int got = 0;
-          for (size_t i = 0; i < xs.size() && got < 2; i++) {
-            size_t n0 = cs.size();
-            bombCands(xs[i].second % w.cols, xs[i].second / w.cols, Cand::Change, "wake " + tname, 4, cs, ambient());
-            got += cs.size() > n0;
-          }
-          if (!cs.empty() && tryCands(cs, live, o, 8)) return;
-          cs.clear();
+            if (dist[size_t(x)] >= 0 && canPlaceOn(w.map[size_t(x)]) && !w.bombAt(x % w.cols, x / w.cols) &&
+                !bombDropped(x) && !spoils(x % w.cols, x / w.cols))
+              spots.push_back(x);
+          std::vector<int> set = paritySpots(w, spots);
+          std::stable_sort(set.begin(), set.end(), [&](int a, int b) {
+            bool ca = covers(w, a % w.cols, a / w.cols, task.c, task.r), cb = covers(w, b % w.cols, b / w.cols, task.c, task.r);
+            return ca != cb ? ca : dist[size_t(a)] < dist[size_t(b)];
+          });
+          for (size_t i = 0; i < set.size() && i < 2; i++)
+            bombCands(set[i] % w.cols, set[i] / w.cols, Cand::Change, tname + " (parity)", 6, cs, ambient());
+          undoPanels = false;
         }
-      }
-      // The remote with a bomb to spare: lay a trap where enemies are likely
-      // to walk (the model's odds an enemy enters its blast within kTrapH),
-      // go to cover and leave it; frame() sets it off when one is in. Traps
-      // out and none to spare: wait for them a while before the usual kill
-      // (its B presses would spend them).
-      const int kMaxTraps = 3, kTrapH = 600;
-      const double kGapBonus = 0.25;
-      if (w.p.remote && w.p.bombs >= 2 && mine < kMaxTraps) {
-        EnemyModel tm(w, kTrapH, uint32_t(w.frame) * 2654435761u + 3, eScale_);
-        auto runs = tm.roll(nullptr, g.pc, g.pr, 16);
-        std::vector<std::pair<double, int>> spots;  // (-odds, idx)
-        std::vector<uint8_t> in(size_t(w.cols * w.rows));
-        for (int k = 0; k < w.cols * w.rows; k++) {
-          int d = dist[size_t(k)];
-          if (d < 0 || d > 8) continue;
-          int xc = k % w.cols, xr = k / w.cols;
-          if (!canPlaceOn(w.at(xc, xr)) || w.bombAt(xc, xr) || spoils(xc, xr)) continue;
-          std::fill(in.begin(), in.end(), 0);
-          for (const Cell& x : blastCells(w, xc, xr, w.p.fire, w.p.pierce)) in[size_t(g.idx(x.c, x.r))] = 1;
-          int tp = int(fpc_ * d) + 2 + 30;  // (placed, P1 gone)
-          int hits = 0, n = 0;
-          for (const EnemyRun& er : runs) n = std::max(n, int(er.rolls.size()));
-          for (int i = 0; i < n; i++) {
-            bool h = false;
-            for (const EnemyRun& er : runs)
-              if (i < int(er.rolls.size()))
-                for (const auto& sp : er.rolls[size_t(i)])
-                  if (sp.t1 >= tp && w.inside(sp.c, sp.r) && in[size_t(g.idx(sp.c, sp.r))]) h = true;
-            hits += h;
-          }
-          // A gap a block left (it may grow back; a bomb on it keeps it
-          // open, and enemies come through it) ranks higher.
-          double gap = softSeen_.count(k) ? kGapBonus : 0;
-          if (n && hits * 10 >= n * 4) spots.push_back({-double(hits) / n - gap + d / 100.0, k});
-        }
-        std::sort(spots.begin(), spots.end());
-        for (size_t i = 0; i < spots.size() && i < 3; i++) {
-          size_t n0 = cs.size();
-          int k = spots[i].second;
-          bombCands(k % w.cols, k / w.cols, Cand::Live, "trap for " + tname, 2, cs, ambient());
-          for (size_t j = n0; j < cs.size(); j++) {
-            Cand& c = cs[j];
-            int d1 = wpSteps(c.req.path), d2 = wpSteps(c.req.path2);
-            c.req.detEnd = 0;
-            c.afterA = c.afterB = 0;
-            c.commit = kWalkFPT * (d1 + d2) + 2 * kSettle;
-            c.req.frames = c.commit + kTail;
-            char b[48];
-            std::snprintf(b, sizeof b, " (odds %.2f%s)", -spots[i].first + double(d1) / 100.0 - (softSeen_.count(k) ? kGapBonus : 0),
-                          softSeen_.count(k) ? ", on a gap" : "");
-            c.what += b;
-          }
-        }
-        if (!cs.empty() && tryCands(cs, live, o, 6)) {
-          trapSince_ = w.frame;
-          return;
-        }
-        cs.clear();
-      }
-      if (w.p.remote && mine > 0 && w.p.bombs < 2 && w.frame - trapSince_ < kTrapWait)
-        return survive(w, live, o, "traps out: waiting for an enemy");
-      // The enemy model (enemies.hpp) gives the odds a bomb at x kills:
-      // reached in d cells after standing `wait` frames, it goes off at
-      // wait + fpc*d + 2 + fuse. The best few cells go to the oracle, each
-      // with covers enemies are unlikely to come by, and with a few waits:
-      // the game's random choices follow P1's moves, so another wait is
-      // another draw.
-      const Enemy& e = w.enemies[size_t(task.ref)];
-      const int kMaxD = 10, kRolls = 16;
-      const int horizon = int(fpc_ * kMaxD) + 48 + 2 + int((kNewFuse + kFlameFrames) * eScale_) + kTail + 40;
-      {
-        char eb[64];
-        std::snprintf(eb, sizeof eb, "lag: x%.2f real frames per logic frame", eScale_);
-        if (verbose) log(eb);
-      }
-      EnemyModel em(w, horizon, uint32_t(w.frame) * 2654435761u + 1, eScale_);
-      {
-        // How long each stopped enemy stays put: one run of the real game
-        // with P1 holding still (rests on timers the world view lacks).
+        break;
+      case TaskKind::HurtBoss: {
+        // The boss's path: one run with P1 holding still, every boss object's
+        // position per frame. A bomb at x (reached in d cells after `wait`)
+        // hurts it if, while the flames are out, one of its sense points is
+        // in the blast, and none was on x from the drop to the blast (a bomb
+        // on a sense point is eaten, BossEatBomb CC:A2C4). Earliest first;
+        // the oracle checks each (a boss reacts to P1, e.g. 1-8's strikes).
+        const int kMaxD = 12, kMaxWait = 120;
+        const int fuse = int(kNewFuse * eScale_ + 0.5), flame = int(kFlameFrames * eScale_ + 0.5);
         SimReq probe;
         probe.path = g.waypoints({g.idx(g.pc, g.pr)});
-        probe.frames = horizon;
-        probe.wantEnemies = true;
+        probe.frames = int(fpc_ * kMaxD) + kMaxWait + 4 + fuse + flame;
+        probe.bossBase = bossBase_;
+        probe.wantBoss = true;
         std::vector<SimOut> pout;
         o.run({probe}, pout);
         sims_++;
-        if (!pout.empty() && !pout[0].etrace.empty()) {
-          const auto& et = pout[0].etrace;
-          const size_t nf = et.size() / kEnemySlots;
-          em.hold.assign(w.enemies.size(), -1);
-          for (size_t i = 0; i < w.enemies.size(); i++) {
-            int sl = w.enemies[i].slot - 4;
-            if (sl < 0 || sl >= kEnemySlots || et[size_t(sl)] < 0) continue;
-            size_t f = 1;
-            while (f < nf && et[f * kEnemySlots + size_t(sl)] == et[size_t(sl)]) f++;
-            em.hold[i] = int(f);
+        if (pout.empty() || pout[0].btrace.empty()) return survive(w, live, o, tname.c_str());
+        const std::vector<int16_t>& bt = pout[0].btrace;
+        const int nb = int(bossBase_.size()), pf = int(bt.size()) / (2 * nb);
+        // Sense cells at frame f (cell index per point), from the last frame's points.
+        auto senseCells = [&](int f, std::vector<int>& out) {
+          out.clear();
+          for (int b = 0; b < nb; b++) {
+            const BossObj& bo = w.bosses[size_t(b)];
+            int x = bt[size_t(2 * (nb * f + b))], y = bt[size_t(2 * (nb * f + b) + 1)];
+            for (auto& sp : bo.sense) {
+              int c = (x + sp.first) >> 4, r = (y + sp.second) >> 4;
+              if (w.inside(c, r)) out.push_back(g.idx(c, r));
+            }
           }
-        }
-      }
-      // One option: bomb at x after `wait`, the cover picked by the odds
-      // of meeting an enemy there; its odds are for that exact plan (the
-      // chasers head for P1 in that cover). score = kill odds x the odds no
-      // enemy comes by the cover.
-      struct X { double p, score; int t; Cand c; };
-      auto option = [&](int xc, int xr, int d, int wait, X& out) {
-        int tp = wait + int(fpc_ * d + 0.5) + 2;
-        int boom = tp + int(kNewFuse * eScale_ + 0.5);
-        ModelBomb mb{xc, xr, tp, boom, w.p.fire, w.p.pierce};
-        auto trackTo = [&](const Cand& c) {
-          int d2 = int(c.req.path2.size() / 2) - 1;
-          return std::vector<P1At>{{0, g.pc, g.pr}, {tp - 2, xc, xr}, {tp + int(fpc_ * d2), c.endC, c.endR}};
         };
-        std::vector<Cand> first;
-        bombCands(xc, xr, Cand::Kill, "", 1, first);
-        if (first.empty()) return false;
-        auto runs = em.roll(&mb, trackTo(first[0]), kRolls);
-        Risk risk = [&runs](int c, int r, int t0, int t1) { return EnemyModel::nearOdds(runs, c, r, t0, t1); };
-        std::vector<Cand> pick;
-        bombCands(xc, xr, Cand::Kill, "", 1, pick, risk, wait);
-        if (pick.empty()) return false;
-        if (pick[0].endC != first[0].endC || pick[0].endR != first[0].endR) runs = em.roll(&mb, trackTo(pick[0]), kRolls);
-        int d2 = int(pick[0].req.path2.size() / 2) - 1, ty = tp + int(fpc_ * d2);
-        double p = EnemyModel::killOdds(runs);
-        double safe = 1 - EnemyModel::nearOdds(runs, pick[0].endC, pick[0].endR, ty - 8, boom + kFlameFrames + kTail);
-        out = {p, p * safe, boom, pick[0]};
-        char what[120];
-        std::snprintf(what, sizeof what, "%s (odds %.2f, cover %.2f, wait %d): bomb at (%d,%d), cover (%d,%d)", tname.c_str(), p,
-                      safe, wait, xc, xr, out.c.endC, out.c.endR);
-        out.c.what = what;
-        out.c.req.pre.assign(size_t(wait), 0);
-        out.c.commit += wait;
-        out.c.req.frames += wait;
-        return true;
-      };
-      std::vector<X> xs;
-      for (int k = 0; k < w.cols * w.rows; k++) {
-        int d = dist[size_t(k)];
-        if (d < 0 || d > kMaxD) continue;
-        int xc = k % w.cols, xr = k / w.cols;
-        if (!canPlaceOn(w.at(xc, xr)) || w.bombAt(xc, xr)) continue;
-        bool any = false;  // (an enemy that could get into range at all)
-        for (const Enemy& q : w.enemies)
-          if (EnemyModel::modelled(q) && std::abs(q.col() - xc) + std::abs(q.row() - xr) <= w.p.fire + 8) any = true;
-        if (!any) continue;
-        X best{-1, -1, 0, {}};
-        for (int wait : {0, 24, 48}) {
-          X x;
-          if (option(xc, xr, d, wait, x) && x.score - wait / 400.0 > best.score - (best.p < 0 ? 0 : (best.c.req.pre.size() / 400.0)))
-            best = x;
-        }
-        if (best.p >= 0.15 && best.score >= 0.1) xs.push_back(best);
-      }
-      std::sort(xs.begin(), xs.end(), [](const X& a, const X& b) { return a.score - a.t / 1000.0 > b.score - b.t / 1000.0; });
-      if (xs.size() > 4) xs.resize(4);
-      std::vector<std::vector<Cand>> per;
-      for (const X& x : xs) per.push_back({x.c});
-      if (verbose)  // (the real enemy tracks, to hold the model to)
-        for (auto& pc : per)
-          for (Cand& c : pc) c.req.wantEnemies = true;
-      for (int extra : {0, 8, 16})
-        for (auto& pc : per)
-          for (const Cand& c0 : pc) {
-            Cand c = c0;
-            c.req.pre.resize(c.req.pre.size() + size_t(extra), 0);
-            c.commit += extra;
-            c.req.frames += extra;
-            if (extra) c.what += " +" + std::to_string(extra);
-            cs.push_back(c);
+        std::vector<std::vector<int>> sense(static_cast<size_t>(pf));
+        for (int f = 0; f < pf; f++) senseCells(f, sense[size_t(f)]);
+        // (the contact boxes, for covers: a cell any box reaches in [t0, t1])
+        auto boxed = [&](int c, int r, int t0, int t1) {
+          int px = c * 16 + 8, py = r * 16 + 8;
+          for (int f = std::max(0, t0); f <= std::min(pf - 1, t1); f += 2)
+            for (int b = 0; b < nb; b++) {
+              const BossObj& bo = w.bosses[size_t(b)];
+              if (!bo.hasBox) continue;
+              int x = bt[size_t(2 * (nb * f + b))], y = bt[size_t(2 * (nb * f + b) + 1)];
+              if (x + bo.box[0] - 8 < px && px <= x + bo.box[1] + 7 && y + bo.box[2] - 8 < py && py <= y + bo.box[3] + 7)
+                return 1.0;
+            }
+          return 0.0;
+        };
+        std::vector<uint8_t> inBlast(size_t(w.cols * w.rows));
+        struct X { int boom, d, k, wait; };
+        std::vector<X> xs;
+        for (int k = 0; k < w.cols * w.rows; k++) {
+          int d = dist[size_t(k)];
+          if (d < 0 || d > kMaxD) continue;
+          int xc = k % w.cols, xr = k / w.cols;
+          if (!canPlaceOn(w.at(xc, xr)) || w.bombAt(xc, xr)) continue;
+          std::fill(inBlast.begin(), inBlast.end(), 0);
+          for (const Cell& x : blastCells(w, xc, xr, w.p.fire, w.p.pierce)) inBlast[size_t(g.idx(x.c, x.r))] = 1;
+          for (int wait = 0; wait <= kMaxWait; wait += 8) {
+            int tp = wait + int(fpc_ * d + 0.5) + 2, boom = tp + fuse;
+            if (boom + flame / 2 >= pf) break;
+            bool eaten = false;
+            for (int f = tp; f <= boom && !eaten; f++)
+              for (int q : sense[size_t(f)]) eaten |= q == k;
+            if (eaten) continue;
+            int hits = 0;
+            for (int f = boom; f < boom + flame * 3 / 4; f++) {
+              bool h = false;
+              for (int q : sense[size_t(f)]) h |= inBlast[size_t(q)] != 0;
+              hits += h;
+            }
+            if (hits >= 6) {
+              xs.push_back({boom, d, k, wait});
+              break;
+            }
           }
-      // (last: the cells by the target or the cell it heads for)
-      std::vector<std::pair<int, int>> near;
-      for (int k = 0; k < w.cols * w.rows; k++) {
-        if (dist[size_t(k)] < 0) continue;
-        int xc = k % w.cols, xr = k / w.cols;
-        if (std::abs(xc - e.col()) + std::abs(xr - e.row()) > w.p.fire + 3) continue;
-        if (covers(w, xc, xr, e.col(), e.row()) || covers(w, xc, xr, e.tc, e.tr)) near.push_back({dist[size_t(k)], k});
+        }
+        std::sort(xs.begin(), xs.end(), [](const X& a, const X& b) { return a.boom != b.boom ? a.boom < b.boom : a.d < b.d; });
+        if (xs.size() > 6) xs.resize(6);
+        Risk risk = boxed;
+        // (two covers each: the boss strikes back where P1 hides, so the
+        // second is often the one that lives)
+        std::vector<std::vector<Cand>> per;
+        // P1's bombs already out: the run must show their hits too, and this
+        // one's. A run is played only until P1 is in cover; the next bomb
+        // is planned while this one ticks (the run lived through its blast).
+        int out = 0;
+        for (const Bomb& b : w.bombs) out += !b.enemyOwned && b.fuse > 0;
+        for (const X& x : xs) {
+          per.emplace_back();
+          bombCands(x.k % w.cols, x.k / w.cols, Cand::BossHit, tname + " (wait " + std::to_string(x.wait) + ")", 2, per.back(),
+                    risk, x.wait);
+          for (Cand& c : per.back()) {
+            c.req.pre.assign(size_t(x.wait), 0);
+            c.req.frames += x.wait;
+            int d1 = wpSteps(c.req.path), d2 = wpSteps(c.req.path2);
+            c.commit = x.wait + kWalkFPT * (d1 + d2) + 2 * kSettle;
+            c.drop = 1 + out;
+            if (out) c.what += " (+" + std::to_string(out) + " out)";
+          }
+        }
+        for (size_t y = 0; y < 2; y++)
+          for (auto& p : per)
+            if (y < p.size()) cs.push_back(p[y]);
+        if (senseStale_) cs.clear();  // (it senses nothing now: just get in place)
+        if (!cs.empty() && tryCands(cs, live, o, 10)) return;
+        // No timed hit from here. The cells whose blast holds a sense point
+        // on the most frames of the boss's path (out of the contact boxes).
+        cs.clear();
+        std::vector<std::pair<int, int>> spots;  // (-score, idx)
+        for (int k = 0; k < w.cols * w.rows; k++) {
+          int d = dist[size_t(k)];
+          if (d < 0 || d > kMaxD) continue;
+          int xc = k % w.cols, xr = k / w.cols;
+          if (!canPlaceOn(w.at(xc, xr)) || boxed(xc, xr, 0, pf - 1) > 0) continue;
+          std::fill(inBlast.begin(), inBlast.end(), 0);
+          for (const Cell& x : blastCells(w, xc, xr, w.p.fire, w.p.pierce)) inBlast[size_t(g.idx(x.c, x.r))] = 1;
+          int score = 0;
+          for (int f = 0; f < pf; f += 2) {
+            bool h = false, on = false;
+            for (int q : sense[size_t(f)]) h |= inBlast[size_t(q)] != 0, on |= q == k;
+            score += h && !on;
+          }
+          if (score > 0) spots.push_back({-(score * 4 - d), k});
+        }
+        std::sort(spots.begin(), spots.end());
+        // With the remote: a trap on the best of them, then cover; frame()
+        // sets it off once a sense point is in its blast (4-8 in the world 4
+        // run: fire 6 left no cover a fused bomb's timing lived through).
+        const int kBossTraps = 2;
+        if (w.p.remote && w.p.bombs >= 1 && mine < kBossTraps) {
+          for (size_t i = 0; i < spots.size() && i < 3; i++) {
+            int k = spots[i].second;
+            if (w.bombAt(k % w.cols, k / w.cols)) continue;
+            size_t n0 = cs.size();
+            bombCands(k % w.cols, k / w.cols, Cand::Live, "trap for " + tname, 2, cs, risk);
+            for (size_t j = n0; j < cs.size(); j++) {
+              Cand& c = cs[j];
+              int d1 = wpSteps(c.req.path), d2 = wpSteps(c.req.path2);
+              c.req.detEnd = 0;
+              c.afterA = c.afterB = 0;
+              c.commit = kWalkFPT * (d1 + d2) + 2 * kSettle;
+              c.req.frames = c.commit + kTail;
+            }
+          }
+          if (!cs.empty() && tryCands(cs, live, o, 6)) {
+            trapSince_ = w.frame;
+            return;
+          }
+          cs.clear();
+        }
+        if (w.p.remote && mine > 0 && w.frame - trapSince_ < kTrapWait)
+          return survive(w, live, o, "traps out: waiting for the boss");
+        // Else get in place for the next hit, a few cells' walk at a time.
+        for (size_t i = 0; i < spots.size() && cs.size() < 3; i++) {
+          int k = spots[i].second;
+          auto p = g.pathTo(prev, g.pc, g.pr, k % w.cols, k / w.cols);  // (here already: wait)
+          g.cut(p, 5);
+          Cand c = walkCand(p.back() % w.cols, p.back() / w.cols, Cand::Live, tname + " (get in place)");
+          c.commit = p.size() == 1 ? 30 : hasJump(c.req.path) ? c.commit : std::min(c.commit, 60);
+          cs.push_back(c);
+        }
+        if (!cs.empty() && tryCands(cs, live, o, 3)) return;
+        survive(w, live, o, tname.c_str());
+        return;
       }
-      std::sort(near.begin(), near.end());
-      for (size_t i = 0, got = 0; i < near.size() && got < 2; i++) {  // (two cells that give a move)
-        size_t n0 = cs.size();
-        bombCands(near[i].second % w.cols, near[i].second / w.cols, Cand::Kill, tname, 1, cs);
-        got += cs.size() > n0;
+      case TaskKind::KillEnemy: {
+        killSlot_ = task.ref >= 0 && w.enemies[size_t(task.ref)].slot >= 4 ? w.enemies[size_t(task.ref)].slot - 4 : -1;
+        // A dormant enemy sits in a soft block (docs/enemies.md): a blast
+        // there only wakes it (flashing, immune for 128 frames), so the
+        // step is the block, not a kill (4-1: every enemy starts so, and
+        // "closing in" on one looped for 20000 frames).
+        if (task.ref >= 0) {
+          const Enemy& z = w.enemies[size_t(task.ref)];
+          if (z.dormant() && w.inside(z.col(), z.row()) && breakable(w.at(z.col(), z.row()))) {
+            std::vector<std::pair<int, int>> xs;
+            for (int x = 0; x < w.cols * w.rows; x++)
+              if (dist[size_t(x)] >= 0 && !bombDropped(x) && covers(w, x % w.cols, x / w.cols, z.col(), z.row()))
+                xs.push_back({dist[size_t(x)], x});
+            std::sort(xs.begin(), xs.end());
+            // (the 2 nearest that give a move: 4-6, the two nearest spots
+            // burnt the heart at (11,25), and the one on it was never tried)
+            int got = 0;
+            for (size_t i = 0; i < xs.size() && got < 2; i++) {
+              size_t n0 = cs.size();
+              bombCands(xs[i].second % w.cols, xs[i].second / w.cols, Cand::Change, "wake " + tname, 4, cs, ambient());
+              got += cs.size() > n0;
+            }
+            if (!cs.empty() && tryCands(cs, live, o, 8)) return;
+            cs.clear();
+          }
+        }
+        // The remote with a bomb to spare: lay a trap where enemies are likely
+        // to walk (the model's odds an enemy enters its blast within kTrapH),
+        // go to cover and leave it; frame() sets it off when one is in. Traps
+        // out and none to spare: wait for them a while before the usual kill
+        // (its B presses would spend them).
+        const int kMaxTraps = 3, kTrapH = 600;
+        const double kGapBonus = 0.25;
+        if (w.p.remote && w.p.bombs >= 2 && mine < kMaxTraps) {
+          EnemyModel tm(w, kTrapH, uint32_t(w.frame) * 2654435761u + 3, eScale_);
+          auto runs = tm.roll(nullptr, g.pc, g.pr, 16);
+          std::vector<std::pair<double, int>> spots;  // (-odds, idx)
+          std::vector<uint8_t> in(size_t(w.cols * w.rows));
+          for (int k = 0; k < w.cols * w.rows; k++) {
+            int d = dist[size_t(k)];
+            if (d < 0 || d > 8) continue;
+            int xc = k % w.cols, xr = k / w.cols;
+            if (!canPlaceOn(w.at(xc, xr)) || w.bombAt(xc, xr) || spoils(xc, xr)) continue;
+            std::fill(in.begin(), in.end(), 0);
+            for (const Cell& x : blastCells(w, xc, xr, w.p.fire, w.p.pierce)) in[size_t(g.idx(x.c, x.r))] = 1;
+            int tp = int(fpc_ * d) + 2 + 30;  // (placed, P1 gone)
+            int hits = 0, n = 0;
+            for (const EnemyRun& er : runs) n = std::max(n, int(er.rolls.size()));
+            for (int i = 0; i < n; i++) {
+              bool h = false;
+              for (const EnemyRun& er : runs)
+                if (i < int(er.rolls.size()))
+                  for (const auto& sp : er.rolls[size_t(i)])
+                    if (sp.t1 >= tp && w.inside(sp.c, sp.r) && in[size_t(g.idx(sp.c, sp.r))]) h = true;
+              hits += h;
+            }
+            // A gap a block left (it may grow back; a bomb on it keeps it
+            // open, and enemies come through it) ranks higher.
+            double gap = softSeen_.count(k) ? kGapBonus : 0;
+            if (n && hits * 10 >= n * 4) spots.push_back({-double(hits) / n - gap + d / 100.0, k});
+          }
+          std::sort(spots.begin(), spots.end());
+          for (size_t i = 0; i < spots.size() && i < 3; i++) {
+            size_t n0 = cs.size();
+            int k = spots[i].second;
+            bombCands(k % w.cols, k / w.cols, Cand::Live, "trap for " + tname, 2, cs, ambient());
+            for (size_t j = n0; j < cs.size(); j++) {
+              Cand& c = cs[j];
+              int d1 = wpSteps(c.req.path), d2 = wpSteps(c.req.path2);
+              c.req.detEnd = 0;
+              c.afterA = c.afterB = 0;
+              c.commit = kWalkFPT * (d1 + d2) + 2 * kSettle;
+              c.req.frames = c.commit + kTail;
+              char b[48];
+              std::snprintf(b, sizeof b, " (odds %.2f%s)", -spots[i].first + double(d1) / 100.0 - (softSeen_.count(k) ? kGapBonus : 0),
+                            softSeen_.count(k) ? ", on a gap" : "");
+              c.what += b;
+            }
+          }
+          if (!cs.empty() && tryCands(cs, live, o, 6)) {
+            trapSince_ = w.frame;
+            return;
+          }
+          cs.clear();
+        }
+        if (w.p.remote && mine > 0 && w.p.bombs < 2 && w.frame - trapSince_ < kTrapWait)
+          return survive(w, live, o, "traps out: waiting for an enemy");
+        // The enemy model (enemies.hpp) gives the odds a bomb at x kills:
+        // reached in d cells after standing `wait` frames, it goes off at
+        // wait + fpc*d + 2 + fuse. The best few cells go to the oracle, each
+        // with covers enemies are unlikely to come by, and with a few waits:
+        // the game's random choices follow P1's moves, so another wait is
+        // another draw.
+        const Enemy& e = w.enemies[size_t(task.ref)];
+        const int kMaxD = 10, kRolls = 16;
+        const int horizon = int(fpc_ * kMaxD) + 48 + 2 + int((kNewFuse + kFlameFrames) * eScale_) + kTail + 40;
+        {
+          char eb[64];
+          std::snprintf(eb, sizeof eb, "lag: x%.2f real frames per logic frame", eScale_);
+          if (verbose) log(eb);
+        }
+        EnemyModel em(w, horizon, uint32_t(w.frame) * 2654435761u + 1, eScale_);
+        {
+          // How long each stopped enemy stays put: one run of the real game
+          // with P1 holding still (rests on timers the world view lacks).
+          SimReq probe;
+          probe.path = g.waypoints({g.idx(g.pc, g.pr)});
+          probe.frames = horizon;
+          probe.wantEnemies = true;
+          std::vector<SimOut> pout;
+          o.run({probe}, pout);
+          sims_++;
+          if (!pout.empty() && !pout[0].etrace.empty()) {
+            const auto& et = pout[0].etrace;
+            const size_t nf = et.size() / kEnemySlots;
+            em.hold.assign(w.enemies.size(), -1);
+            for (size_t i = 0; i < w.enemies.size(); i++) {
+              int sl = w.enemies[i].slot - 4;
+              if (sl < 0 || sl >= kEnemySlots || et[size_t(sl)] < 0) continue;
+              size_t f = 1;
+              while (f < nf && et[f * kEnemySlots + size_t(sl)] == et[size_t(sl)]) f++;
+              em.hold[i] = int(f);
+            }
+          }
+        }
+        // One option: bomb at x after `wait`, the cover picked by the odds
+        // of meeting an enemy there; its odds are for that exact plan (the
+        // chasers head for P1 in that cover). score = kill odds x the odds no
+        // enemy comes by the cover.
+        struct X { double p, score; int t; Cand c; };
+        auto option = [&](int xc, int xr, int d, int wait, X& out) {
+          int tp = wait + int(fpc_ * d + 0.5) + 2;
+          int boom = tp + int(kNewFuse * eScale_ + 0.5);
+          ModelBomb mb{xc, xr, tp, boom, w.p.fire, w.p.pierce};
+          auto trackTo = [&](const Cand& c) {
+            int d2 = int(c.req.path2.size() / 2) - 1;
+            return std::vector<P1At>{{0, g.pc, g.pr}, {tp - 2, xc, xr}, {tp + int(fpc_ * d2), c.endC, c.endR}};
+          };
+          std::vector<Cand> first;
+          bombCands(xc, xr, Cand::Kill, "", 1, first);
+          if (first.empty()) return false;
+          auto runs = em.roll(&mb, trackTo(first[0]), kRolls);
+          Risk risk = [&runs](int c, int r, int t0, int t1) { return EnemyModel::nearOdds(runs, c, r, t0, t1); };
+          std::vector<Cand> pick;
+          bombCands(xc, xr, Cand::Kill, "", 1, pick, risk, wait);
+          if (pick.empty()) return false;
+          if (pick[0].endC != first[0].endC || pick[0].endR != first[0].endR) runs = em.roll(&mb, trackTo(pick[0]), kRolls);
+          int d2 = int(pick[0].req.path2.size() / 2) - 1, ty = tp + int(fpc_ * d2);
+          double p = EnemyModel::killOdds(runs);
+          double safe = 1 - EnemyModel::nearOdds(runs, pick[0].endC, pick[0].endR, ty - 8, boom + kFlameFrames + kTail);
+          out = {p, p * safe, boom, pick[0]};
+          char what[120];
+          std::snprintf(what, sizeof what, "%s (odds %.2f, cover %.2f, wait %d): bomb at (%d,%d), cover (%d,%d)", tname.c_str(), p,
+                        safe, wait, xc, xr, out.c.endC, out.c.endR);
+          out.c.what = what;
+          out.c.req.pre.assign(size_t(wait), 0);
+          out.c.commit += wait;
+          out.c.req.frames += wait;
+          return true;
+        };
+        std::vector<X> xs;
+        for (int k = 0; k < w.cols * w.rows; k++) {
+          int d = dist[size_t(k)];
+          if (d < 0 || d > kMaxD) continue;
+          int xc = k % w.cols, xr = k / w.cols;
+          if (!canPlaceOn(w.at(xc, xr)) || w.bombAt(xc, xr)) continue;
+          bool any = false;  // (an enemy that could get into range at all)
+          for (const Enemy& q : w.enemies)
+            if (EnemyModel::modelled(q) && std::abs(q.col() - xc) + std::abs(q.row() - xr) <= w.p.fire + 8) any = true;
+          if (!any) continue;
+          X best{-1, -1, 0, {}};
+          for (int wait : {0, 24, 48}) {
+            X x;
+            if (option(xc, xr, d, wait, x) && x.score - wait / 400.0 > best.score - (best.p < 0 ? 0 : (best.c.req.pre.size() / 400.0)))
+              best = x;
+          }
+          if (best.p >= 0.15 && best.score >= 0.1) xs.push_back(best);
+        }
+        std::sort(xs.begin(), xs.end(), [](const X& a, const X& b) { return a.score - a.t / 1000.0 > b.score - b.t / 1000.0; });
+        if (xs.size() > 4) xs.resize(4);
+        std::vector<std::vector<Cand>> per;
+        for (const X& x : xs) per.push_back({x.c});
+        if (verbose)  // (the real enemy tracks, to hold the model to)
+          for (auto& pc : per)
+            for (Cand& c : pc) c.req.wantEnemies = true;
+        for (int extra : {0, 8, 16})
+          for (auto& pc : per)
+            for (const Cand& c0 : pc) {
+              Cand c = c0;
+              c.req.pre.resize(c.req.pre.size() + size_t(extra), 0);
+              c.commit += extra;
+              c.req.frames += extra;
+              if (extra) c.what += " +" + std::to_string(extra);
+              cs.push_back(c);
+            }
+        // (last: the cells by the target or the cell it heads for)
+        std::vector<std::pair<int, int>> near;
+        for (int k = 0; k < w.cols * w.rows; k++) {
+          if (dist[size_t(k)] < 0) continue;
+          int xc = k % w.cols, xr = k / w.cols;
+          if (std::abs(xc - e.col()) + std::abs(xr - e.row()) > w.p.fire + 3) continue;
+          if (covers(w, xc, xr, e.col(), e.row()) || covers(w, xc, xr, e.tc, e.tr)) near.push_back({dist[size_t(k)], k});
+        }
+        std::sort(near.begin(), near.end());
+        for (size_t i = 0, got = 0; i < near.size() && got < 2; i++) {  // (two cells that give a move)
+          size_t n0 = cs.size();
+          bombCands(near[i].second % w.cols, near[i].second / w.cols, Cand::Kill, tname, 1, cs);
+          got += cs.size() > n0;
+        }
+        if (tryCands(cs, live, o, 14)) return;
+        // No bomb gets it yet: close in a few cells, then look again.
+        cs.clear();
+        int bestK = -1, bestD = INT_MAX;
+        for (int k = 0; k < w.cols * w.rows; k++) {
+          if (dist[size_t(k)] <= 0) continue;
+          int d = std::abs(k % w.cols - e.col()) + std::abs(k / w.cols - e.row());
+          if (d >= 2 && d < bestD) bestD = d, bestK = k;
+        }
+        if (bestK >= 0) {
+          auto p = g.pathTo(prev, g.pc, g.pr, bestK % w.cols, bestK / w.cols);
+          g.cut(p, 4);
+          int k = p.back();
+          Cand c = walkCand(k % w.cols, k / w.cols, Cand::Live, tname + " (closing in)");
+          if (!hasJump(c.req.path)) c.commit = std::min(c.commit, 40);  // (never end one in the air)
+          cs.push_back(c);
+        }
+        if (!cs.empty() && tryCands(cs, live, o, 4)) return;
+        return survive(w, live, o, tname.c_str());
       }
-      if (tryCands(cs, live, o, 14)) return;
-      // No bomb gets it yet: close in a few cells, then look again.
-      cs.clear();
-      int bestK = -1, bestD = INT_MAX;
-      for (int k = 0; k < w.cols * w.rows; k++) {
-        if (dist[size_t(k)] <= 0) continue;
-        int d = std::abs(k % w.cols - e.col()) + std::abs(k / w.cols - e.row());
-        if (d >= 2 && d < bestD) bestD = d, bestK = k;
-      }
-      if (bestK >= 0) {
-        auto p = g.pathTo(prev, g.pc, g.pr, bestK % w.cols, bestK / w.cols);
-        g.cut(p, 4);
-        int k = p.back();
-        Cand c = walkCand(k % w.cols, k / w.cols, Cand::Live, tname + " (closing in)");
-        if (!hasJump(c.req.path)) c.commit = std::min(c.commit, 40);  // (never end one in the air)
-        cs.push_back(c);
-      }
-      if (!cs.empty() && tryCands(cs, live, o, 4)) return;
-      return survive(w, live, o, tname.c_str());
     }
+    if (cs.empty() || !tryCands(cs, live, o, 12)) {
+      itemFailed();
+      survive(w, live, o, tname.c_str());
+    }
+
+  };
+  std::string why0;
+  std::set<int> tried;
+  for (size_t sj = si; sj < gp.steps.size() && tried.size() < 3; sj++) {
+    // (a later step: one P1 walks to now, not the exit: that ends the
+    // stage, leaving the rest)
+    const Step& sp = gp.steps[sj];
+    if (sj > si && (gp.tasks[size_t(sp.task)].kind == TaskKind::EnterGate || dist[size_t(g.idx(sp.standC, sp.standR))] < 0))
+      continue;
+    if (!tried.insert(sp.task).second) continue;
+    deferSurvive_ = true;
+    deferWhy_.clear();
+    doStep(gp.steps[sj]);
+    deferSurvive_ = false;
+    if (deferWhy_.empty()) return;
+    if (why0.empty()) why0 = deferWhy_;
   }
-  if (cs.empty() || !tryCands(cs, live, o, 12)) {
-    itemFailed();
-    survive(w, live, o, tname.c_str());
-  }
+  survive(w, live, o, why0.c_str());
 }
 
 static_assert(kEnemySlots == AG_ESLOTS, "enemy slots");

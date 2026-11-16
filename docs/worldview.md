@@ -84,14 +84,14 @@ rawunder                  # CellItems codes, hex
 | `B` | barrel | `$D6` | blast sets off 5 small blasts |
 | `F` | furnace | `$E7` | |
 | `K` | track block | `$CD` | |
-| `k` | track | `$4D` | walkable; a `$DD` block moves along it |
+| `k` | track | `$4D` | walkable; a `$DD` block moves along it; no bombs (C0:30C8: bit 6) |
 | `S` | spring pad | `$4C` | |
 | `a` | platform spawner | `$6A` | solid; a flame on it spawns one more `$DC` platform (C1:4A16) |
 | `L` | lane end | `$36` | walkable; a `$DC` platform runs from here over the walls in line to the next `L` (docs/mechanics.md 7) |
 | `T` | trap | `$4B` | costs a heart or a life; stops a blast |
 | `t` | trap | `$63` | as `T`, but a blast goes on past it |
 | `c` | crumble floor | `$25` | becomes `C` once left |
-| `C` | cracked floor | `$65` | becomes a hole once left |
+| `C` | cracked floor | `$65` | becomes a hole once left; no bombs (C0:30C8: bit 6) |
 | `P` | gold panel | `$69`, `$73`, `$74` | todo/done in `panel` lines |
 | `y` | crystal | `$68` | |
 | `s` | light switch | `$64`, `$6E` | |

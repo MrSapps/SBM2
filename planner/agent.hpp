@@ -118,6 +118,13 @@ class Agent {
   // frame while P1 holds the remote.)
   int trapCheck(const World& tw);
   bool trapStuck() const { return trapStuck_; }
+  // A trap's B in the middle of a move: the move's run had no B there, and
+  // P1's presses stir the enemies' RNG (world 3, 3-7: B on the (4,11) trap
+  // mid-move, then the $B0 came on where the run had it turn; P1 died). The
+  // oracle plays B, then the rest of the move: true (P1 plays that run on)
+  // if P1 lives, else false (the trap waits).
+  bool trapMidMove(Oracle& o);
+  const std::vector<uint16_t>& pads() const { return pads_; }
 
  private:
   struct Cand {
@@ -137,6 +144,10 @@ class Agent {
   // frames standing still.
   bool tryCands(std::vector<Cand>& cs, const Live& live, Oracle& o, size_t maxRuns, bool waits = true);
   void survive(const World& w, const Live& live, Oracle& o, const char* why);
+  // While decide() tries a later plan step, a step whose options all die
+  // gives up (deferWhy_ set) instead of surviving.
+  bool deferSurvive_ = false;
+  std::string deferWhy_;
   void learnSpeed(const SimReq& q, const SimOut& r);
   void log(const std::string& s);
 
@@ -185,6 +196,7 @@ class Agent {
   bool holdsRemote_ = false;
   std::vector<int> remoteOrder_;
   int trapB_ = 0, trapCool_ = 0, trapSince_ = -100000, lastEnemies_ = -1;
+  int stayCell_ = -1, staySince_ = 0, lastSurvive_ = -100000;  // survive: the cell P1 keeps to, since
   bool trapStuck_ = false;
   int killSlot_ = -1;  // the kill task's enemy slot (0 = $8400), else -1  // the last decision was a survive with traps out
 };

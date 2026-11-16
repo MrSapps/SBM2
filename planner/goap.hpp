@@ -32,7 +32,6 @@ struct Task {
   bool blocksExit = false;     // KillEnemy: keeps the gate shut while alive
   bool powerup = false;        // PickItem: a bomb up, fire up or heart (the "powerups" goal)
   bool hidden = false;         // PickItem: still inside the soft block at (c,r)
-  int dc = 0, dr = 0;          // PushBlock: the way the blast pushes it
 };
 // Items worth a detour: bomb up, fire up, full fire, heart, remote.
 bool wantedItem(int kind);
@@ -60,6 +59,10 @@ struct Step {
   int standC, standR;  // where P1 does it from
   int cost;          // frames, estimated
   std::vector<std::pair<int, int>> via;  // soft blocks bombed on the way there
+  // PushBlock: the way the blasts push the block (from where it is now),
+  // how many cells, and whether it ends in a hole.
+  int dc = 0, dr = 0, pushes = 0;
+  bool sinks = false;
 };
 
 struct Plan {
@@ -76,6 +79,7 @@ struct Plan {
 
 struct PlanOptions {
   int maxNodes = 3000;  // then a greedy finish
+  bool openWay = true;  // no plan: the first move of openWay() (below)
 };
 
 // Rules shared with the lower layers.
@@ -142,6 +146,18 @@ std::vector<uint8_t> panelsDone(const World& w);
 std::vector<int> paritySpots(const World& w, const std::vector<int>& spots);
 std::vector<Task> worldTasks(const World& w);
 
+// When nothing plans: pushes along the floor (a Sokoban) and soft blocks
+// broken until every goal (a set of cells: a task's cell and the cells by
+// it) has a cell P1's region reaches, soft blocks counting as open (the
+// plan bombs those). Returns the bomb cells in order (cell indices), empty
+// when none does within maxStates. Bot.lua's stagePlan: weighted A* over
+// (map, P1's region), the heuristic each goal's relaxed distance (push
+// block 2, hole 2), summed; a plan that walls P1 off from where it stands
+// now is only a fallback.
+std::vector<int> openWay(const World& w, const std::vector<std::vector<int>>& goals, int maxStates = 3000);
+
+// The goal layer's plan; when none, the first move of openWay() toward the
+// tasks' cells, as a single step (Plan::complete false, why "open way").
 Plan plan(const World& w, const Goal& g, const PlanOptions& o = {});
 
 }  // namespace sbm2

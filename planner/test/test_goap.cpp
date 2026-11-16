@@ -255,6 +255,29 @@ TEST("goap: powerups: open the block hiding a bomb up, pick up a fire up, then t
   CHECK(Goal::parse("powerups+exit", g) && g.powerups && g.str() == "powerups+exit");
 }
 
+// World 5 starts P1 at the slowest speed, slower than its $8A (1.25 px/f):
+// a speed item lying a few cells off is worth the steps then (5-1 boxed in
+// beside one), not a far one (2-7's detour lost to the $A6) or with speed.
+TEST("goap: a speed item close by is a step only when P1 is slowest") {
+  auto has = [](const Plan& p) {
+    for (auto& st : p.steps)
+      if (p.tasks[size_t(st.task)].kind == TaskKind::PickItem) return true;
+    return false;
+  };
+  const std::vector<std::string> m = {"##########",
+                                      "#........#",
+                                      "#g########"};
+  World w = mk(m, 1, 1, "gate 1 2 open\nitem 3 1 item kind=4");
+  w.p.e0 = 1;
+  CHECK(has(run(w, "powerups+exit")));
+  World fast = w;
+  fast.p.e0 = 2;
+  CHECK(!has(run(fast, "powerups+exit")));
+  World far = mk(m, 1, 1, "gate 1 2 open\nitem 7 1 item kind=4");
+  far.p.e0 = 1;
+  CHECK(!has(run(far, "powerups+exit")));
+}
+
 // Push blocks (docs/mechanics.md 1): a blast pushes an X one cell its way;
 // into a hole, both cells become floor. The planner pushes only to open a
 // way (here the panel), from the far side, in line.
@@ -265,8 +288,7 @@ TEST("goap: push the block into the hole, then the panel behind it") {
   Plan p = run(w, "exit");
   CHECK(p.ok);
   CHECK_EQ(tasksOf(p), std::string("push 3,1; panel 5,1; gate 1,2"));
-  const Task& t = p.tasks[size_t(p.steps[0].task)];
-  CHECK(t.dc == 1 && t.dr == 0);
+  CHECK(p.steps[0].dc == 1 && p.steps[0].dr == 0 && p.steps[0].pushes == 1 && p.steps[0].sinks);
   CHECK(p.steps[0].standR == 1 && p.steps[0].standC < 3);  // the far side
   // No hole: no push (and no way to the panel).
   World v = mk({"#######",
@@ -314,7 +336,11 @@ TEST("goap: a block pushed one way can't fill the other hole") {
                 "###O###",
                 "###P###",
                 "#######"}, 1, 1, "gate 5 1 closed\npanel 5 2 mode=0\npanel 3 4 mode=0");
-  CHECK(!run(w, "exit").ok);
+  PlanOptions noWay;  // (openWay would push it for the one panel all the same)
+  noWay.openWay = false;
+  Goal ex;
+  Goal::parse("exit", ex);
+  CHECK(!plan(w, ex, noWay).ok);
   w.panels.pop_back();  // one panel: fine
   w.map[size_t(4 * w.cols + 3)] = '#';
   Plan p = run(w, "exit");
@@ -511,6 +537,108 @@ TEST("goap: mode 1 panels: bombs out count, and a done one is not bombed again")
   CHECK_EQ(b.steps.size(), size_t(2));
   for (size_t i = 0; i < b.tasks.size(); i++)
     if (b.tasks[i].kind == TaskKind::TogglePanel) CHECK(!b.done[i]);
+}
+
+// A blast pushes a block one cell onto floor too: a hole down a line of
+// floor takes a push per cell (5-2: (20,8) goes down three into the hole
+// at (20,11), the only way east).
+TEST("goap: a block pushed down a line of floor into a hole") {
+  World w = mk({"##########",
+                "#..X..OP##",
+                "#.########",
+                "#g########"}, 1, 1, "gate 1 3 closed\npanel 7 1 mode=0");
+  Plan p = run(w, "exit");
+  CHECK(p.ok && !p.steps.empty());
+  if (p.steps.empty()) return;
+  CHECK_EQ(tasksOf(p), std::string("push 3,1; panel 7,1; gate 1,3"));
+  CHECK(p.steps[0].dc == 1 && p.steps[0].pushes == 3 && p.steps[0].sinks);
+  // Something in the line: no push.
+  World v = mk({"##########",
+                "#..X.%OP##",
+                "#.########",
+                "#g########"}, 1, 1, "gate 1 3 closed\npanel 7 1 mode=0");
+  CHECK(!run(v, "exit").ok);
+}
+
+// C0:30C8 refuses a bomb on a tile with bit 6: no bomb cell on the track
+// $4D 'k' (4-6: the panel at (7,23) planned from the track at (5,23); the
+// bomb never went down, the $DD on the track changed the map, and it was
+// tried again for 18000 frames).
+TEST("goap: no bomb on a track cell") {
+  CHECK(!canPlaceOn('k') && !canPlaceOn('C'));
+  World w;
+  std::string err;
+  CHECK(loadWorld(sbm2test::worldsDir + "/4-6_track_panel.txt", w, &err));
+  Goal g;
+  Goal::parse("powerups+exit", g);
+  Plan p = plan(w, g);
+  CHECK(p.ok);
+  for (const Step& s : p.steps)
+    if (p.tasks[size_t(s.task)].kind != TaskKind::PickItem && p.tasks[size_t(s.task)].kind != TaskKind::EnterGate)
+      CHECK(w.at(s.standC, s.standR) != 'k');
+}
+
+// 5-2 from its start: blocks pushed down lines of floor, and mode 1 panels
+// side by side ((26,3) and (28,3), one blast from (27,3) over both): a
+// blast over a panel the plan has lit undoes it, so it costs as much as
+// one lit at the start (the greedy tail toggled the two by turns forever).
+TEST("goap: 5-2 from its start has a plan") {
+  World w;
+  std::string err;
+  CHECK(loadWorld(sbm2test::worldsDir + "/5-2_start.txt", w, &err));
+  Goal g;
+  Goal::parse("powerups+exit", g);
+  Plan p = plan(w, g);
+  CHECK(p.ok);
+}
+
+// Nothing plans: openWay() pushes blocks along the floor (a Sokoban) till a
+// task's cell joins P1's region; plan() hands back its first move.
+TEST("goap: open the way: a block pushed along the floor") {
+  World w = mk({"#######",
+                "#.X...#",
+                "#.##g##",
+                "#.#####",
+                "#.#####",
+                "#######"}, 1, 1, "gate 4 2 open");
+  int gate = 2 * w.cols + 4;
+  std::vector<int> way = openWay(w, {{gate}});
+  CHECK_EQ(way.size(), size_t(3));
+  if (!way.empty()) CHECK_EQ(way[0], 1 * w.cols + 1);  // (fire 2: the next from (1,1) or (2,1))
+  Plan p = run(w, "exit");
+  CHECK(p.ok && p.why == "open way" && p.steps.size() == 1);
+  if (!p.steps.empty()) CHECK(p.steps[0].standC == 1 && p.steps[0].standR == 1);
+  PlanOptions no;
+  no.openWay = false;
+  Goal ex;
+  Goal::parse("exit", ex);
+  CHECK(!plan(w, ex, no).ok);
+}
+
+// 5-5 from its start: blocks in two corridors, holes at column 25, the rest
+// of the stage beyond (bot.lua's stagePlan took 323 states).
+TEST("goap: 5-5 from its start opens a way east") {
+  World w;
+  std::string err;
+  CHECK(loadWorld(sbm2test::worldsDir + "/5-5_start.txt", w, &err));
+  Goal g;
+  Goal::parse("powerups+exit", g);
+  Plan p = plan(w, g);
+  CHECK(p.ok && p.why == "open way");
+  std::vector<int> way = openWay(w, {{9 * w.cols + 28}});  // (28,9): the way up to row 6
+  CHECK(!way.empty());
+}
+
+// openWay() opens a way to every goal or none: 2-2 at 1990, the block just
+// pushed into the hole at (4,11) is still moving ($C5 on the hole: a wall
+// for ~160 frames), so the panel at (3,10) is shut off a while. A way to
+// the two east panels alone began with the soft block (6,7), which grows
+// back: bombed again and again for 14000 frames.
+TEST("goap: open the way to every goal or none") {
+  World w;
+  std::string err;
+  CHECK(loadWorld(sbm2test::worldsDir + "/2-2_push_settling.txt", w, &err));
+  CHECK(!run(w, "powerups+exit").ok);
 }
 
 // Held in the air a jump lands 4 cells on (sliding past walls): 3-6's left

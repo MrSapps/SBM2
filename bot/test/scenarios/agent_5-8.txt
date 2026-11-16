@@ -1,0 +1,7 @@
+# The C++ agent beats the 5-8 final boss from its start (glove carried in), no deaths.
+start 57g
+agent 1
+budget 40000
+pass STAGE 60
+fail DEATH|agent error
+env SBM2_STOPAT=60

@@ -20,7 +20,32 @@ namespace {
 constexpr int kWalkFPT = 22;     // frames per cell budgeted for a walk (P1 ~16-20)
 constexpr int kNewFuse = 150;    // a fresh bomb's fuse (bot.lua NEW_FUSE)
 constexpr int kTail = 60;        // frames past the commit the oracle must also live
-constexpr int kStuckFrames = 480;  // survive on one cell this long: move off it
+// A boss fight: moves must live this long past their end (5-8: a trap's
+// cover at (2,5) lived its 60 frames; the body's sweep, which spans the
+// arena's width over rows 2-7, came 200 frames later and every way out
+// within reach was too late).
+constexpr int kBossTail = 180;
+constexpr int kStuckFrames = 480;
+// A throw (5-8 form 2): frames from the bomb's placing A to the release
+// (A, 2 off, A held for the lift, A + the way to face), and the flight.
+constexpr int kLiftFrames = 20, kThrowFrames = 13;
+// The thrown bomb's offset from P1 (world px, P1 at its cell's centre) on
+// frame j (1-based) after the release, measured in 5-8 (bot.lua
+// THROW_PATH): down / left; up mirrors down about 16 px above P1, right
+// mirrors left. di: 0 up, 1 down, 2 left, 3 right.
+void throwOffset(int di, int j, int& dx, int& dy) {
+  static const int down[12] = {-16, -16, -4, 6, 15, 23, 30, 36, 41, 44, 46, 48};
+  static const int left[13][2] = {{-4, -14}, {-4, -14}, {-8, -19}, {-12, -23}, {-16, -26}, {-20, -28}, {-24, -31},
+                                  {-28, -33}, {-32, -34}, {-36, -35}, {-40, -29}, {-44, -21}, {-48, -12}};
+  if (di < 2) {
+    int v = down[std::min(j, 12) - 1];
+    dx = 0, dy = di == 1 ? v : -32 - v;
+  }
+  else {
+    const int* p = left[std::min(j, 13) - 1];
+    dx = di == 2 ? p[0] : -p[0], dy = p[1];
+  }
+}  // survive on one cell this long: move off it
 constexpr int kSettle = 20;
 constexpr int kRideProbe = 360;  // frames a ride may take (3-5's subs: ~170-250)
 const int kDirs[4][2] = {{0, -1}, {0, 1}, {-1, 0}, {1, 0}};
@@ -323,9 +348,16 @@ void Agent::watchLag(const uint8_t* w) {
   lastTick_ = t;
 }
 
+// (throwOnly bosses: their sense points are no use to traps or timed blasts)
+void dropFlameSense(std::vector<BossObj>& bs) {
+  for (BossObj& b : bs)
+    if (throwOnly(b)) b.sense.clear();
+}
+
 // A boss in a move that senses nothing (e.g. 1-8's leap) still has its
 // points: the last ones seen, so the goal stays and P1 gets in place.
 void Agent::noteBosses(World& w) {
+  dropFlameSense(w.bosses);
   senseStale_ = false;
   bool sensing = false;
   for (BossObj& b : w.bosses) {
@@ -359,6 +391,7 @@ uint16_t Agent::frame(const uint8_t* wram, int frame, Oracle& o, const char* ext
     if (extra && *extra) {  // (bosses: a trap goes off on a sense point too)
       World x;
       if (parseWorld("worldview 1\nsize 1 1\n" + std::string(extra) + "\nmap\n.\n", x)) tw.bosses = x.bosses;
+      dropFlameSense(tw.bosses);
     }
     int why = trapCheck(tw);
     if (why == 2 && committed()) why = 0;  // (a stale one waits for the move to end)
@@ -407,6 +440,12 @@ uint16_t Agent::frame(const uint8_t* wram, int frame, Oracle& o, const char* ext
   }
   noteBosses(w);
   for (const BossObj& b : w.bosses) live.bossHp += b.hp;
+  if (!w.bosses.empty() && live.bossHp != lastBossHp_) {
+    lastBossHp_ = live.bossHp;
+    char b[96];
+    std::snprintf(b, sizeof b, "boss hp %d (state %06X)", live.bossHp, unsigned(w.bosses[0].state));
+    log(b);
+  }
   decide(w, live, o);
   return committed() ? pads_[size_t(at_++)] : 0;
 }
@@ -416,7 +455,7 @@ bool Agent::trapMidMove(Oracle& o) {
   SimReq q;
   q.pre.assign(kB, kPadB);
   q.pre.insert(q.pre.end(), pads_.begin() + at_, pads_.end());
-  q.frames = int(q.pre.size()) + kTail;
+  q.frames = int(q.pre.size()) + tail_;
   std::vector<SimOut> out;
   o.run({q}, out);
   sims_++;
@@ -622,7 +661,7 @@ void Agent::survive(const World& w, const Live& live, Oracle& o, const char* why
     if (reqs.size() >= 16) break;
     SimReq r;
     r.path = g.waypoints(g.pathTo(prev, g.pc, g.pr, k % w.cols, k / w.cols));
-    r.frames = kWalkFPT * d + kSettle + 120;
+    r.frames = kWalkFPT * d + kSettle + 120 + (tail_ - kTail);
     reqs.push_back(r);
     ends.push_back(k);
   }
@@ -653,8 +692,8 @@ void Agent::survive(const World& w, const Live& live, Oracle& o, const char* why
   int k = ends[size_t(best)];
   pads_ = keep[size_t(best)].pads;
   trace_ = keep[size_t(best)].trace;
-  // (a run that lived: play all but its last kTail frames, at most 60)
-  int n = bestDead == INT_MAX ? std::clamp(int(keep[size_t(best)].pads.size()) - kTail, 24, 60)
+  // (a run that lived: play all but its last tail_ frames, at most 60)
+  int n = bestDead == INT_MAX ? std::clamp(int(keep[size_t(best)].pads.size()) - tail_, 24, 60)
                               : std::max(1, std::min(8, bestDead / 2));
   pads_.resize(std::min(pads_.size(), size_t(n)));
   trace_.resize(pads_.size() * 2);
@@ -705,6 +744,7 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
       if (ch == 'T' || ch == 't') ch = '%';
   decisions_++;
   frame_ = w.frame;
+  tail_ = w.bosses.empty() ? kTail : kBossTail;
   killSlot_ = -1;
   holdsRemote_ = w.p.remote;
   noteRemotes(w, remoteOrder_);
@@ -777,7 +817,7 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
     c.req.pre = {kPadA, kPadA};
     c.req.detEnd = w.p.remote ? 1 + mine : 0;
     c.commit = 2 + int((w.p.remote ? 30 + kFlameFrames : kNewFuse + kFlameFrames) * eScale_ + 0.5);
-    c.req.frames = c.commit + kTail;
+    c.req.frames = c.commit + tail_;
     c.endC = g.pc, c.endR = g.pr;
     c.want = Cand::Live;
     c.what = "get off the mount: bomb at (" + std::to_string(g.pc) + "," + std::to_string(g.pr) + "), stay in it";
@@ -905,7 +945,7 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
         for (size_t i = 0; i < w.panels.size(); i++)  // (a done mode 1 panel: undone)
           if (!undoPanels && w.panels[i].mode == 1 && panelsNow[i] && w.panels[i].c == x.c && w.panels[i].r == x.r) return true;
         for (const Item& it : w.items)
-          if (it.c == x.c && it.r == x.r && wantedItem(it.kind) && dist[size_t(g.idx(x.c, x.r))] >= 0 &&
+          if (it.c == x.c && it.r == x.r && (wantedItem(it.kind) || gloveWanted(it.kind, w)) && dist[size_t(g.idx(x.c, x.r))] >= 0 &&
               !(x.c == xc && x.r == xr))  // (one on the bomb's cell: P1 picks it up placing it)
             return true;
       }
@@ -979,7 +1019,7 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
         int t2 = kWalkFPT * d + kSettle;
         int wait = int((w.p.remote ? 30 + kFlameFrames : kNewFuse + kFlameFrames) * eScale_ + 0.5);  // (logic frames: lag stretches them)
         c.commit = t1 + 2 + t2 + wait;
-        c.req.frames = c.commit + kTail;
+        c.req.frames = c.commit + tail_;
         // (play to the flames' end by the real press, not the walk budget)
         if (w.p.remote) c.afterB = int((30 + kFlameFrames) * eScale_ + 0.5);
         else c.afterA = 2 + wait + 4;
@@ -1016,7 +1056,7 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
       auto p = g.pathTo(prev, g.pc, g.pr, tc, tr);
       c.req.path = g.waypoints(p);
       c.commit = kWalkFPT * wpSteps(c.req.path) + kSettle;
-      c.req.frames = c.commit + kTail;
+      c.req.frames = c.commit + tail_;
       c.want = want;
       if (want != Cand::Exit) c.endC = tc, c.endR = tr;
       c.what = what + ": walk to (" + std::to_string(tc) + "," + std::to_string(tr) + ")";
@@ -1135,6 +1175,60 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
         if (pout.empty() || pout[0].btrace.empty()) return survive(w, live, o, tname.c_str());
         const std::vector<int16_t>& bt = pout[0].btrace;
         const int nb = int(bossBase_.size()), pf = int(bt.size()) / (2 * nb);
+        bool form2 = false, form2Hurt = false;
+        for (const BossObj& b : w.bosses) form2 |= throwOnly(b), form2Hurt |= b.state == 0xCCD2E7;
+        if (form2) {
+          // With the glove: from a cell within reach, place a bomb, lift it
+          // (A again, held: +$52 3 then 6, ~14 frames, C0:2F6E), face a way
+          // and let go (C0:2CAF). The bomb flies ~12 frames (kThrowPath,
+          // measured in 5-8) and blows up where it meets the body. A cell
+          // and way whose flight meets the body's probed path, out of P1's
+          // own blast cross, go to the oracle; a hit lowers its HP.
+          if (!w.p.glove || w.p.bombs <= 0 || form2Hurt) return survive(w, live, o, (tname + " (no throw now)").c_str());
+          struct T { int hitAt, d, k, dir; };
+          std::vector<T> ts;
+          const uint16_t dirPad[4] = {kPadUp, kPadDown, kPadLeft, kPadRight};
+          for (int k = 0; k < w.cols * w.rows; k++) {
+            int d = dist[size_t(k)];
+            if (d < 0 || d > kMaxD || !canPlaceOn(w.at(k % w.cols, k / w.cols)) || w.bombAt(k % w.cols, k / w.cols)) continue;
+            int px = (k % w.cols) * 16 + 8, py = (k / w.cols) * 16 + 7;
+            int tRel = int(fpc_ * d + 0.5) + 2 + kLiftFrames;
+            for (int di = 0; di < 4; di++)
+              for (int j = 4; j <= kThrowFrames; j++) {
+                int f = tRel + j;
+                if (f >= pf) break;
+                int dx, dy;
+                throwOffset(di, j, dx, dy);
+                bool hit = false;
+                for (int b = 0; b < nb && !hit; b++) {
+                  if (!throwOnly(w.bosses[size_t(b)])) continue;
+                  int x = bt[size_t(2 * (nb * f + b))], y = bt[size_t(2 * (nb * f + b) + 1)];
+                  hit = std::abs(px + dx - x) <= 24 && std::abs(py + dy - y) <= 24;
+                }
+                if (!hit) continue;
+                int bc = (px + dx) >> 4, br = (py + dy) >> 4;  // (it blows up there: not in P1's cross)
+                bool cross = (br == k / w.cols && std::abs(bc - k % w.cols) <= w.p.fire) ||
+                             (bc == k % w.cols && std::abs(br - k / w.cols) <= w.p.fire);
+                if (!cross) ts.push_back({f, d, k, di});
+                break;
+              }
+          }
+          std::sort(ts.begin(), ts.end(), [](const T& a, const T& b) { return a.hitAt != b.hitAt ? a.hitAt < b.hitAt : a.d < b.d; });
+          if (ts.size() > 6) ts.resize(6);
+          for (const T& t : ts) {
+            static const char* dn[4] = {"up", "down", "left", "right"};
+            Cand c = walkCand(t.k % w.cols, t.k / w.cols, Cand::BossHit, tname + " (throw " + dn[t.dir] + ")");
+            c.req.post = {kPadA, 0, 0};
+            c.req.post.insert(c.req.post.end(), kLiftFrames - 4, kPadA);
+            c.req.post.push_back(uint16_t(kPadA | dirPad[t.dir]));
+            c.req.post.push_back(0);
+            c.commit += int(c.req.post.size()) + kThrowFrames;
+            c.req.frames = c.commit + tail_;
+            cs.push_back(c);
+          }
+          if (!cs.empty() && tryCands(cs, live, o, 6)) return;
+          return survive(w, live, o, (tname + " (no throw hits)").c_str());
+        }
         // Sense cells at frame f (cell index per point), from the last frame's points.
         auto senseCells = [&](int f, std::vector<int>& out) {
           out.clear();
@@ -1256,7 +1350,7 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
               c.req.detEnd = 0;
               c.afterA = c.afterB = 0;
               c.commit = kWalkFPT * (d1 + d2) + 2 * kSettle;
-              c.req.frames = c.commit + kTail;
+              c.req.frames = c.commit + tail_;
             }
           }
           if (!cs.empty() && tryCands(cs, live, o, 6)) {
@@ -1352,7 +1446,7 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
               c.req.detEnd = 0;
               c.afterA = c.afterB = 0;
               c.commit = kWalkFPT * (d1 + d2) + 2 * kSettle;
-              c.req.frames = c.commit + kTail;
+              c.req.frames = c.commit + tail_;
               char b[48];
               std::snprintf(b, sizeof b, " (odds %.2f%s)", -spots[i].first + double(d1) / 100.0 - (softSeen_.count(k) ? kGapBonus : 0),
                             softSeen_.count(k) ? ", on a gap" : "");

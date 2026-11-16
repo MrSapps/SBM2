@@ -804,3 +804,24 @@ TEST("goap: parity spots light exactly the panels left") {
   std::vector<int> rest(set.begin() + 1, set.end());
   CHECK(paritySpots(after, spots) == rest);
 }
+
+// The glove is a power-up to fetch in 5-7 (5-8's form 2 is hurt only by
+// thrown bombs; 5-7 hides one at (13,10)), and only there.
+TEST("goap: a hidden glove is fetched before the exit in 5-7 only") {
+  World w = mk({"#######",
+                "#..%..#",
+                "#.#.#.#",
+                "#....g#",
+                "#######"}, 1, 1, "gate 5 3 open\nhidden 3 1 kind=7");
+  w.stage = 0x56;
+  Plan p = run(w, "powerups+exit");
+  CHECK(p.ok);
+  CHECK(tasksOf(p).find("item 3,1") != std::string::npos);
+  World h = w;  // (one held already)
+  h.p.glove = 1;
+  CHECK(tasksOf(run(h, "powerups+exit")).find("item 3,1") == std::string::npos);
+  World o = w;  // (another stage: 5-6 stalled on a detour for one)
+  o.stage = 0x55;
+  CHECK(tasksOf(run(o, "powerups+exit")).find("item 3,1") == std::string::npos);
+}
+

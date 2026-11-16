@@ -1537,3 +1537,69 @@ TEST("agent: survive stuck on one cell moves off it") {
   b.decide(w, liveOf(w), o);
   CHECK(b.takeLog().find("toward (3,1)") != std::string::npos);  // (at first it stays)
 }
+
+// A boss fight: a move's run must live kBossTail (180) frames past its end,
+// not 60 (5-8: a trap's cover at (2,5) lived its 60; the body's sweep over
+// rows 2-7 came 200 frames on, and no way out was left).
+TEST("agent: in a boss fight a move must live longer past its end") {
+  World w;
+  std::string err;
+  CHECK(loadWorld(sbm2test::worldsDir + "/4-8_robot_pinned.txt", w, &err));
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 2; };
+  Agent a = agentFor("exit");
+  Live l = liveOf(w);
+  l.bossHp = 3;
+  a.decide(w, l, o);
+  CHECK(a.committed() && !o.seen.empty());
+  if (!o.seen.empty()) CHECK(o.seen.back().frames >= a.pending() + 180);
+  World n = w;  // (no boss: 60)
+  n.bosses.clear();
+  FakeOracle p;
+  p.answer = o.answer;
+  Agent b = agentFor("exit");
+  b.decide(n, liveOf(n), p);
+  CHECK(b.committed() && !p.seen.empty());
+  if (!p.seen.empty()) CHECK(p.seen.back().frames < b.pending() + 180);
+}
+
+// 5-8 form 2 (CC:D139) takes no flame: only a thrown bomb in its +-24 box.
+// With the glove the agent walks to a cell, places a bomb, lifts it (A
+// held), faces the way and lets go, where the flight meets the body's path.
+TEST("agent: final boss form 2: throw a bomb at it") {
+  World w = mk({"###########",
+                "#.........#",
+                "#.........#",
+                "#.........#",
+                "#.........#",
+                "#.........#",
+                "###########"}, 2, 3, "");
+  BossObj b;
+  b.base = 0x1000, b.state = 0xCCD139, b.hp = 6;
+  b.x = 7 * 16 + 8, b.y = 3 * 16 + 8;
+  b.hasBox = true;
+  b.box[0] = -24, b.box[1] = 24, b.box[2] = -24, b.box[3] = 24;
+  b.sense = {{0, 0}};
+  w.bosses.push_back(b);
+  w.p.glove = 1;
+  w.p.bombs = 1;
+  FakeOracle o;
+  bossAnswers(o, w, 6, 5);
+  Agent a = agentFor("exit");
+  Live l = liveOf(w);
+  l.bossHp = 6;
+  World seen = w;
+  a.noteBosses(seen);
+  CHECK(seen.bosses[0].sense.empty());  // (no flame hurts it)
+  a.decide(seen, l, o);
+  CHECK(a.committed());
+  CHECK(a.what().find("(throw") != std::string::npos);
+  CHECK(!o.seen.empty() && o.seen.back().post.size() > 10 && o.seen.back().post[0] == kPadA &&
+        (o.seen.back().post[o.seen.back().post.size() - 2] & kPadA));
+  // No glove: no throw.
+  World ng = seen;
+  ng.p.glove = 0;
+  Agent n = agentFor("exit");
+  n.decide(ng, l, o);
+  CHECK(n.what().find("(throw") == std::string::npos);
+}

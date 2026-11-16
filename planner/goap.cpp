@@ -723,6 +723,11 @@ bool breakable(char c) { return c == '%' || c == 'B'; }
 bool wantedItem(int kind) {
   return kind == kItemBomb || kind == kItemFire || kind == kItemFullFire || kind == kItemHeart || kind == kItemRemote;
 }
+// The glove, in 5-7 ($56) with none yet: 5-8's form 2 is hurt only by
+// thrown bombs and its arena has no blocks, so it must be carried in (5-7
+// hides one at (13,10), docs/mechanics.md 10b). Elsewhere a detour for one
+// only cost time (5-6's at (5,18): a stall, the timer ran out).
+bool gloveWanted(int kind, const World& w) { return kind == kItemGlove && w.stage == 0x56 && !w.p.glove; }
 bool unwantedItem(int kind, const Player& p) {
   return p.remote && (kind == kItemPierce || kind == kItemBomb9 || kind == kItemBomb10);
 }
@@ -827,6 +832,8 @@ bool jumpHeld(const World& w, int c, int r, int lc, int lr) {
 // cracked floor $65 'C' too. 4-6: bombs on the (5,23) track for the panel
 // at (7,23) never went down, and the $DD moving on it changed the map, so
 // each looked done: 18000 frames.)
+bool throwOnly(const BossObj& b) { return b.state == 0xCCD139 || b.state == 0xCCD2E7; }
+
 bool canPlaceOn(char c) { return walkableClass(c) && std::string("Py^sbgvnkC").find(c) == std::string::npos; }
 
 bool walkableClass(char c) { return std::string(".i^Pyspf=ktTcCg*vnL").find(c) != std::string::npos; }
@@ -918,16 +925,22 @@ std::vector<Task> worldTasks(const World& w) {
   for (size_t i = 0; i < w.items.size(); i++) {
     const Item& it = w.items[i];
     bool speed = it.kind == kItemSpeed && w.p.e0 <= 1 && std::abs(it.c - w.p.col()) + std::abs(it.r - w.p.row()) <= kSpeedNear;
-    out.push_back({TaskKind::PickItem, it.c, it.r, int(i), false, false, wantedItem(it.kind) || speed, false});
+    out.push_back({TaskKind::PickItem, it.c, it.r, int(i), false, false, wantedItem(it.kind) || gloveWanted(it.kind, w) || speed, false});
   }
   // Wanted items still in their blocks: picked up where the block was (the
   // route bombs it first). Unwanted hidden ones are no task.
   for (const Item& it : w.hidden)
-    if (wantedItem(it.kind)) out.push_back({TaskKind::PickItem, it.c, it.r, -1, false, false, true, true});
-  // A boss part that senses flames: hurt it where its sense points are.
+    if (wantedItem(it.kind) || gloveWanted(it.kind, w)) out.push_back({TaskKind::PickItem, it.c, it.r, -1, false, false, true, true});
+  // A boss part that senses flames: hurt it where its sense points are; one
+  // hurt only by throws: where it is.
   for (size_t i = 0; i < w.bosses.size(); i++) {
     const BossObj& b = w.bosses[i];
-    if (b.sense.empty() || b.hp <= 0) continue;
+    if (b.hp <= 0) continue;
+    if (throwOnly(b)) {
+      out.push_back({TaskKind::HurtBoss, std::clamp(b.x / 16, 0, w.cols - 1), std::clamp(b.y / 16, 0, w.rows - 1), int(i), false, true});
+      continue;
+    }
+    if (b.sense.empty()) continue;
     int sx = 0, sy = 0;
     for (auto& p : b.sense) sx += p.first, sy += p.second;
     int c = std::clamp((b.x + sx / int(b.sense.size())) / 16, 0, w.cols - 1);

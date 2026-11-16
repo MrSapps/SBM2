@@ -35,9 +35,16 @@ struct Task {
 };
 // Items worth a detour: bomb up, fire up, full fire, heart, remote.
 bool wantedItem(int kind);
+// The glove: in 5-7 with none yet (5-8's form 2 needs throws).
+bool gloveWanted(int kind, const World& w);
 // Items to keep off: another bomb kind would replace the remote (+$F3 is
 // set, not or'ed: C0:9965 pierce 4, C0:9B1D remote 1, C0:9C3A 2, C0:9C19 8).
 bool unwantedItem(int kind, const Player& p);
+
+// The final boss's form 2 (5-8: fighting CC:D139, hurt CC:D2E7) takes no
+// flame (D139 clears +$24 at once): only a thrown bomb object inside its
+// +-24 box hurts it (CC:97E8, docs/enemies.md 7.4).
+bool throwOnly(const BossObj& b);
 
 // UpdateExitBlocked C1:531D: does this object keep the exit shut?
 bool blocksExit(const Enemy& e);

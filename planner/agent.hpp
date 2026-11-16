@@ -197,6 +197,8 @@ class Agent {
   std::vector<int> remoteOrder_;
   int trapB_ = 0, trapCool_ = 0, trapSince_ = -100000, lastEnemies_ = -1;
   int stayCell_ = -1, staySince_ = 0, lastSurvive_ = -100000;  // survive: the cell P1 keeps to, since
+  int lastBossHp_ = -1;  // (logged when it changes)
+  int tail_ = 60;  // frames past a move's end its run must live (kTail; kBossTail with a boss)
   bool trapStuck_ = false;
   int killSlot_ = -1;  // the kill task's enemy slot (0 = $8400), else -1  // the last decision was a survive with traps out
 };

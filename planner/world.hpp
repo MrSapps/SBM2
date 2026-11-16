@@ -51,7 +51,7 @@ struct Item { int c = 0, r = 0; bool heart = false; int kind = -1; };
 // to 9, 4 +$E0 speed (cap 5), 1/5/9/10 set +$F3 = 4/1/2/8)
 enum : int {
   kItemBomb = 0, kItemPierce = 1, kItemFire = 2, kItemFullFire = 3, kItemSpeed = 4, kItemRemote = 5,
-  kItemBomb9 = 9, kItemBomb10 = 10, kItemHeart = 11
+  kItemGlove = 7, kItemBomb9 = 9, kItemBomb10 = 10, kItemHeart = 11
 };
 struct Magnet { int c = 0, r = 0; char dir = 'u'; };
 

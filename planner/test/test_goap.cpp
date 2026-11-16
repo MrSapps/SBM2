@@ -1,5 +1,6 @@
 // Goal layer (planner/goap.cpp) on invented maps and real snapshots.
 #include "goap.hpp"
+#include "blast.hpp"
 #include "test.hpp"
 
 using namespace sbm2;
@@ -641,3 +642,37 @@ TEST("goap: a platform spawner opens the lanes that have no platform") {
   CHECK(!run(none, "exit").ok);
 }
 
+// Mode 1 panels toggle per blast: paritySpots gives spots whose blasts,
+// XORed, light exactly the panels left (4-3 played on from 4-2 with fire 3:
+// every spot by (3,24) also covered a done panel).
+TEST("goap: parity spots light exactly the panels left") {
+  World w = mk({"#######",
+                "##...g#",
+                "##.#P##",
+                "##.P.##",
+                "##P#P##",
+                "##.P.##",
+                "##P#.##",
+                "##.P.##",
+                "#######"}, 2, 1, "gate 5 1 closed\npanel 4 2 done mode=1\npanel 3 3 done mode=1\npanel 2 4 done mode=1\npanel 4 4 done mode=1\npanel 3 5 todo mode=1\npanel 2 6 done mode=1\npanel 3 7 todo mode=1");
+  w.p.fire = 3;
+  std::vector<int> spots;
+  for (int k = 0; k < w.cols * w.rows; k++)
+    if (canPlaceOn(w.map[size_t(k)])) spots.push_back(k);
+  std::vector<int> set = paritySpots(w, spots);
+  CHECK(!set.empty());
+  if (set.empty()) return;
+  std::vector<int> hits(w.panels.size(), 0);
+  for (int k : set)
+    for (const Cell& x : blastCells(w, k % w.cols, k / w.cols, w.p.fire, false))
+      for (size_t i = 0; i < w.panels.size(); i++)
+        if (w.panels[i].c == x.c && w.panels[i].r == x.r) hits[i]++;
+  for (size_t i = 0; i < w.panels.size(); i++) CHECK_EQ(int(w.panels[i].done ^ (hits[i] & 1)), 1);
+  // after one of them is bombed, the rest is the answer
+  World after = w;
+  for (const Cell& x : blastCells(w, set[0] % w.cols, set[0] / w.cols, w.p.fire, false))
+    for (Panel& p : after.panels)
+      if (p.c == x.c && p.r == x.r) p.done = !p.done;
+  std::vector<int> rest(set.begin() + 1, set.end());
+  CHECK(paritySpots(after, spots) == rest);
+}

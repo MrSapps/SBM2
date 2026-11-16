@@ -1288,3 +1288,62 @@ TEST("agent: every way out undoes a done panel: undo one") {
   CHECK(lg.find("clear the way to gate 6,1") != std::string::npos);
   CHECK(a.committed());
 }
+
+// Every spot that lights the panel undoes a done one (fire 3): bomb a
+// parity spot rather than wait for good (4-3 from 4-2: 13000 frames).
+TEST("agent: every spot by a panel undoes a done one: bomb a parity spot") {
+  World w = mk({"#######",
+                "##...g#",
+                "##.#P##",
+                "##.P.##",
+                "##P#P##",
+                "##.P.##",
+                "##P#.##",
+                "##.P.##",
+                "#######"}, 2, 1, "gate 5 1 closed\npanel 4 2 done mode=1\npanel 3 3 done mode=1\npanel 2 4 done mode=1\npanel 4 4 done mode=1\npanel 3 5 todo mode=1\npanel 2 6 done mode=1\npanel 3 7 todo mode=1");
+  w.p.fire = 3;
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 2; };
+  Agent a = agentFor("exit");
+  a.decide(w, liveOf(w), o);
+  std::string lg = a.takeLog();
+  CHECK(lg.find("(parity)") != std::string::npos);
+  CHECK(a.committed());
+}
+
+// The blocks before the open gate break only under a blast that goes on to
+// the gate (pierce): bomb anyway, the enemies it brings back get planned
+// (4-4 played on from 4-3 with a pierce bomb: 18000 frames by (7,6)).
+TEST("agent: only a blast that reaches the gate opens the way to it: bomb") {
+  World w = mk({"#######",
+                "###g###",
+                "###%###",
+                "###%###",
+                "#.....#",
+                "#.###.#",
+                "#######"}, 1, 4, "gate 3 1 open");
+  w.p.fire = 4;
+  w.p.pierce = 1;
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 2; };
+  Agent a = agentFor("exit");
+  a.decide(w, liveOf(w), o);
+  std::string lg = a.takeLog();
+  CHECK(lg.find("clear the way to gate 3,1") != std::string::npos);
+  CHECK(a.committed());
+}
+
+// The nearest spots to wake a dormant enemy burn an item: try further ones
+// (4-6 played on, frame 42222: a heart at (11,25) between P1 and the $89
+// in (12,25); "closing in" for 22000 frames).
+TEST("agent: wake spots that burn an item are passed over for the next") {
+  World w;
+  std::string err;
+  CHECK(loadWorld(sbm2test::worldsDir + "/4-6_wake_by_item.txt", w, &err));
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 2; };
+  Agent a = agentFor("powerups+exit");
+  a.decide(w, liveOf(w), o);
+  std::string lg = a.takeLog();
+  CHECK(lg.find("wake kill 12,25") != std::string::npos);
+}

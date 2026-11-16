@@ -134,6 +134,12 @@ inline int laneFrames(int n) { return 3 * 64 + 3 * 40 * n + 32; }
 // mechanics.md 4): mode 1 toggles once per blast over it (parity), mode 0
 // is done by any.
 std::vector<uint8_t> panelsDone(const World& w);
+// Mode 1 panels toggle under every blast (docs/mechanics.md 4): a set of
+// bomb spots (from `spots`, cell indices) whose blasts, XORed, light
+// exactly the panels not lit now. Pivot spots only (Gaussian elimination
+// over GF(2), spots in the order given), so after one is bombed the rest
+// is again the answer. Empty: none needed, or no set does it.
+std::vector<int> paritySpots(const World& w, const std::vector<int>& spots);
 std::vector<Task> worldTasks(const World& w);
 
 Plan plan(const World& w, const Goal& g, const PlanOptions& o = {});

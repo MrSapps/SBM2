@@ -819,9 +819,10 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
   // of reach (then the plan has priced burning it in).
   std::vector<uint8_t> panelsNow = panelsDone(w);
   bool undoPanels = false;  // (no other way out: undo one, the plan redoes it)
+  bool gateHit = false;     // (no other way to the gate: bring enemies back, kill them again)
   auto spoils = [&](int xc, int xr) {
     for (const Cell& x : blastCells(w, xc, xr, w.p.fire, w.p.pierce)) {
-      if (w.hasGate && x.c == w.gateC && x.r == w.gateR) return true;
+      if (!gateHit && w.hasGate && x.c == w.gateC && x.r == w.gateR) return true;
       for (size_t i = 0; i < w.panels.size(); i++)  // (a done mode 1 panel: undone)
         if (!undoPanels && w.panels[i].mode == 1 && panelsNow[i] && w.panels[i].c == x.c && w.panels[i].r == x.r) return true;
       for (const Item& it : w.items)
@@ -953,7 +954,15 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
         undoPanels = true, pass--;
         continue;
       }
-      undoPanels = false;
+      // (the blocks before the gate are broken only by a blast that reaches
+      // it: 4-4 played on with a pierce bomb, fire 4: (7,6) was the one
+      // spot for (7,5)/(7,4) and its flame went on to the gate (7,3);
+      // 18000 frames by it. The enemies it brings back are planned again.)
+      if (cs.empty() && !gateHit && task.kind == TaskKind::EnterGate) {
+        gateHit = true, pass--;
+        continue;
+      }
+      undoPanels = false, gateHit = false;
       if (cs.empty()) bad.insert(k), badSoft_[k] = w.frame;
     }
     if (!cs.empty() && tryCands(cs, live, o, 8)) return;
@@ -982,6 +991,26 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
     case TaskKind::PressButton:
     case TaskKind::SpawnPlatform:
       bombCands(sc, sr, Cand::Change, tname, 6, cs, ambient());
+      // Every spot that lights it undoes a done mode 1 panel (4-3 played
+      // on from 4-2 with fire 3: 13000 frames by (3,24), each blast over it
+      // also over (2,23)/(2,25)): bomb a spot of a set whose blasts, XORed,
+      // light exactly what is left (paritySpots), done panels or not.
+      if (cs.empty() && task.kind == TaskKind::TogglePanel) {
+        undoPanels = true;
+        std::vector<int> spots;
+        for (int x = 0; x < w.cols * w.rows; x++)
+          if (dist[size_t(x)] >= 0 && canPlaceOn(w.map[size_t(x)]) && !w.bombAt(x % w.cols, x / w.cols) &&
+              !bombDropped(x) && !spoils(x % w.cols, x / w.cols))
+            spots.push_back(x);
+        std::vector<int> set = paritySpots(w, spots);
+        std::stable_sort(set.begin(), set.end(), [&](int a, int b) {
+          bool ca = covers(w, a % w.cols, a / w.cols, task.c, task.r), cb = covers(w, b % w.cols, b / w.cols, task.c, task.r);
+          return ca != cb ? ca : dist[size_t(a)] < dist[size_t(b)];
+        });
+        for (size_t i = 0; i < set.size() && i < 2; i++)
+          bombCands(set[i] % w.cols, set[i] / w.cols, Cand::Change, tname + " (parity)", 6, cs, ambient());
+        undoPanels = false;
+      }
       break;
     case TaskKind::HurtBoss: {
       // The boss's path: one run with P1 holding still, every boss object's
@@ -1135,8 +1164,14 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
             if (dist[size_t(x)] >= 0 && !bombDropped(x) && covers(w, x % w.cols, x / w.cols, z.col(), z.row()))
               xs.push_back({dist[size_t(x)], x});
           std::sort(xs.begin(), xs.end());
-          for (size_t i = 0; i < xs.size() && i < 2; i++)
+          // (the 2 nearest that give a move: 4-6, the two nearest spots
+          // burnt the heart at (11,25), and the one on it was never tried)
+          int got = 0;
+          for (size_t i = 0; i < xs.size() && got < 2; i++) {
+            size_t n0 = cs.size();
             bombCands(xs[i].second % w.cols, xs[i].second / w.cols, Cand::Change, "wake " + tname, 4, cs, ambient());
+            got += cs.size() > n0;
+          }
           if (!cs.empty() && tryCands(cs, live, o, 8)) return;
           cs.clear();
         }

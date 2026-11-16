@@ -764,6 +764,54 @@ std::vector<uint8_t> panelsDone(const World& w) {
   return out;
 }
 
+std::vector<int> paritySpots(const World& w, const std::vector<int>& spots) {
+  std::vector<int> idx;  // mode 1 panels (<= 64)
+  for (size_t i = 0; i < w.panels.size() && idx.size() < 64; i++)
+    if (w.panels[i].mode == 1) idx.push_back(int(i));
+  std::vector<uint8_t> pd = panelsDone(w);
+  uint64_t want = 0;
+  for (size_t j = 0; j < idx.size(); j++)
+    if (!pd[size_t(idx[j])]) want |= uint64_t(1) << j;
+  if (!want) return {};
+  // Rows: (toggle vector, the pivot spots it is a sum of).
+  std::vector<std::pair<uint64_t, std::vector<int>>> basis;  // reduced, one per pivot bit
+  std::vector<int> pivotBit;
+  for (int k : spots) {
+    uint64_t v = 0;
+    for (const Cell& x : blastCells(w, k % w.cols, k / w.cols, std::max(1, w.p.fire), w.p.pierce))
+      for (size_t j = 0; j < idx.size(); j++)
+        if (w.panels[size_t(idx[j])].c == x.c && w.panels[size_t(idx[j])].r == x.r) v ^= uint64_t(1) << j;
+    std::vector<int> made{k};
+    for (size_t b = 0; b < basis.size(); b++)
+      if (v >> pivotBit[b] & 1) {
+        v ^= basis[b].first;
+        for (int m : basis[b].second) {
+          auto it = std::find(made.begin(), made.end(), m);
+          if (it != made.end()) made.erase(it);
+          else made.push_back(m);
+        }
+      }
+    if (!v) continue;  // (adds nothing: not a pivot)
+    int bit = __builtin_ctzll(v);
+    basis.push_back({v, made});
+    pivotBit.push_back(bit);
+  }
+  uint64_t rest = want;
+  std::vector<int> out;
+  for (size_t b = 0; b < basis.size(); b++)
+    if (rest >> pivotBit[b] & 1) {
+      rest ^= basis[b].first;
+      for (int m : basis[b].second) {
+        auto it = std::find(out.begin(), out.end(), m);
+        if (it != out.end()) out.erase(it);
+        else out.push_back(m);
+      }
+    }
+  if (rest) return {};
+  std::sort(out.begin(), out.end());
+  return out;
+}
+
 std::vector<Task> worldTasks(const World& w) {
   std::vector<Task> out;
   for (size_t i = 0; i < w.enemies.size(); i++) {

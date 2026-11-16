@@ -1659,3 +1659,20 @@ TEST("agent: no way to a panel's stand: bomb a parity spot") {
   CHECK(a.committed());
   CHECK(a.what().find("(parity)") != std::string::npos);
 }
+
+// 5-5 played on from 5-4 with fire 6 (a world 5 run, frame 8456 of the
+// cut): the push of (4,4) into the hole (3,4) is from (5,4), and its blast
+// also reaches the done panel (10,4). No bomb undoes a done panel, so the
+// step had no move: 14000 frames in survive, the timer. Undo it; the plan
+// lights it again.
+TEST("agent: every spot for a push undoes a done panel: push anyway") {
+  World w;
+  std::string err;
+  CHECK(loadWorld(sbm2test::worldsDir + "/5-5_push_undo.txt", w, &err));
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 2; };
+  Agent a = agentFor("powerups+exit");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.committed());
+  CHECK(a.what().find("push 4,4") != std::string::npos);
+}

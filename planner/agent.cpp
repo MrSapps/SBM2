@@ -1183,6 +1183,15 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
             }
           }
         if (cs.empty() && task.kind == TaskKind::TogglePanel) parity(cs);
+        // Every spot for it undoes a done mode 1 panel: so be it, the plan
+        // lights it again (5-5 played on with fire 6: the push of (4,4) into
+        // (3,4) is from row 4 only, every blast there reaches (10,4); 14000
+        // frames in survive, the timer).
+        if (cs.empty() && task.kind != TaskKind::TogglePanel) {
+          undoPanels = true;
+          bombCands(sc, sr, Cand::Change, tname + " (undoes a panel)", 6, cs, ambient());
+          undoPanels = false;
+        }
         break;
       case TaskKind::HurtBoss: {
         // The boss's path: one run with P1 holding still, every boss object's

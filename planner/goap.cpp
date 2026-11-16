@@ -261,7 +261,7 @@ class Search {
   // Floor a block can be pushed over (PushBlockTargetOk C1:27D5: $00 with
   // no bomb or enemy, or $D3).
   bool floorFor(const Node& n, int c, int r) const {
-    return cls(n, c, r) == '.' && blockOn(n, cellIdx(c, r)) < 0 && !w_.bombAt(c, r) && !(w_.hasGate && c == w_.gateC && r == w_.gateR);
+    return solidCls(n, c, r) == '.' && blockOn(n, cellIdx(c, r)) < 0 && !w_.bombAt(c, r) && !(w_.hasGate && c == w_.gateC && r == w_.gateR);
   }
 
   bool walkable(const Node& n, int c, int r) const {
@@ -275,6 +275,18 @@ class Search {
     if (t == 'X' || t == 'x') return true;  // (moved off: blockOn above)
     if (t == 'O') return filled(n, c, r);
     return walkableClass(t);
+  }
+  // A cell as blasts and pushes see it: a soft block P1 walks through
+  // (softpass) is still solid until the plan breaks it (5-5 played on with
+  // softpass: the (21,12) block planned pushed along row 12 over the soft
+  // (22,12); the game won't (PushBlockTargetOk), 5000 frames re-bombing).
+  char solidCls(const Node& n, int c, int r) const {
+    char t = w_.at(c, r);
+    if (breakable(t) && w_.p.softpass && blockOn(n, cellIdx(c, r)) < 0) {
+      int s = softAt_[size_t(cellIdx(c, r))];
+      return s >= 0 && n.done[size_t(s)] ? '.' : t;
+    }
+    return cls(n, c, r);
   }
   char cls(const Node& n, int c, int r) const {
     char t = w_.at(c, r);
@@ -477,7 +489,7 @@ class Search {
       for (int k = 1; k <= std::max(1, w_.p.fire); k++) {
         int cc = c + dd[0] * k, rr = r + dd[1] * k;
         if (!w_.inside(cc, rr)) break;
-        char x = cls(n, cc, rr);
+        char x = solidCls(n, cc, rr);
         if (breakable(x) || x == 'y' || x == 'P' || x == 'v' || x == 'a') mark(cc, rr);
         if (x == 'X' || x == 'x') {  // pushed the blast's way (into a hole)
           int b = blockOn(n, cellIdx(cc, rr));

@@ -560,6 +560,22 @@ TEST("goap: a block pushed down a line of floor into a hole") {
   CHECK(!run(v, "exit").ok);
 }
 
+// Softpass (P1 walks through soft blocks) doesn't make one floor for a
+// push: the game pushes only onto $00 or a hole (5-5 played on with
+// softpass: (21,12) planned pushed over the soft (22,12); 5000 frames of
+// the same bomb, the timer).
+TEST("goap: softpass: a soft block still stops a push") {
+  World v = mk({"##########",
+                "#..X.%OP##",
+                "#.########",
+                "#g########"}, 1, 1, "gate 1 3 closed\npanel 7 1 mode=0");
+  v.p.softpass = 1;
+  Plan p = run(v, "exit");
+  std::string ts = tasksOf(p);
+  size_t push = ts.find("push 3,1"), soft = ts.find("soft 5,1");
+  CHECK(!p.ok || (push != std::string::npos && soft != std::string::npos && soft < push));
+}
+
 // C0:30C8 refuses a bomb on a tile with bit 6: no bomb cell on the track
 // $4D 'k' (4-6: the panel at (7,23) planned from the track at (5,23); the
 // bomb never went down, the $DD on the track changed the map, and it was

@@ -293,7 +293,6 @@ bool remoteTrigger(const World& w, const std::vector<int>& order, std::vector<ui
       if (o && !o->enemyOwned && std::find(fired.begin(), fired.end(), j) == fired.end()) fired.push_back(j), q.push_back(j);
     }
   }
-  if (blast) *blast = in;
   auto hit = [&](int c, int r) { return w.inside(c, r) && in[size_t(r * w.cols + c)]; };
   // P1 clear of every remote bomb of its own, not just the oldest: one
   // already going off still reads as the oldest, and B then sets off the
@@ -304,6 +303,10 @@ bool remoteTrigger(const World& w, const std::vector<int>& order, std::vector<ui
     for (const Cell& x : blastCells(w, k % w.cols, k / w.cols, b ? b->range : w.p.fire, b ? b->pierce : w.p.pierce))
       any[size_t(x.r * w.cols + x.c)] = 1;
   }
+  // (for survive's way out: every remote's blast, the cells P1 must be clear
+  // of for the press; 5-6, seed 1: out of the oldest's alone, P1 sat in the
+  // (9,10) bomb's row, B never went, 20000 frames behind its own traps)
+  if (blast) *blast = any;
   // (the flame kills by the cell under P1's point, C0:A5F1; P1 stands
   // still for the press, so a few px of margin: with 7, 1 px off centre
   // beside the blast never counted as clear, 3-6 sat 40000 frames boxed in

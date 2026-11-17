@@ -753,6 +753,20 @@ TEST("agent: remote: lay a trap for a kill; later moves press B past the traps")
   CHECK(st.takeLog().find("traps out") == std::string::npos);
   CHECK(st.trapStuck());
   CHECK(!a.trapStuck());
+  // Two traps out (5-6, seed 1): the way out leaves both blasts, not just
+  // the oldest's (in the newer one's, B is never pressed).
+  World s3 = s2;
+  s3.bombs.push_back({});
+  s3.bombs.back().c = 9, s3.bombs.back().r = 3, s3.bombs.back().remote = true, s3.bombs.back().range = 2;
+  s3.p.x = 8 * 16 + 8;
+  Agent st3 = agentFor("enemies");
+  st3.trapCheck(s2);  // (the (3,3) one is the oldest)
+  o.seen.clear();
+  st3.decide(s3, liveOf(s3), o);
+  CHECK(!o.seen.empty() && o.seen[0].path.size() >= 2);
+  int fx = o.seen[0].path[o.seen[0].path.size() - 2] / 16, fy = o.seen[0].path.back() / 16;
+  auto inB2 = [&](int c, int r) { return inB(c, r) || (r == 3 && c >= 7 && c <= 9) || (c == 9 && r >= 1 && r <= 3); };
+  CHECK(!inB2(fx, fy));
   // A block with one trap out: B twice.
   World b = mk({"#########",
                 "#...%...#",

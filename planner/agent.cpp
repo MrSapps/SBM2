@@ -17,6 +17,32 @@ namespace sbm2 {
 
 namespace {
 
+// A blast from (bc,br) would burn a wanted item P1 can walk to (flames burn
+// items). An item can come out after the move was planned: the move stops.
+bool burnsWanted(const World& w, int bc, int br, int range, bool pierce) {
+  std::vector<uint8_t> in(size_t(w.cols * w.rows), 0);
+  bool any = false;
+  for (const Cell& x : blastCells(w, bc, br, range, pierce)) {
+    if (x.c == bc && x.r == br) continue;  // (one under the bomb: P1 picks it up placing it)
+    for (const Item& it : w.items)
+      if (it.c == x.c && it.r == x.r && (wantedItem(it.kind) || gloveWanted(it.kind, w))) in[size_t(x.r * w.cols + x.c)] = 1, any = true;
+  }
+  if (!any || !w.inside(w.p.col(), w.p.row())) return false;
+  std::vector<uint8_t> seen(in.size(), 0);
+  std::vector<int> q{w.p.row() * w.cols + w.p.col()};
+  seen[size_t(q[0])] = 1;
+  for (size_t h = 0; h < q.size(); h++) {
+    if (in[size_t(q[h])]) return true;
+    for (auto& d : {std::pair<int, int>{0, -1}, {0, 1}, {-1, 0}, {1, 0}}) {
+      int c = q[h] % w.cols + d.first, r = q[h] / w.cols + d.second;
+      if (!w.inside(c, r) || seen[size_t(r * w.cols + c)] || !walkableClass(w.at(c, r)) || w.bombAt(c, r)) continue;
+      seen[size_t(r * w.cols + c)] = 1;
+      q.push_back(r * w.cols + c);
+    }
+  }
+  return false;
+}
+
 constexpr int kWalkFPT = 22;     // frames per cell budgeted for a walk (P1 ~16-20)
 constexpr int kNewFuse = 150;    // a fresh bomb's fuse (bot.lua NEW_FUSE)
 constexpr int kTail = 60;        // frames past the commit the oracle must also live
@@ -288,8 +314,13 @@ bool remoteTrigger(const World& w, const std::vector<int>& order, std::vector<ui
       if (w.inside(c, r) && any[size_t(r * w.cols + c)]) return false;
     }
   if (w.hasGate && hit(w.gateC, w.gateR)) return false;
+  // (the glove too, where it is wanted: 5-7, seed 2, its block broke after
+  // the bomb meant to break it was laid, and the trap set that bomb off on
+  // an enemy over the bare glove; 5-8's form 2 is hurt only by throws)
+  // (any of P1's remote bombs, as for P1 above: B may set off a newer one
+  // than the oldest; 5-7, seed 2: a trap's B set off (6,4) over the glove)
   for (const Item& it : w.items)
-    if (wantedItem(it.kind) && hit(it.c, it.r)) return false;
+    if ((wantedItem(it.kind) || gloveWanted(it.kind, w)) && w.inside(it.c, it.r) && any[size_t(it.r * w.cols + it.c)]) return false;
   if (!needEnemy) return true;
   for (const Enemy& e : w.enemies) {
     if (!e.type || (e.type & 0x40) || isThrower(e.type) || e.type == 0x8F || e.dormant() || e.hidden() || e.flashing() || e.offscreen) continue;
@@ -303,6 +334,24 @@ bool remoteTrigger(const World& w, const std::vector<int>& order, std::vector<ui
     for (const auto& sp : b.sense)
       if (hit((b.x + sp.first) >> 4, (b.y + sp.second) >> 4)) return true;
   }
+  return false;
+}
+
+bool Agent::moveBurns(const World& cw, uint16_t pad) {
+  if (pad & kPadB) {
+    // B sets off the oldest remote bomb, but one already going off still
+    // reads as the oldest, and B then sets off the next (5-7, seed 2: the
+    // (10,5) trap was blowing; the B meant for it set off (6,4) over the
+    // glove): any of P1's remote bombs.
+    noteRemotes(cw, remoteOrder_);
+    for (int k : remoteOrder_) {
+      const Bomb* b = cw.bombAt(k % cw.cols, k / cw.cols);
+      if (b && burnsWanted(cw, b->c, b->r, b->range, b->pierce)) return true;
+    }
+    return false;
+  }
+  if ((pad & kPadA) && cw.p.bombs > 0 && !cw.bombAt(cw.p.col(), cw.p.row()) && !cw.p.remote)
+    return burnsWanted(cw, cw.p.col(), cw.p.row(), cw.p.fire, cw.p.pierce);
   return false;
 }
 
@@ -430,6 +479,12 @@ uint16_t Agent::frame(const uint8_t* wram, int frame, Oracle& o, const char* ext
       trapCool_ = 24;
       return kPadB;
     }
+  }
+  if (committed() && (pads_[size_t(at_)] & (kPadA | kPadB)) && moveBurns(captureWorld(wram, frame), pads_[size_t(at_)])) {
+    log("a bomb now would burn a wanted item: the move stops");
+    pads_.clear();
+    at_ = 0;
+    return 0;
   }
   if (committed()) {
     int tx = trace_[size_t(2 * at_)], ty = trace_[size_t(2 * at_ + 1)];
@@ -1164,6 +1219,27 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
         }
       }
     };
+    // A remote bomb of P1's out by a wanted item P1 can reach: fetch the item
+    // first. Every B may set that bomb off, so moveBurns() stops each move
+    // that presses one (5-7, seed 2: the glove beside the (6,4) bomb; every
+    // other step pressed B and stopped, the bombs ran out, 140000 frames).
+    {
+      std::vector<Cand> ic;
+      for (const Bomb& b : w.bombs) {
+        if (!b.remote || b.enemyOwned || !ic.empty()) continue;
+        for (const Cell& x : blastCells(w, b.c, b.r, b.range, b.pierce)) {
+          if (x.c == b.c && x.r == b.r) continue;
+          bool item = false;
+          for (const Item& it : w.items)
+            item |= it.c == x.c && it.r == x.r && (wantedItem(it.kind) || gloveWanted(it.kind, w));
+          if (item && dist[size_t(g.idx(x.c, x.r))] >= 0) {
+            ic.push_back(walkCand(x.c, x.r, Cand::Change, "item " + std::to_string(x.c) + "," + std::to_string(x.r) + " (by a remote bomb)"));
+            break;
+          }
+        }
+      }
+      if (!ic.empty() && tryCands(ic, live, o, 1)) return;
+    }
     std::vector<Cand> cs;
     // Where the task is done from; if a soft block is in the way, bomb the
     // first one on the route instead.

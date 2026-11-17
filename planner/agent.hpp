@@ -117,6 +117,12 @@ class Agent {
   // the gate and items clear. 0: no. (frame() each
   // frame while P1 holds the remote.)
   int trapCheck(const World& tw);
+  // A press in a committed move (A places, B sets off the oldest remote)
+  // whose blast would now burn a wanted item P1 can walk to: frame() stops
+  // the move (5-7, seed 2: the glove came out of its block 5 frames into a
+  // move to bomb that block open; the move's B burnt it, and 5-8's form 2
+  // is hurt only by thrown bombs). A remote bomb placed is no blast yet.
+  bool moveBurns(const World& cw, uint16_t pad);
   bool trapStuck() const { return trapStuck_; }
   // A trap's B in the middle of a move: the move's run had no B there, and
   // P1's presses stir the enemies' RNG (world 3, 3-7: B on the (4,11) trap

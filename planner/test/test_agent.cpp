@@ -1823,3 +1823,102 @@ TEST("agent: on a platform mid-lane, the step off is a lane step") {
   CHECK((q.path[2] & ~kWpFlags) == 5 * 16 + 8 && q.path[3] == 10 * 16 + 8);
   CHECK((q.path[2] & kLaneEnd) != 0);
 }
+
+// 5-7 (seed 2): the glove came out of its block after the bomb meant to
+// break it was laid; the trap then set that bomb off on an enemy, over the
+// bare glove (5-8's form 2 is hurt only by thrown bombs). Traps hold off
+// wanted items, and in 5-7 the glove is one.
+TEST("agent: trap: no B over the glove where it is wanted") {
+  World w = mk({"#########",
+                "#.......#",
+                "#.#.#.#.#",
+                "#.......#",
+                "#########"}, 1, 1,
+               "enemy slot=5 type=80 x=" + std::to_string(6 * 16 + 8) + " y=" + std::to_string(3 * 16 + 8) + " hp=1 spd=0.5");
+  w.p.remote = true;
+  w.stage = 0x56;
+  w.bombs.push_back({});
+  w.bombs.back().c = 5, w.bombs.back().r = 3, w.bombs.back().remote = true, w.bombs.back().range = 2;
+  w.items.push_back({});
+  w.items.back().c = 3, w.items.back().r = 3, w.items.back().kind = kItemGlove;
+  Agent a = agentFor("enemies");
+  CHECK_EQ(a.trapCheck(w), 0);
+  World h = w;  // (one held already: no reason to wait)
+  h.p.glove = 1;
+  Agent b = agentFor("enemies");
+  CHECK_EQ(b.trapCheck(h), 1);
+  // The glove in a newer bomb's blast, not the oldest's: B may set off the
+  // newer one (one going off still reads as the oldest).
+  World n = w;
+  n.items.back().c = 2, n.items.back().r = 1;
+  n.bombs.push_back({});
+  n.bombs.back().c = 3, n.bombs.back().r = 1, n.bombs.back().remote = true, n.bombs.back().range = 1;
+  Agent c = agentFor("enemies");
+  CHECK_EQ(c.trapCheck(n), 0);
+}
+
+// 5-7 (seed 2): the glove came out of its block 5 frames into a move to
+// bomb that block open; the move's own B set the bomb off over it. A press
+// whose blast would now burn a wanted item P1 can reach stops the move.
+TEST("agent: a move's B over an item that came out since: the move stops") {
+  World w = mk({"#########",
+                "#.......#",
+                "#.#.#.#.#",
+                "#.......#",
+                "#########"}, 1, 1);
+  w.stage = 0x56;
+  w.p.remote = true;
+  w.bombs.push_back({});
+  w.bombs.back().c = 5, w.bombs.back().r = 3, w.bombs.back().remote = true, w.bombs.back().range = 2;
+  Agent a = agentFor("exit");
+  CHECK(!a.moveBurns(w, kPadB));
+  World g = w;
+  g.items.push_back({});
+  g.items.back().c = 3, g.items.back().r = 3, g.items.back().kind = kItemGlove;
+  CHECK(a.moveBurns(g, kPadB));
+  CHECK(!a.moveBurns(g, kPadRight));
+  World o2 = g;  // (an older bomb, going off: B may set off the next one)
+  o2.bombs.insert(o2.bombs.begin(), Bomb{});
+  o2.bombs.front().c = 7, o2.bombs.front().r = 1, o2.bombs.front().remote = true, o2.bombs.front().range = 1;
+  Agent a2 = agentFor("exit");
+  a2.moveBurns(o2, 0);
+  CHECK(a2.moveBurns(o2, kPadB));
+  World u = g;  // (one P1 can't reach: the move goes on)
+  u.map[size_t(1 * u.cols + 2)] = '#', u.map[size_t(2 * u.cols + 1)] = '#';
+  CHECK(!a.moveBurns(u, kPadB));
+  // A (no remote): the bomb on P1's cell, an item in its blast.
+  World p = mk({"#######",
+                "#.....#",
+                "#######"}, 1, 1);
+  p.p.bombs = 1;
+  p.items.push_back({});
+  p.items.back().c = 3, p.items.back().r = 1, p.items.back().kind = kItemFire;
+  CHECK(a.moveBurns(p, kPadA));
+  p.items.back().c = 5;  // (out of its reach, fire 2)
+  CHECK(!a.moveBurns(p, kPadA));
+}
+
+// 5-7 (seed 2): a remote bomb of P1's out beside the glove. Any B may set
+// it off, so every move pressing one stopped (moveBurns), and the bombs ran
+// out. The item by the bomb is fetched first.
+TEST("agent: a wanted item by P1's remote bomb is fetched first") {
+  World w = mk({"#########",
+                "#.......#",
+                "#.#.#.#.#",
+                "#.......#",
+                "#########"}, 1, 1,
+               "enemy slot=5 type=80 x=" + std::to_string(7 * 16 + 8) + " y=" + std::to_string(1 * 16 + 8) + " hp=1 spd=0.5");
+  w.stage = 0x56;
+  w.p.remote = true;
+  w.p.bombs = 2;
+  w.bombs.push_back({});
+  w.bombs.back().c = 5, w.bombs.back().r = 3, w.bombs.back().remote = true, w.bombs.back().range = 2;
+  w.items.push_back({});
+  w.items.back().c = 3, w.items.back().r = 3, w.items.back().kind = kItemGlove;
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapChanged = true; };
+  Agent a = agentFor("enemies");
+  a.decide(w, liveOf(w), o);
+  std::string lg = a.takeLog();
+  CHECK(lg.find("do item 3,3 (by a remote bomb)") != std::string::npos);
+}

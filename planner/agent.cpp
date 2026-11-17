@@ -738,7 +738,7 @@ void Agent::survive(const World& w, const Live& live, Oracle& o, const char* why
   g.bfs(g.pc, g.pr, dist, prev);
   std::vector<std::pair<int, int>> cells;  // (dist, idx)
   for (int k = 0; k < w.cols * w.rows; k++)
-    if (dist[size_t(k)] >= 0 && dist[size_t(k)] <= 6 && w.at(k % w.cols, k / w.cols) != 'S')  // (no standing on a pad)
+    if (dist[size_t(k)] >= 0 && dist[size_t(k)] <= 10 && w.at(k % w.cols, k / w.cols) != 'S')  // (no standing on a pad)
       cells.push_back({dist[size_t(k)], k});
   std::sort(cells.begin(), cells.end());
   // Cells out of every known blast first, then (stuck behind a trap) out
@@ -754,7 +754,10 @@ void Agent::survive(const World& w, const Live& live, Oracle& o, const char* why
     for (auto& d : kDirs) near |= inTrap(c + d[0], r + d[1]);
     return 4 * dm.deadly(c, r, 0, 400) + 2 * inTrap(c, r) + near;
   };
-  std::stable_sort(cells.begin(), cells.end(), [&](auto& a, auto& b) { return rank(a.second) < rank(b.second); });
+  auto far = [](const std::pair<int, int>& c) { return c.first > 6; };
+  std::stable_sort(cells.begin(), cells.end(), [&](auto& a, auto& b) {
+    return std::make_pair(far(a), rank(a.second)) < std::make_pair(far(b), rank(b.second));
+  });
   // Survive has kept P1 on one cell kStuckFrames: that cell goes last (5-3:
   // a $91 two cells up stops while P1 is in its line, to flame P1 once next
   // to it; staying lived, each move toward it died: 9000 frames on (10,23)
@@ -766,8 +769,13 @@ void Agent::survive(const World& w, const Live& live, Oracle& o, const char* why
     std::stable_partition(cells.begin(), cells.end(), [&](auto& c) { return c.second != here; });
   std::vector<SimReq> reqs;
   std::vector<int> ends;
+  // Cells up to 6 steps away first, then up to 10; the runs stop at the
+  // first that lives, so more cells cost only while none does (5-7, seeds 3
+  // and 4: at its patrol's left end the boss covers column 2, rows 2..7; the
+  // 16 cells tried were all in that strip and died, row 8 never was: 2000
+  // frames of "dies at +N" counting down to a death).
   for (auto& [d, k] : cells) {
-    if (reqs.size() >= 16) break;
+    if (reqs.size() >= 48) break;
     SimReq r;
     r.path = g.waypoints(g.pathTo(prev, g.pc, g.pr, k % w.cols, k / w.cols));
     r.frames = kWalkFPT * d + kSettle + 120 + (tail_ - kTail);

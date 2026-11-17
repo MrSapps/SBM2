@@ -1936,3 +1936,30 @@ TEST("agent: a wanted item by P1's remote bomb is fetched first") {
   std::string lg = a.takeLog();
   CHECK(lg.find("do item 3,3 (by a remote bomb)") != std::string::npos);
 }
+
+// 5-7, seeds 3 and 4: at its patrol's left end the boss covers column 2,
+// rows 2..7. Survive tried the 16 nearest cells, all in that strip, all
+// dying; the safe row below was never tried. With every near cell dying,
+// farther ones are tried too.
+TEST("agent: survive: every near cell dies: farther cells are tried") {
+  World w = mk({"#########",
+                "#.......#",
+                "#.#.#.#.#",
+                "#.......#",
+                "#.#.#.#.#",
+                "#.......#",
+                "#.#.#.#.#",
+                "#.......#",
+                "#.#.#.#.#",
+                "#.......#",
+                "#########"}, 1, 1, "gate 7 9 closed");
+  FakeOracle o;
+  // only (1,9), 8 steps away, lives
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = r.px / 16 == 1 && r.py / 16 == 9 ? -1 : 100; };
+  Agent a = agentFor("exit");
+  w.frame = 0;
+  a.decide(w, liveOf(w), o);
+  std::string lg = a.takeLog();
+  CHECK(lg.find("toward (1,9), lives") != std::string::npos);
+  CHECK(o.seen.size() > 16);
+}

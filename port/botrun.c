@@ -1209,10 +1209,11 @@ static uint16_t agent_call(int fr, const char *goal, const char *extra, const ch
  * Env: SBM2_OUT, SBM2_LOAD, SBM2_PREFIX, SBM2_FRAMES, SBM2_FRAME0,
  * SBM2_STOPEARLY (stop at a death and at the next stage), SBM2_STOPAT
  * (hex stage), SBM2_GOAL (default "powerups+exit"), SBM2_SEED,
- * SBM2_AGVERBOSE. */
+ * SBM2_AGVERBOSE, SBM2_TAIL (at the stop stage: that many frames more with
+ * no input, e.g. the ending, before END). */
 static struct {
     const char *out, *load, *goal;
-    int frames, frame0, stopearly, stopat, seed, verbose;
+    int frames, frame0, stopearly, stopat, seed, verbose, tail, tailEnd, lives, lastDeath;
     int frame, loaded, stage, deadAt, lockAt, deaths, holdUntil;
     char *log; size_t loglen, logcap;
     uint16_t *base; uint32_t nbase; int valid;   /* run.inputs before the recording */
@@ -1410,15 +1411,23 @@ static void cd_frame(void)
     int st = m.wram[0x1A];
     int inStage = (cd_r16(0x8000) & 0xF000) == 0x9000 && m.wram[0xBC] != 0;
     if (inStage && st != cd.stage) {
+        if (ov_f) fprintf(ov_f, "G %u %02X\n", m.frame, st);
         if (st == cd.stopat || (cd.stage >= 0 && cd.stopearly && cd.stopat < 0)) {
             cd_logf("%6d STAGE %02X", cd.frame, st);
-            cd_finish(0, "next stage");
-            return;
+            if (cd.tail <= 0) { cd_finish(0, "next stage"); return; }
+            cd.tailEnd = cd.frame + cd.tail;   /* hands off till then */
+            cd.stage = st;
+        } else {
+            cd.stage = st;
+            cd_logf("%6d STAGE %02X hearts %02X", cd.frame, st, m.wram[0x80EF]);
+            int w = cd_seedWait(st);
+            if (w > 0) { cd.holdUntil = cd.frame + w; cd_logf("%6d SEED %d wait %d", cd.frame, cd.seed, w); }
         }
-        cd.stage = st;
-        cd_logf("%6d STAGE %02X hearts %02X", cd.frame, st, m.wram[0x80EF]);
-        int w = cd_seedWait(st);
-        if (w > 0) { cd.holdUntil = cd.frame + w; cd_logf("%6d SEED %d wait %d", cd.frame, cd.seed, w); }
+    }
+    if (cd.tailEnd >= 0) {
+        live_pad = 0;
+        if (++cd.frame >= cd.tailEnd) cd_finish(0, "next stage");
+        return;
     }
     /* A death: P1 locked as C0:A675 leaves it ($52 & $F809 == $0801), not on
      * the exit nor a spring pad, and still locked 90 frames on (the
@@ -1431,7 +1440,7 @@ static void cd_frame(void)
     else cd.lockAt = -1;
     if (cd.lockAt >= 0 && cd.frame - cd.lockAt >= 90) {
         if (cd.deadAt < 0) {
-            cd.deadAt = cd.frame;
+            cd.deadAt = cd.lastDeath = cd.frame;
             cd.deaths++;
             cd_logf("%6d DEATH at px(%d,%d) (locked since %d)", cd.frame, cd_r16(0x8010), cd_r16(0x8018), cd.lockAt);
             char p[1024];
@@ -1442,6 +1451,18 @@ static void cd_frame(void)
         }
     } else
         cd.deadAt = -1;
+    /* Any life lost is a death, whatever took it: the time up ($5C56 = 0 at
+     * 0:00 restarts the stage) leaves P1 unlocked, so only the lives
+     * count ($1C6C) shows it. (A death above lowers it later, after its
+     * animation: not twice.) */
+    int lives = m.wram[0x1C6C];
+    if (cd.lives >= 0 && lives < cd.lives && cd.frame - cd.lastDeath > 1200) {
+        cd.deaths++;
+        cd_logf("%6d DEATH life lost (lives %d -> %d, %s)", cd.frame, cd.lives, lives,
+                m.wram[0x5C56] == 0 ? "time up" : "not seen");
+        if (cd.stopearly) { cd.lives = lives; cd_finish(1, "death"); return; }
+    }
+    cd.lives = lives;
     /* the boss objects: this frame's list becomes the last */
     cd_cur = (cd_cur + 1) % 3;
     memset(cd_obj[cd_cur], 0, sizeof cd_obj[cd_cur]);
@@ -1486,6 +1507,10 @@ static void cd_init(void)
     cd.verbose = (e = getenv("SBM2_AGVERBOSE")) && *e && strcmp(e, "0");
     cd.stopat = (e = getenv("SBM2_STOPAT")) && *e ? (int)strtol(e, NULL, 16) : -1;
     cd.seed = (e = getenv("SBM2_SEED")) ? atoi(e) : 0;
+    cd.tail = (e = getenv("SBM2_TAIL")) ? atoi(e) : 0;
+    cd.tailEnd = -1;
+    cd.lives = -1;
+    cd.lastDeath = -100000;
     cd.frame = cd.frame0;
     cd.loaded = cd.load == NULL;
     cd.stage = cd.deadAt = cd.lockAt = -1;

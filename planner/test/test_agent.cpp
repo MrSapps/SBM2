@@ -318,6 +318,30 @@ TEST("agent: boss with no timed hit and the remote: lay a trap") {
   CHECK(!o.seen.empty() && !o.seen.back().post.empty() && o.seen.back().detEnd == 0);
 }
 
+// 4-8 in the whole game (speed 5): P1 coasts ~3 px past the cover's centre
+// (a press counts a frame late). Every hit lived and hurt the robot, but
+// "P1 ends at the cover" wanted 2 px: no hit for 340000 frames.
+TEST("agent: boss hit whose run ends 3 px off the cover's centre") {
+  World w;
+  std::string err;
+  CHECK(loadWorld(sbm2test::worldsDir + "/4-8_robot_fast.txt", w, &err));
+  CHECK(w.p.e0 == 5 && !w.bosses.empty());
+  FakeOracle o;
+  bossAnswers(o, w, 8, 7);
+  auto inner = o.answer;
+  o.answer = [inner](const SimReq& q, SimOut& r) {
+    inner(q, r);
+    r.px -= 3, r.py -= 1;
+  };
+  Agent a = agentFor("exit");
+  Live l = liveOf(w);
+  l.bossHp = 8;
+  a.decide(w, l, o);
+  CHECK(a.committed());
+  CHECK(a.what().find("boss") != std::string::npos);
+  CHECK(a.what().find("bomb at") != std::string::npos);
+}
+
 // Soft blocks grow back (C0:D8E8): with the countdown out, the first empty
 // listed cell with nothing on or next to it grows at once. A cover whose
 // walk crosses such a gap after P1 has left its side goes last (5-1: P1
@@ -1962,4 +1986,43 @@ TEST("agent: survive: every near cell dies: farther cells are tried") {
   std::string lg = a.takeLog();
   CHECK(lg.find("toward (1,9), lives") != std::string::npos);
   CHECK(o.seen.size() > 16);
+}
+
+// 3-1 (the whole game, seed 0): the stand for the panel (15,8) is the soft
+// block (13,8); its one other side, (14,8), is in a pocket the spring (12,8)
+// lands in, where no bomb has cover. The way into the pocket by the soft
+// (14,7) above (from (14,6), or (14,9) in the pocket, cover (15,8)) wasn't
+// tried: survive till the timer, 3 times.
+TEST("agent: way to a stand: a pocket a spring lands in has no cover: in another way") {
+  World w;
+  std::string err;
+  CHECK(loadWorld(sbm2test::worldsDir + "/3-1_soft_stand.txt", w, &err));
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 2; };
+  Agent a = agentFor("powerups+exit");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.committed());
+  CHECK(a.what().find("clear the way to panel 15,8") != std::string::npos);
+  CHECK(!o.seen.empty());
+  if (!o.seen.empty()) {
+    int bc, br, yc, yr;
+    bombAndCover(o.seen[0], bc, br, yc, yr);
+    CHECK(bc == 14 && (br == 6 || br == 9));   // (both break (14,7))
+  }
+}
+
+// 3-1 (the whole game), after the pocket fix: P1 in the pocket at (15,8),
+// (14,7) open; the one bomb spot for the stand (13,8) is (14,8), whose
+// blast lights the gate (14,2) up column 14 (fire 10). A gate hit was a
+// last resort for the gate's task only: survive till the timer.
+TEST("agent: way to a stand: the one bomb spot lights the gate: bomb anyway") {
+  World w;
+  std::string err;
+  CHECK(loadWorld(sbm2test::worldsDir + "/3-1_soft_stand2.txt", w, &err));
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 2; };
+  Agent a = agentFor("powerups+exit");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.committed());
+  CHECK(a.what().find("clear the way to panel 15,8: bomb at (14,8)") != std::string::npos);
 }

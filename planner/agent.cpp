@@ -191,7 +191,8 @@ struct Grid {
   }
   // Route to (tc,tr) where soft blocks cost extra (bombed on the way): the
   // cells, start first.
-  // avoidIn: (from, block) entries into a soft block not to take.
+  // avoidIn: (from, block) entries into a soft block not to take, and
+  // (from, landing) jumps.
   std::vector<int> softRoute(int tc, int tr, const std::set<int>& avoid = {},
                              const std::set<std::pair<int, int>>& avoidIn = {}) const {
     size_t n = size_t(w.cols * w.rows);
@@ -214,10 +215,12 @@ struct Grid {
         if (nj >= 0) {
           nc = land[di][0], nr = land[di][1];
           cost = kSpringFrames / kWalkFPT;
+          if (avoidIn.count({k, idx(nc, nr)})) continue;
         }
         else if (di >= 4) {
           nc = ln[di - 4][0], nr = ln[di - 4][1];
           cost = laneFrames(ln[di - 4][2]) / kWalkFPT;
+          if (avoidIn.count({k, idx(nc, nr)})) continue;
         }
         else if (!w.inside(nc, nr)) continue;
         else if (breakable(w.at(nc, nr))) {
@@ -620,7 +623,12 @@ bool Agent::tryCands(std::vector<Cand>& cs, const Live& live, Oracle& o, size_t 
         }
       }
       bool ok = false;
-      bool at = c.endC < 0 || (std::abs(r.px - (c.endC * 16 + 8)) <= 2 && std::abs(r.py - (c.endR * 16 + 8)) <= 2);
+      // (at the end within the path controller's 4 px "reached": at speed
+      // 5 P1 coasts ~3 px past a centre, a press counts a frame late. 4-8
+      // in the whole game, speed 5: every cover ended 3 px off, no hit was
+      // taken and P1 dodged the robot for 340000 frames)
+      const int kAtPx = 4;
+      bool at = c.endC < 0 || (std::abs(r.px - (c.endC * 16 + 8)) <= kAtPx && std::abs(r.py - (c.endR * 16 + 8)) <= kAtPx);
       switch (c.want) {
         case Cand::Exit: ok = r.dead == -2; break;
         case Cand::Live: ok = r.dead == -1 && at; break;
@@ -1268,41 +1276,76 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
       std::set<int> bad = badSoftNow();
       std::set<std::pair<int, int>> badIn;
       int lastK = -1, firstX = -1;  // (the first route's bomb cell)
-      for (int pass = 0; pass < 6 && cs.empty(); pass++) {
-        auto route = g.softRoute(sc, sr, bad, badIn);
-        size_t i = 1;
-        while (i < route.size() && !breakable(w.at(route[i] % w.cols, route[i] / w.cols))) i++;
-        if (i >= route.size()) break;
-        int k = route[i], kc = k % w.cols, kr = k / w.cols;
-        std::vector<std::pair<int, int>> xs{{-1, route[i - 1]}};
-        if (firstX < 0) firstX = route[i - 1];
-        for (int x = 0; x < w.cols * w.rows; x++)
-          if (x != route[i - 1] && dist[size_t(x)] >= 0 && covers(w, x % w.cols, x / w.cols, kc, kr))
-            xs.push_back({dist[size_t(x)], x});
-        std::sort(xs.begin(), xs.end());
-        for (auto& [d, x] : xs) {
-          if (bombDropped(x) || tried.size() >= 2) continue;
-          size_t n0 = cs.size();
-          bombCands(x % w.cols, x / w.cols, Cand::Change, "clear the way to " + tname, 4, cs, ambient());
-          if (cs.size() > n0) tried.push_back(x);
+      // Round 2, for a task other than the gate's: the same, with blasts
+      // that reach the gate (3-1 played on from the whole game, after the
+      // pocket fix: the one spot for the stand (13,8), (14,8), lights the
+      // gate (14,2) up column 14 with fire 10; survive till the timer. Not
+      // in round 1: 5-1 then lit the gate where another side was the way.)
+      bool gateRound = false;
+      for (int round = 0; round < 2 && cs.empty(); round++) {
+        if (round == 1 && task.kind == TaskKind::EnterGate) break;
+        gateRound = round == 1;
+        badIn.clear();
+        std::pair<int, int> lastEntry{-1, -1}, lastJump{-1, -1};  // (the last pass's bans)
+        for (int pass = 0; pass < 6 && cs.empty(); pass++) {
+          if (gateRound) gateHit = true;
+          auto route = g.softRoute(sc, sr, bad, badIn);
+          size_t i = 1;
+          while (i < route.size() && !breakable(w.at(route[i] % w.cols, route[i] / w.cols))) i++;
+          if (i >= route.size()) {
+            // No other side to come at: if a jump got the route there, a way
+            // there without the jump instead.
+            if (lastJump.first < 0) break;
+            badIn.erase(lastEntry), badIn.insert(lastJump), lastJump = {-1, -1};
+            continue;
+          }
+          int k = route[i], kc = k % w.cols, kr = k / w.cols;
+          std::vector<std::pair<int, int>> xs{{-1, route[i - 1]}};
+          if (firstX < 0) firstX = route[i - 1];
+          for (int x = 0; x < w.cols * w.rows; x++)
+            if (x != route[i - 1] && dist[size_t(x)] >= 0 && covers(w, x % w.cols, x / w.cols, kc, kr))
+              xs.push_back({dist[size_t(x)], x});
+          std::sort(xs.begin(), xs.end());
+          for (auto& [d, x] : xs) {
+            if (bombDropped(x) || tried.size() >= 2) continue;
+            size_t n0 = cs.size();
+            bombCands(x % w.cols, x / w.cols, Cand::Change, "clear the way to " + tname, 4, cs, ambient());
+            if (cs.size() > n0) tried.push_back(x);
+          }
+          // (sealed in by done panels, every way out undoes one: 4-6, the
+          // (7..9,21..24) pocket, 20000 frames by its done panels)
+          if (cs.empty() && !undoPanels) {
+            undoPanels = true, pass--;
+            continue;
+          }
+          // (the blocks before the gate are broken only by a blast that reaches
+          // it: 4-4 played on with a pierce bomb, fire 4: (7,6) was the one
+          // spot for (7,5)/(7,4) and its flame went on to the gate (7,3);
+          // 18000 frames by it. The enemies it brings back are planned again.)
+          if (cs.empty() && !gateHit && task.kind == TaskKind::EnterGate) {
+            gateHit = true, pass--;
+            continue;
+          }
+          undoPanels = false, gateHit = false;
+          // Next pass, another way: into the block from another side; and if
+          // there is none but the route got to this side by a jump (a spring,
+          // a lane: one way), a way to this side without the jump (3-1 played
+          // on from the whole game: the stand (13,8) is a soft block whose one
+          // other side, (14,8), the spring (12,8) lands by, a pocket no bomb
+          // there has cover in; the way in by the soft (14,7) above was never
+          // tried. Three time ups.)
+          if (cs.empty()) {
+            lastEntry = {route[i - 1], k}, lastJump = {-1, -1};
+            for (size_t j = i - 1; j >= 1 && lastJump.first < 0; j--) {
+              int a = route[j - 1], b = route[j];
+              if (std::abs(a % w.cols - b % w.cols) + std::abs(a / w.cols - b / w.cols) != 1) lastJump = {a, b};
+            }
+            badIn.insert(lastEntry);
+            lastK = k;
+          }
         }
-        // (sealed in by done panels, every way out undoes one: 4-6, the
-        // (7..9,21..24) pocket, 20000 frames by its done panels)
-        if (cs.empty() && !undoPanels) {
-          undoPanels = true, pass--;
-          continue;
-        }
-        // (the blocks before the gate are broken only by a blast that reaches
-        // it: 4-4 played on with a pierce bomb, fire 4: (7,6) was the one
-        // spot for (7,5)/(7,4) and its flame went on to the gate (7,3);
-        // 18000 frames by it. The enemies it brings back are planned again.)
-        if (cs.empty() && !gateHit && task.kind == TaskKind::EnterGate) {
-          gateHit = true, pass--;
-          continue;
-        }
-        undoPanels = false, gateHit = false;
-        if (cs.empty()) badIn.insert({route[i - 1], k}), lastK = k;
       }
+      gateHit = false;
       if (cs.empty() && lastK >= 0) badSoft_[lastK] = w.frame;
       // (no way to the stand: 4-5 played on, (29,10) lit only from the soft
       // (28,10), which only a bomb on the panel itself breaks; every spot in

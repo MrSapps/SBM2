@@ -319,10 +319,18 @@ static void run_dma(Snes *s, uint8_t mask)
     tick(s, cpu_speed - (s->clock - start) % cpu_speed);
 }
 
+/* A watcher of the CPU's APU port accesses (build/port/play's sound
+ * shadow, port/spc.h); NULL elsewhere. It changes nothing here. */
+void (*snes_apu_tap)(Snes *s, int port, uint8_t v, int write);
+
 /* --- B-bus ($21xx) --- */
 static uint8_t bbus_read(Snes *s, uint8_t r)
 {
-    if (r >= 0x40 && r < 0x80) return apu_read(s, r & 3);
+    if (r >= 0x40 && r < 0x80) {
+        uint8_t v = apu_read(s, r & 3);
+        if (snes_apu_tap) snes_apu_tap(s, r & 3, v, 0);
+        return v;
+    }
     if (r == 0x80) {
         uint8_t v = s->wram[s->wram_addr];
         s->wram_addr = (s->wram_addr + 1) & 0x1FFFF;
@@ -334,7 +342,11 @@ static uint8_t bbus_read(Snes *s, uint8_t r)
 static void bbus_write(Snes *s, uint8_t r, uint8_t v)
 {
     if (r < 0x40) { s->ppu[r] = v; ppu_write(s, r, v); return; }
-    if (r < 0x80) { apu_write(s, r & 3, v); return; }
+    if (r < 0x80) {
+        if (snes_apu_tap) snes_apu_tap(s, r & 3, v, 1);
+        apu_write(s, r & 3, v);
+        return;
+    }
     switch (r) {
     case 0x80: s->wram[s->wram_addr] = v; s->wram_addr = (s->wram_addr + 1) & 0x1FFFF; break;
     case 0x81: s->wram_addr = (s->wram_addr & 0x1FF00) | v; break;

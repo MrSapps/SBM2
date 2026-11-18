@@ -31,4 +31,12 @@ int ov_dead(int ev);
 void ov_frame(const uint8_t *wram, uint32_t vf, const uint32_t *game, uint16_t pad, const OvWin *win, int nwin,
               uint32_t *canvas);
 
+/* The panel's "NOW": the move being played, or (none yet this stage) the
+ * stage's intro / the ending. */
+const char *ov_now(void);
+/* The panel's width, and the futures grid for nwin windows in W x H: as
+ * many columns (1-4) as make the windows biggest (256:224). */
+int ov_panel_w(void);
+void ov_grid(int nwin, int W, int H, int *cols, int *ww, int *wh, int *gap);
+
 #endif

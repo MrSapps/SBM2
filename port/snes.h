@@ -120,6 +120,9 @@ void snes_free(Snes *s);
 void snes_power(Snes *s);
 /* One CPU instruction (or interrupt entry / idle cycle). */
 void snes_step(Snes *s);
+/* Called on each CPU read (write = 0) or write of $2140-$2143 (port 0-3),
+ * when set: build/port/play's sound shadow. */
+extern void (*snes_apu_tap)(Snes *s, int port, uint8_t v, int write);
 /* Debug view of the bus: no side effects, no time. */
 uint8_t snes_peek(void *s, uint32_t addr);
 /* Bus access as the CPU would make it (side effects and time). */

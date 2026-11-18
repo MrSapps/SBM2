@@ -1,7 +1,7 @@
 ASAR := tools/asar
 ROM  := build/sbm2.sfc
 
-.PHONY: all compare disasm coverage clean verify trace verify-hybrid bot-test planner-test ppu-test
+.PHONY: all compare disasm coverage clean verify trace verify-hybrid bot-test planner-test ppu-test spc-test spc-check overlay-test
 all: compare
 
 $(ROM): $(wildcard src/*.asm)
@@ -52,10 +52,10 @@ build/port/hybrid: $(HYBRID_SRC) port/hook.h port/snes.h port/cpu.h port/ppu.h
 	$(CC) $(CFLAGS) -o $@ $(HYBRID_SRC)
 
 # Front-end: the hybrid with the PPU drawing (SDL2 window if available).
-PLAY_SRC := port/play.c port/overlay.c port/ppu.c port/hook.c port/game.c port/snes.c port/cpu.c
+PLAY_SRC := port/play.c port/overlay.c port/ppu.c port/hook.c port/game.c port/snes.c port/cpu.c port/spc.c port/spc_dsp.c
 SDL_CFLAGS := $(shell pkg-config --cflags sdl2 2>/dev/null)
 SDL_LIBS := $(shell pkg-config --libs sdl2 2>/dev/null)
-build/port/play: $(PLAY_SRC) port/hook.h port/snes.h port/cpu.h port/ppu.h port/overlay.h build/port/ovfont.h
+build/port/play: $(PLAY_SRC) port/hook.h port/snes.h port/cpu.h port/ppu.h port/overlay.h port/spc.h build/port/ovfont.h build/port/gauss.h
 	@mkdir -p build/port
 	$(CC) $(CFLAGS) -D_DEFAULT_SOURCE -Ibuild/port $(if $(SDL_LIBS),-DHAVE_SDL $(SDL_CFLAGS)) -o $@ $(PLAY_SRC) $(SDL_LIBS) -lm
 
@@ -63,6 +63,37 @@ build/port/play: $(PLAY_SRC) port/hook.h port/snes.h port/cpu.h port/ppu.h port/
 build/port/ovfont.h: port/mkfont.py
 	@mkdir -p build/port
 	python3 port/mkfont.py $@
+
+# The S-DSP's interpolation table (the chip's data: from Mesen's source if
+# present, else fitted).
+build/port/gauss.h: port/mkgauss.py
+	@mkdir -p build/port
+	python3 port/mkgauss.py $@
+
+# Sound (port/spc.c, port/spc_dsp.c) unit tests.
+build/port/test_spc: port/test_spc.c port/spc.c port/spc_dsp.c port/spc.h build/port/gauss.h
+	@mkdir -p build/port
+	$(CC) $(CFLAGS) -Ibuild/port -o $@ port/test_spc.c port/spc.c port/spc_dsp.c
+
+spc-test: build/port/test_spc
+	build/port/test_spc
+
+# The sound side against libgme (blargg's SPC emulation, if installed) on a
+# snapshot of the game's: SPC=file.spc from build/port/play -D FRAME:file.spc.
+build/port/spc_check: port/spc_check.c port/spc.c port/spc_dsp.c port/spc.h build/port/gauss.h
+	@mkdir -p build/port
+	$(CC) $(CFLAGS) -D_DEFAULT_SOURCE -Ibuild/port -o $@ port/spc_check.c port/spc.c port/spc_dsp.c -ldl -lm
+
+spc-check: build/port/spc_check
+	build/port/spc_check $(SPC) 10
+
+# Overlay (port/overlay.c) unit tests.
+build/port/test_overlay: port/test_overlay.c port/overlay.c port/overlay.h build/port/ovfont.h
+	@mkdir -p build/port
+	$(CC) $(CFLAGS) -D_DEFAULT_SOURCE -Ibuild/port -o $@ port/test_overlay.c port/overlay.c -lm
+
+overlay-test: build/port/test_overlay
+	build/port/test_overlay build/port
 
 # Same as port/input.txt but places bombs (A) in game, so blasts get exercised.
 HYBRID_INPUT ?= port/input_hybrid.txt

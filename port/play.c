@@ -26,6 +26,11 @@
  *   -F N / -T N  with -V: video frames N.. / ..N only (the replay still runs
  *               from the start)
  *   -k K        with -V: keep every Kth frame (K x speed)
+ *   -A FILE     with -V (and -k 1): the sound of the kept frames (port/spc.h's
+ *               shadow of the sound CPU), raw 16-bit stereo little-endian
+ *               at 48 kHz: 800 samples a video frame, so it stays with the
+ *               60 fps video (the DSP's 32 kHz, ~532.4 a frame, resampled)
+ *   -D F:FILE   write the sound CPU's state at video frame F as an .spc
  *   -N          no hooks (pure interpreter; the default with -r: the
  *               hooks are not cycle-exact, so a replay with them drifts off
  *               the recorded run, e.g. a death in 1-3)
@@ -37,15 +42,58 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include "hook.h"
 #include "ppu.h"
 #include "overlay.h"
+#include "spc.h"
 #ifdef HAVE_SDL
 #include <SDL2/SDL.h>
 #endif
 
 static Snes m;
 static Ppu ppu;
+
+/* --- sound: the shadow SPC700 (port/spc.h) on the CPU's port accesses --- */
+static Spc spc;
+static int sound;
+static int last_read[4] = {-1, -1, -1, -1};
+static uint64_t spc_base, clk_base;
+
+/* SPC cycles (1.024 MHz) at the machine's master clock (21.477 MHz). */
+static uint64_t spc_time(const Snes *s)
+{
+    return spc_base + (s->clock - clk_base) * 1024000ULL / 21477273ULL;
+}
+
+/* One frame's DSP samples (n stereo) to exactly 800 at 48 kHz, linear,
+ * continuing from the last frame's last sample. */
+static void resample_frame(const int16_t *in, size_t n, int16_t *out)
+{
+    static int16_t last[2];
+    for (int k = 0; k < 800; k++) {
+        double x = (k + 1) * (double)n / 800 - 1;   /* in input samples; -1 = last frame's */
+        long i = (long)floor(x);
+        double t = x - i;
+        for (int c = 0; c < 2; c++) {
+            double a = i < 0 ? last[c] : in[2 * i + c];
+            double b = i + 1 < (long)n ? in[2 * (i + 1) + c] : a;
+            out[2 * k + c] = (int16_t)lrint(a + (b - a) * t);
+        }
+    }
+    if (n) last[0] = in[2 * (n - 1)], last[1] = in[2 * (n - 1) + 1];
+}
+
+static void apu_tap(Snes *s, int port, uint8_t v, int write)
+{
+    if (s != &m) return;  /* (not the futures' copies) */
+    if (write) spc_feed_write(&spc, spc_time(s), port, v);
+    else if (v != last_read[port]) {
+        /* the CPU saw the port change: a handshake the shadow must meet */
+        last_read[port] = v;
+        spc_feed_sync(&spc, spc_time(s), port, v);
+    }
+}
 
 /* --- futures windows (-O): oracle runs replayed on copies of the machine --- */
 typedef struct {
@@ -219,7 +267,7 @@ int main(int argc, char **argv)
 {
     if (argc < 2) { fprintf(stderr, "usage: play <rom> [-i input] [-n frames] [-s f1,f2 -o dir] [-N] [-x hook]\n"); return 2; }
     const char *input = NULL, *replay = NULL, *outdir = ".", *shots = NULL, *timed = NULL;
-    const char *ovfile = NULL, *video = NULL;
+    const char *ovfile = NULL, *video = NULL, *audio = NULL, *dump = NULL;
     long vfrom = 0, vto = -1, vstep = 1;
     long frames = -1;
     double fps = 60;
@@ -237,6 +285,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-F") && i + 1 < argc) vfrom = atol(argv[++i]);
         else if (!strcmp(argv[i], "-T") && i + 1 < argc) vto = atol(argv[++i]);
         else if (!strcmp(argv[i], "-k") && i + 1 < argc) vstep = atol(argv[++i]);
+        else if (!strcmp(argv[i], "-A") && i + 1 < argc) audio = argv[++i];
+        else if (!strcmp(argv[i], "-D") && i + 1 < argc) dump = argv[++i];
         else if (!strcmp(argv[i], "-N")) hooks = 0;
         else if (!strcmp(argv[i], "-H")) hooks = 1;
         else if (!strcmp(argv[i], "-t") && i + 1 < argc) timed = argv[++i];
@@ -261,6 +311,13 @@ int main(int argc, char **argv)
     }
     snes_power(&m);
     m.ppu_state = &ppu;
+    if (audio || dump) {
+        if (audio && (!video || vstep != 1)) { fprintf(stderr, "-A needs -V and -k 1\n"); return 2; }
+        sound = 1;
+        spc_init(&spc);
+        spc.debug = getenv("SBM2_SPCDBG") != NULL;
+        snes_apu_tap = apu_tap;
+    }
     m.input = pads;
     m.input_len = cap;
     if (replay) {
@@ -297,6 +354,19 @@ int main(int argc, char **argv)
             snes_step(&m);
         }
         m.framestep = 0;
+        if (sound) {
+            /* The prefix ran in frame-step: its fake APU answered at once
+             * and frames took no real time, so the shadow is behind. Let it
+             * catch up, then count time from here. */
+            size_t left = spc_drain(&spc, 60ULL * 1024000);
+            fprintf(stderr, "sound: prefix %ld handshakes, %ld timed out%s\n", spc.syncs, spc.timeouts,
+                    left ? " (events left over)" : "");
+            spc.delay = spc.max_lag = 0;
+            spc.syncs = spc.timeouts = 0;
+            spc_base = spc.cycles;
+            clk_base = m.clock;
+            spc.nsamples = 0;
+        }
         m.pads = log + sn;
         m.npads = n - sn;
         m.pad_pos = 0;
@@ -317,11 +387,38 @@ int main(int argc, char **argv)
                  "-c:v libx264 -preset faster -crf 18 -pix_fmt yuv420p '%s'", OV_W, OV_H, video);
         FILE *ff = popen(cmd, "w");
         if (!ff) { fprintf(stderr, "can't run ffmpeg\n"); return 2; }
-        long kept = 0;
+        FILE *af = audio ? fopen(audio, "wb") : NULL;
+        if (audio && !af) { fprintf(stderr, "can't write %s\n", audio); return 2; }
+        long dump_at = dump ? atol(dump) : -1;
+        long kept = 0, nsmp = 0;
         for (long f = 1;; f++) {
             int r = run_frame();
             if (r) break;
+            if (sound) {
+                spc_run_until(&spc, spc_time(&m));
+                if (spc.debug && spc.delay > 1024 * 20) {
+                    static uint32_t lastf;
+                    if (m.frame > lastf + 600) fprintf(stderr, "sound lag %.0f ms at frame %u (stage %02X)\n", spc.delay / 1024.0, m.frame, m.wram[0x1A]);
+                    lastf = m.frame;
+                }
+                if (dump_at >= 0 && (long)m.frame >= dump_at) {
+                    static uint8_t img[0x10200];
+                    const char *path = strchr(dump, ':');
+                    FILE *df = path ? fopen(path + 1, "wb") : NULL;
+                    if (df) fwrite(img, 1, spc_save(&spc, img), df), fclose(df);
+                    else fprintf(stderr, "-D wants FRAME:FILE\n");
+                    dump_at = -1;
+                }
+            }
             ppu.nodraw = (long)m.frame + 2 < vfrom;
+            int keep = (long)m.frame >= vfrom && !(f % vstep) && !(vto >= 0 && (long)m.frame > vto);
+            if (af && keep) {
+                static int16_t out48[1600];
+                resample_frame(spc.samples, spc.nsamples / 2, out48);
+                fwrite(out48, 4, 800, af);
+                nsmp += (long)spc.nsamples / 2;
+            }
+            spc.nsamples = 0;
             if ((long)m.frame < vfrom) { overlay_frame(NULL); continue; }
             overlay_frame(canvas);
             if (f % vstep) continue;
@@ -329,6 +426,11 @@ int main(int argc, char **argv)
             fwrite(canvas, 4, (size_t)OV_W * OV_H, ff);
             if (++kept % 3600 == 0) fprintf(stderr, "video: frame %u, %ld kept\n", m.frame, kept);
         }
+        if (sound)
+            fprintf(stderr, "sound: %ld samples for %ld frames (%.1f Hz at 60 fps); %ld handshakes, %ld timed out, "
+                    "longest lag %.1f ms\n", nsmp, kept, kept ? nsmp * 60.0 / kept : 0.0, spc.syncs, spc.timeouts,
+                    spc.max_lag / 1024.0);
+        if (af) fclose(af);
         return pclose(ff) ? 1 : 0;
     }
     int headless = shots != NULL;

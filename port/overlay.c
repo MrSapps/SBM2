@@ -325,6 +325,25 @@ int ov_pick(uint32_t vf, int *evs, int *tend)
 
 static int rd16(const uint8_t *w, int a) { return (int16_t)(w[a] | w[a + 1] << 8); }
 
+const char *ov_now(void)
+{
+    /* (no move yet this stage: the stage's intro, or the ending) */
+    return *what ? what : last_stage == 0x60 ? "game cleared: the ending" : "stage start";
+}
+
+int ov_panel_w(void) { return OV_W - PX - 32; }
+
+void ov_grid(int nwin, int W, int H, int *cols, int *ww, int *wh, int *gap)
+{
+    *cols = 1, *ww = *wh = 0, *gap = 16;
+    for (int c = 1; c <= 4 && nwin; c++) {
+        int r = (nwin + c - 1) / c, g = c > 2 ? 10 : 16;
+        int w1 = (W - g * (c - 1)) / c, h1 = w1 * 224 / 256;
+        if (r * h1 + g * (r - 1) > H) { h1 = (H - g * (r - 1)) / r; w1 = h1 * 256 / 224; }
+        if (w1 >= *ww) *ww = w1, *wh = h1, *cols = c, *gap = g;  /* (ties: more columns) */
+    }
+}
+
 /* A pad: the d-pad and A/B (Y/X dim), lit where pressed; u = unit pixels. */
 static void padicon(int x, int y, int u, uint16_t pad)
 {
@@ -360,7 +379,12 @@ void ov_frame(const uint8_t *wram, uint32_t vf, const uint32_t *game, uint16_t p
     int stage = wram[0x1A];
     int inStage = wram[0xBC] != 0;
     int px = rd16(wram, 0x8010) + ox, py = rd16(wram, 0x8018) + oy;
-    if (stage != last_stage) { last_stage = stage; ntrail = 0; stage_sims = 0; plan = NULL; nbombs = 0; }
+    /* a new stage: nothing of the last one's move, log or look-ahead stays
+     * (the 2-1 intro said "do boss 8,4", the ending "survive (boss ...)") */
+    if (stage != last_stage) {
+        last_stage = stage; ntrail = 0; stage_sims = 0; plan = NULL; nbombs = 0;
+        what = ""; nlog = 0; dec_live = dec_dead = 0;
+    }
 
     /* take this frame's events */
     for (; evi < nev && ev[evi].vf <= vf; evi++) {
@@ -494,7 +518,7 @@ void ov_frame(const uint8_t *wram, uint32_t vf, const uint32_t *game, uint16_t p
     /* the panel */
     int y;
     char b[256];
-    int pw = OV_W - PX - 32;
+    int pw = ov_panel_w();
     text(&ov_huge, PX, 18, "BOMBER AGENT", 0xFFFFFF, 255, pw);
     text(&ov_small, PX + 2, 70, "GOAP planner + exact look-ahead on the emulator", 0x80A0C0, 255, pw);
     y = GY - 2;
@@ -510,7 +534,7 @@ void ov_frame(const uint8_t *wram, uint32_t vf, const uint32_t *game, uint16_t p
     /* the move's goal, big: up to the ':' ("kill 5,10 (odds ...)"), then the how */
     {
         char g[256];
-        snprintf(g, sizeof g, "%s", what);
+        snprintf(g, sizeof g, "%s", ov_now());
         char *how = strchr(g, ':');
         if (how) *how++ = 0;
         char *paren = strstr(g, " (");
@@ -544,7 +568,7 @@ void ov_frame(const uint8_t *wram, uint32_t vf, const uint32_t *game, uint16_t p
     }
     /* futures: the chosen runs, replayed from the decision */
     {
-        const int W = 2 * 368 + 16;
+        const int W = pw;  /* (the panel's width: 3 across for 5-6 windows) */
         text(&ov_mid, PX, y, "FUTURES", 0x80A0C0, 255, 200);
         if (nwin && win_n && t_now(vf) < win_tend[0] + WIN_HOLD + WIN_OUT) {
             if (win_total > nwin) snprintf(b, sizeof b, "the other choices: %d of %d (%d not shown)", nwin, win_total, win_total - nwin);
@@ -557,19 +581,14 @@ void ov_frame(const uint8_t *wram, uint32_t vf, const uint32_t *game, uint16_t p
             const OvFont *f = a < 24 ? &ov_big : &ov_mid;
             uint32_t c = a < 40 ? 0xFF4050 : 0xE0E8F0;
             snprintf(b, sizeof b, "%ld", dead_shown);
-            int nw = (int)strlen(b) * f->w, xr = PX + 2 * 368 + 16;
+            int nw = (int)strlen(b) * f->w, xr = PX + W;
             text(f, xr - nw, y + (ov_mid.h - f->h) / 2 + (a < 24 ? -2 : 0), b, c, 255, 200);
             text(&ov_small, xr - nw - 12 * ov_small.w, y + 4, "dead ends:", 0xFF8090, 255, 200);
         }
         y += ov_mid.h + 6;
         /* the grid: as many columns as make the windows biggest */
-        int H = OV_H - 12 - y, cols = 1, ww = 0, wh = 0, gap = 16;
-        for (int c = 1; c <= 4 && nwin; c++) {
-            int r = (nwin + c - 1) / c, g = c > 2 ? 10 : 16;
-            int w1 = (W - g * (c - 1)) / c, h1 = w1 * 224 / 256;
-            if (r * h1 + g * (r - 1) > H) { h1 = (H - g * (r - 1)) / r; w1 = h1 * 256 / 224; }
-            if (w1 > ww) { ww = w1; wh = h1; cols = c; gap = g; }
-        }
+        int cols, ww, wh, gap;
+        ov_grid(nwin, W, OV_H - 12 - y, &cols, &ww, &wh, &gap);
         int small = ww < 300, gx = PX + (W - cols * ww - (cols - 1) * gap) / 2;
         const OvFont *bigf = small ? &ov_big : &ov_huge;
         int t = (int)(vf - win_vf);

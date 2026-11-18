@@ -11,11 +11,17 @@ int ov_load(const char *path);
  * the decision's frame. pix: its picture now (256x224 XRGB); age: frames
  * played; ended: its pads ran out (the picture holds); pad: its pad now. */
 typedef struct { const uint32_t *pix; int ev; int age; int ended; uint16_t pad; } OvWin;
-enum { OV_MAXWIN = 4 };
+enum { OV_MAXWIN = 16 };
 /* After ov_frame's events for vf: a new set of futures to show, if the
- * windows should change now (a decision's runs at vf, and the windows all
- * ended or the goal changed): fills evs, returns how many (0: keep). */
-int ov_pick(uint32_t vf, int all_ended, int *evs);
+ * windows should change now (a decision's runs at vf other than the one
+ * played, and the last set played, held and faded): fills evs and tend
+ * (window k plays its ov_len frames in tend video frames: done as the next
+ * goal starts, at half speed at the slowest, 40 frames at the fastest),
+ * returns how many (0: keep). Call every frame,
+ * drawn or not: the dead-ends count depends on it. */
+int ov_pick(uint32_t vf, int *evs, int *tend);
+/* frames a window plays of an S event (to its death + 40, else its pads) */
+int ov_len(int ev);
 /* An S event's pads (one per frame from the decision) and death offset. */
 const uint16_t *ov_pads(int ev, int *n);
 int ov_dead(int ev);

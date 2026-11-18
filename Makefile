@@ -1,7 +1,7 @@
 ASAR := tools/asar
 ROM  := build/sbm2.sfc
 
-.PHONY: all compare disasm coverage clean verify trace verify-hybrid bot-test planner-test
+.PHONY: all compare disasm coverage clean verify trace verify-hybrid bot-test planner-test ppu-test
 all: compare
 
 $(ROM): $(wildcard src/*.asm)
@@ -98,6 +98,14 @@ build/port/agentrun: $(BOTRUN_SRC) port/snes.c port/cpu.c port/ppu.c port/*.h pl
 	@for f in $(LUA_CORE); do [ $(AGENT_OBJ)/lua_$$f.o -nt $(LUA_SRC)/$$f.c ] || \
 	  $(CC) -O2 -std=gnu99 -DLUA_USE_LINUX -I$(LUA_SRC) -c $(LUA_SRC)/$$f.c -o $(AGENT_OBJ)/lua_$$f.o || exit 1; done
 	$(CXX) -O2 -g -std=c++17 -Wall -Wextra -Iplanner -o $@ $(AGENT_OBJ)/*.o $(AGENT_CXX) -lm -ldl -lpthread
+
+# Front-end PPU unit tests (port/ppu.c).
+build/port/test_ppu: port/test_ppu.c port/ppu.c port/ppu.h port/snes.h
+	@mkdir -p build/port
+	$(CC) $(CFLAGS) -o $@ port/test_ppu.c port/ppu.c
+
+ppu-test: build/port/test_ppu
+	build/port/test_ppu
 
 # New C++ planner (planner/): unit tests on world view snapshots
 # (docs/worldview.md), no emulator.

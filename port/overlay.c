@@ -252,30 +252,74 @@ static int is_plan(const Ev *e)
     return e == &ev[chosen_ev < 0 ? 0 : chosen_ev] && chosen_ev >= 0;
 }
 
-int ov_pick(uint32_t vf, int all_ended, int *evs)
+int ov_len(int e)
+{
+    const Ev *x = &ev[e];
+    int len = x->dead >= 0 ? x->dead + 40 : x->npads - 1;   /* (a death plays, then holds) */
+    return len > 1 ? len : 1;
+}
+
+/* The windows on show: from video frame win_vf, window k ends win_tend[k]
+ * frames on (its run sped up or slowed to fit), its death (if any) shown at
+ * pop_at[k]. Only the events decide this, so a video cut into parts counts
+ * the same. */
+enum { WIN_IN = 10, WIN_MIN = 40, WIN_HOLD = 24, WIN_OUT = 14 };   /* frames: grow in, play at least, hold the end, fade out */
+static uint32_t win_vf;
+static int win_n, win_total, win_tend[OV_MAXWIN];
+static uint32_t pop_at[OV_MAXWIN], pop_vf[OV_MAXWIN], last_pop = 0xFFFFFFFF;
+static long dead_shown;
+
+/* the next goal's frame after vf (W event), or 0 */
+static int t_now(uint32_t vf) { return (int)(vf - win_vf); }
+static uint32_t next_goal(uint32_t vf)
+{
+    for (size_t i = evi; i < nev; i++)
+        if (ev[i].kind == 'W' && ev[i].vf > vf) return ev[i].vf;
+    return 0;
+}
+
+int ov_pick(uint32_t vf, int *evs, int *tend)
 {
     if (batch_vf != vf) return 0;
-    if (!all_ended && win_goal == goal_seq) return 0;
-    int n = 0;
-    /* the plan's run first, then deaths (soonest first), then other runs that lived */
-    for (size_t i = batch0; i < evi && n < OV_MAXWIN; i++)
-        if (ev[i].kind == 'S' && ev[i].npads && is_plan(&ev[i])) evs[n++] = (int)i;
+    int all_ended = 1;
+    /* (a new set once the last has played, held and faded: a goal that
+     * comes sooner waits for it) */
+    for (int k = 0; k < win_n; k++) all_ended &= vf - win_vf >= (uint32_t)(win_tend[k] + WIN_HOLD + WIN_OUT);
+    if (!all_ended) return 0;
+    /* the alternatives (the chosen run plays in the game itself): deaths
+     * first (latest first: the longest story), then runs that lived */
+    int n = 0, tot = 0;
+    for (size_t i = batch0; i < evi; i++) tot += ev[i].kind == 'S' && ev[i].npads && !is_plan(&ev[i]);
     for (int pass = 0; pass < 2; pass++)
         for (int left = OV_MAXWIN - n; left > 0; left = OV_MAXWIN - n) {
             int best = -1;
             for (size_t i = batch0; i < evi; i++) {
                 const Ev *e = &ev[i];
-                if (e->kind != 'S' || !e->npads || (pass == 0) != (e->dead >= 0)) continue;
+                if (e->kind != 'S' || !e->npads || (pass == 0) != (e->dead >= 0) || is_plan(e)) continue;
                 int taken = 0;
                 for (int k = 0; k < n; k++) taken |= evs[k] == (int)i;
                 if (taken) continue;
-                if (best < 0 || (pass == 0 && e->dead > ev[best].dead)) best = (int)i;   /* (latest death first: the longest story) */
+                if (best < 0 || (pass == 0 && e->dead > ev[best].dead)) best = (int)i;
                 if (pass == 1 && best >= 0) break;
             }
             if (best < 0) break;
             evs[n++] = best;
         }
-    if (n) win_goal = goal_seq;
+    if (!n) return 0;
+    win_goal = goal_seq;
+    win_total = tot;
+    /* each window plays its whole run by the time the next goal starts,
+     * at half speed at the slowest, in WIN_MIN frames at the fastest */
+    uint32_t g = next_goal(vf);
+    for (int k = 0; k < n; k++) {
+        int len = ov_len(evs[k]), t = g ? (int)(g - vf) : len, dead = ev[evs[k]].dead;
+        if (t > 2 * len) t = 2 * len;
+        if (t < WIN_MIN) t = WIN_MIN;
+        tend[k] = win_tend[k] = t;
+        pop_at[k] = dead >= 0 ? vf + (uint32_t)(((long)(dead + 40) * t + len - 1) / len) : 0xFFFFFFFF;
+    }
+    win_vf = vf;
+    win_n = n;
     return n;
 }
 
@@ -350,6 +394,8 @@ void ov_frame(const uint8_t *wram, uint32_t vf, const uint32_t *game, uint16_t p
         }
     }
     while (ghost0 < evi && (ev[ghost0].kind != 'S' || ev[ghost0].vf + GHOST_LIFE < vf)) ghost0++;
+    for (int k = 0; k < win_n; k++)
+        if (pop_at[k] <= vf) { pop_at[k] = 0xFFFFFFFF; pop_vf[k] = last_pop = vf; dead_shown++; }
 
     if (!canvas) return;
     cv = canvas;
@@ -453,6 +499,7 @@ void ov_frame(const uint8_t *wram, uint32_t vf, const uint32_t *game, uint16_t p
     text(&ov_small, PX + 2, 70, "GOAP planner + exact look-ahead on the emulator", 0x80A0C0, 255, pw);
     y = GY - 2;
     if (stage >= 0x10 && stage < 0x60) snprintf(b, sizeof b, "STAGE %d-%d", stage >> 4, (stage & 15) + 1);
+    else if (stage == 0x60) snprintf(b, sizeof b, "ENDING");
     else snprintf(b, sizeof b, "STAGE --");
     text(&ov_big, PX, y, b, 0xFFE060, 255, 400);
     snprintf(b, sizeof b, "frame %u", vf);
@@ -497,47 +544,94 @@ void ov_frame(const uint8_t *wram, uint32_t vf, const uint32_t *game, uint16_t p
     }
     /* futures: the chosen runs, replayed from the decision */
     {
-        const int ww = 368, wh = 322, gap = 16;
+        const int W = 2 * 368 + 16;
         text(&ov_mid, PX, y, "FUTURES", 0x80A0C0, 255, 200);
-        text(&ov_small, PX + 120, y + 4, "what each look-ahead saw, frame for frame", 0x708090, 255, pw - 120);
+        if (nwin && win_n && t_now(vf) < win_tend[0] + WIN_HOLD + WIN_OUT) {
+            if (win_total > nwin) snprintf(b, sizeof b, "the other choices: %d of %d (%d not shown)", nwin, win_total, win_total - nwin);
+            else snprintf(b, sizeof b, "the other choices: %d", nwin);
+        } else snprintf(b, sizeof b, "the other choices, played out");
+        text(&ov_small, PX + 120, y + 4, b, 0x708090, 255, 470);
+        {
+            /* dead ends seen: the number flashes red and big as one lands */
+            int a = last_pop == 0xFFFFFFFF ? 999 : (int)(vf - last_pop);
+            const OvFont *f = a < 24 ? &ov_big : &ov_mid;
+            uint32_t c = a < 40 ? 0xFF4050 : 0xE0E8F0;
+            snprintf(b, sizeof b, "%ld", dead_shown);
+            int nw = (int)strlen(b) * f->w, xr = PX + 2 * 368 + 16;
+            text(f, xr - nw, y + (ov_mid.h - f->h) / 2 + (a < 24 ? -2 : 0), b, c, 255, 200);
+            text(&ov_small, xr - nw - 12 * ov_small.w, y + 4, "dead ends:", 0xFF8090, 255, 200);
+        }
         y += ov_mid.h + 6;
-        for (int k = 0; k < OV_MAXWIN; k++) {
-            int x0 = PX + (k & 1) * (ww + gap), y0 = y + (k >> 1) * (wh + gap);
-            if (k >= nwin) { fill(x0, y0, ww, wh, 0x202838, 160); continue; }
+        /* the grid: as many columns as make the windows biggest */
+        int H = OV_H - 12 - y, cols = 1, ww = 0, wh = 0, gap = 16;
+        for (int c = 1; c <= 4 && nwin; c++) {
+            int r = (nwin + c - 1) / c, g = c > 2 ? 10 : 16;
+            int w1 = (W - g * (c - 1)) / c, h1 = w1 * 224 / 256;
+            if (r * h1 + g * (r - 1) > H) { h1 = (H - g * (r - 1)) / r; w1 = h1 * 256 / 224; }
+            if (w1 > ww) { ww = w1; wh = h1; cols = c; gap = g; }
+        }
+        int small = ww < 300, gx = PX + (W - cols * ww - (cols - 1) * gap) / 2;
+        const OvFont *bigf = small ? &ov_big : &ov_huge;
+        int t = (int)(vf - win_vf);
+        for (int k = 0; k < nwin; k++) {
+            int x0 = gx + (k % cols) * (ww + gap), y0 = y + (k / cols) * (wh + gap);
             const OvWin *w = &win[k];
             const Ev *e = &ev[w->ev];
+            /* in: grow from the middle; out: shrink and fade, after its end */
+            int te = k < win_n ? win_tend[k] : 0, al = 255;
+            double sc = 1;
+            if (t < WIN_IN) sc = 0.6 + 0.4 * t / WIN_IN, al = 255 * (t + 1) / (WIN_IN + 1);
+            else if (t > te + WIN_HOLD) {
+                if (t >= te + WIN_HOLD + WIN_OUT) continue;
+                double u = (double)(t - te - WIN_HOLD) / WIN_OUT;
+                sc = 1 - 0.3 * u, al = (int)(255 * (1 - u));
+            }
+            int dw = (int)(ww * sc), dh = (int)(wh * sc), dx = x0 + (ww - dw) / 2, dy = y0 + (wh - dh) / 2;
             int dead = e->dead, died = dead >= 0 && w->age >= dead + 40;   /* (the death plays first) */
-            for (int yy = 0; yy < wh; yy++) {
-                const uint32_t *row = w->pix + (yy * 224 / wh) * 256;
-                uint32_t *o = cv + (y0 + yy) * OV_W + x0;
-                for (int xx = 0; xx < ww; xx++) {
-                    uint32_t c = row[xx * 256 / ww] & 0xFFFFFF;
+            for (int yy = 0; yy < dh; yy++) {
+                const uint32_t *row = w->pix + (yy * 224 / dh) * 256;
+                uint32_t *o = cv + (dy + yy) * OV_W + dx;
+                for (int xx = 0; xx < dw; xx++) {
+                    uint32_t c = row[xx * 256 / dw] & 0xFFFFFF;
                     if (died || w->ended) {   /* hold: dim, red if dead */
                         int r = c >> 16 & 255, g = c >> 8 & 255, bb = c & 255, l = (r * 3 + g * 6 + bb) / 10;
                         c = died ? (uint32_t)((l / 2 + 110) << 16 | (l / 3) << 8 | (l / 3)) : (uint32_t)((l / 2) << 16 | (l / 2) << 8 | (l / 2 + 20));
                     }
-                    o[xx] = c;
+                    if (al >= 255) o[xx] = c;
+                    else blend(dx + xx, dy + yy, c, al);
                 }
             }
-            int pl = is_plan(e);
-            uint32_t bc = pl ? 0xFFE060 : dead >= 0 ? 0xFF3060 : 0x30E0FF;
-            fill(x0 - 3, y0 - 3, ww + 6, 3, bc, 230);
-            fill(x0 - 3, y0 + wh, ww + 6, 3, bc, 230);
-            fill(x0 - 3, y0, 3, wh, bc, 230);
-            fill(x0 + ww, y0, 3, wh, bc, 230);
-            fill(x0, y0, ww, ov_small.h + 4, 0x000000, 170);
-            text(&ov_small, x0 + 6, y0 + 2, pl ? "CHOSEN" : dead >= 0 ? "ALTERNATIVE" : "ALTERNATIVE", bc, 255, 140);
-            if (dead >= 0 && w->age >= dead && !died) snprintf(b, sizeof b, "DIES");
-            else if (dead >= 0 && !died) snprintf(b, sizeof b, "dies in %.1fs", (dead - w->age) / 60.0);
-            else if (died) snprintf(b, sizeof b, "DEAD at +%.1fs", dead / 60.0);
-            else if (dead == -2) snprintf(b, sizeof b, "exits");
-            else snprintf(b, sizeof b, "lives  +%.1fs", w->age / 60.0);
-            text(&ov_small, x0 + ww - 6 - (int)strlen(b) * ov_small.w, y0 + 2, b, died ? 0xFF6070 : 0xE0E8F0, 255, 200);
-            if (!died && !w->ended) padicon(x0 + 8, y0 + wh - 7 * 6 + 2, 6, w->pad);
+            uint32_t bc = dead >= 0 ? 0xFF3060 : 0x30E0FF;
+            fill(dx - 3, dy - 3, dw + 6, 3, bc, 230 * al / 255);
+            fill(dx - 3, dy + dh, dw + 6, 3, bc, 230 * al / 255);
+            fill(dx - 3, dy, 3, dh, bc, 230 * al / 255);
+            fill(dx + dw, dy, 3, dh, bc, 230 * al / 255);
             if (died) {
-                int tw = 4 * ov_huge.w;
-                text(&ov_huge, x0 + (ww - tw) / 2, y0 + wh / 2 - ov_huge.h / 2, "DEAD", 0xFF4050, 255, 200);
+                int tw = 4 * bigf->w;
+                text(bigf, x0 + (ww - tw) / 2, y0 + wh / 2 - bigf->h / 2, "DEAD", 0xFF4050, al, 200);
+                int a = (int)(vf - pop_vf[k]);
+                if (pop_vf[k] && a < 45) {   /* +1 rising, inside the window */
+                    const OvFont *pf = small ? &ov_mid : bigf;
+                    int py0 = y0 + wh / 2 - bigf->h / 2 - pf->h - 4, rise = (wh / 2 - bigf->h / 2 - pf->h - 8) * a / 45;
+                    text(pf, x0 + (ww - 2 * pf->w) / 2, py0 - rise, "+1", 0xFFE060, 255 - a * 5, 200);
+                }
             }
+            if (al < 255) continue;
+            fill(x0, y0, ww, ov_small.h + 4, 0x000000, 170);
+            if (dead >= 0 && w->age >= dead && !died) snprintf(b, sizeof b, "DIES");
+            else if (dead >= 0 && !died) snprintf(b, sizeof b, small ? "%.1fs" : "dies in %.1fs", (dead - w->age) / 60.0);
+            else if (died) snprintf(b, sizeof b, small ? "+%.1fs" : "DEAD at +%.1fs", dead / 60.0);
+            else if (dead == -2) snprintf(b, sizeof b, "exits");
+            else snprintf(b, sizeof b, small ? "+%.1fs" : "lives  +%.1fs", w->age / 60.0);
+            text(&ov_small, x0 + ww - 6 - (int)strlen(b) * ov_small.w, y0 + 2, b, died ? 0xFF6070 : 0xE0E8F0, 255, 200);
+            if (k < win_n && te) {   /* playback speed */
+                double sp = (double)ov_len(w->ev) / te;
+                snprintf(b, sizeof b, "%.1fx", sp);
+                if (sp > 0.95 && sp < 1.05) b[0] = 0;
+                text(&ov_small, x0 + 6, y0 + 2, b, 0xA0B0C0, 255, 80);
+            }
+            int u = small ? 3 : 6;
+            if (!died && !w->ended) padicon(x0 + 2 * u, y0 + wh - 7 * u + 2, u, w->pad);
         }
     }
     /* under the game: each decision's futures, oldest left (cyan lived, red died) */

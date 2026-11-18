@@ -52,7 +52,7 @@ typedef struct {
     Snes s;
     Ppu p;
     uint16_t *buf;
-    int n, age, ended, ev;
+    int n, len, tend, age, ended, ev;
     uint32_t f0;
 } Future;
 static Future fut[OV_MAXWIN];
@@ -69,7 +69,7 @@ static void to_callback_point(Snes *s)
     }
 }
 
-static void future_start(Future *f, int ev)
+static void future_start(Future *f, int ev, int tend)
 {
     int n;
     const uint16_t *pads = ov_pads(ev, &n);
@@ -85,52 +85,58 @@ static void future_start(Future *f, int ev)
     f->s.pad_markers = 0;
     f->s.pad_record = 0;
     f->s.prof = NULL;
-    f->buf = realloc(f->buf, (size_t)(n + 3) * 2);
+    int len = ov_len(ev), cap = (len > n ? len : n) + 3;
+    f->buf = realloc(f->buf, (size_t)cap * 2);
+    memset(f->buf, 0, (size_t)cap * 2);   /* (past its pads: none, e.g. a death's last frames) */
     memcpy(f->buf, pads, (size_t)n * 2);
-    f->buf[n] = f->buf[n + 1] = f->buf[n + 2] = 0;
     /* as the oracle: buf[i] is the pad of frame f0 + i, this frame's latched now */
     f->f0 = m.frame;
     f->s.input = f->buf - f->f0;
-    f->s.input_len = f->f0 + (uint32_t)n;
+    f->s.input_len = f->f0 + (uint32_t)cap - 3;
     if (f->s.nmitimen & 0x01) f->s.joy[0] = f->buf[0];
-    f->n = n;
+    f->n = cap - 3;
+    f->len = len;
+    f->tend = tend;
     f->age = 0;
     f->ended = 0;
     f->ev = ev;
 }
 
-static void future_step(Future *f)
+/* t video frames since the start: its run sped up or slowed so its
+ * len frames take tend (ov_pick's timing). */
+static void future_step(Future *f, uint32_t t)
 {
-    if (f->ended) return;
-    uint32_t fr = f->s.frame;
-    for (long g = 0; f->s.frame == fr && g < 5000000; g++) snes_step(&f->s);
-    f->age++;
-    /* (a death: hold its frame once it has played, before the restart) */
-    int dead = ov_dead(f->ev);
-    if (f->age + 1 >= f->n || (dead >= 0 && f->age >= dead + 40)) f->ended = 1;
+    long want = ((long)t * f->len + f->tend - 1) / f->tend;
+    if (want > f->len) want = f->len;
+    while (f->age < want) {
+        uint32_t fr = f->s.frame;
+        for (long g = 0; f->s.frame == fr && g < 5000000; g++) snes_step(&f->s);
+        f->age++;
+    }
+    if (f->age >= f->len) f->ended = 1;
 }
 
 /* After a frame of the replay: the overlay's events for it, new futures
  * if a decision's runs should show, each future a frame on, then draw. */
 static void overlay_frame(uint32_t *canvas)
 {
-    if (!canvas) {   /* before the part shown: the events only */
+    int evs[OV_MAXWIN], tend[OV_MAXWIN], k;
+    if (!canvas) {   /* before the part shown: the events (and picks) only */
         ov_frame(m.wram, m.frame, ppu.pixels, 0, NULL, 0, NULL);
+        ov_pick(m.frame, evs, tend);
         nfut = 0;
         return;
     }
     static OvWin win[OV_MAXWIN];
-    int ended = 1;
-    for (int i = 0; i < nfut; i++) ended &= fut[i].ended;
     /* the events up to this frame first (ov_pick needs the batch) */
     ov_frame(m.wram, m.frame, ppu.pixels, 0, win, 0, NULL);
-    int evs[OV_MAXWIN], k = ov_pick(m.frame, ended, evs);
+    k = ov_pick(m.frame, evs, tend);
     if (k) {
         to_callback_point(&m);
-        for (int i = 0; i < k; i++) future_start(&fut[i], evs[i]);
+        for (int i = 0; i < k; i++) future_start(&fut[i], evs[i], tend[i]);
         nfut = k;
     } else
-        for (int i = 0; i < nfut; i++) future_step(&fut[i]);
+        for (int i = 0; i < nfut; i++) future_step(&fut[i], m.frame - fut[i].f0);
     for (int i = 0; i < nfut; i++) {
         const Future *f = &fut[i];
         win[i] = (OvWin){f->p.pixels, f->ev, f->age, f->ended, f->age < f->n ? f->buf[f->age] : 0};
@@ -146,6 +152,15 @@ static void write_ppm(const char *dir, uint32_t frame)
     FILE *f = fopen(path, "wb");
     if (!f) { perror(path); return; }
     fprintf(f, "P6\n256 224\n255\n");
+    if (getenv("SBM2_PPUDUMP")) {   /* debugging the renderer: registers and memories */
+        fprintf(stderr, "%s: BGMODE %02X TM %02X TS %02X M7SEL %02X M7 %d %d %d %d %d %d ofs %d %d\n", path, m.ppu[0x05],
+                m.ppu[0x2C], m.ppu[0x2D], m.ppu[0x1A], ppu.m7[0], ppu.m7[1], ppu.m7[2], ppu.m7[3], ppu.m7[4], ppu.m7[5],
+                ppu.m7hofs, ppu.m7vofs);
+        char dp[600];
+        snprintf(dp, sizeof dp, "%s.mem", path);
+        FILE *d = fopen(dp, "wb");
+        if (d) { fwrite(ppu.vram, 2, 0x8000, d); fwrite(ppu.cgram, 2, 256, d); fwrite(m.ppu, 1, 0x40, d); fclose(d); }
+    }
     for (int i = 0; i < 256 * 224; i++) {
         uint32_t c = ppu.pixels[i];
         uint8_t px[3] = {c >> 16, c >> 8, c};

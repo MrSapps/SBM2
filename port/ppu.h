@@ -1,7 +1,7 @@
 /* PPU for the port's front-end: VRAM/CGRAM/OAM as the game writes them, and
- * a scanline renderer for what Super Bomberman 2 uses (BG modes 0 and 1,
- * 8x8/16x16 tiles, sprites, priorities, colour math, brightness). No mode 7,
- * mosaic or interlace. The verifier runs without one (Snes.ppu_state NULL);
+ * a scanline renderer for what Super Bomberman 2 uses (BG modes 0, 1 and
+ * 7, 8x8/16x16 tiles, sprites, priorities, colour math, brightness).
+ * No mode 7 EXTBG, mosaic or interlace. The verifier runs without one (Snes.ppu_state NULL);
  * PPU reads stay unmodelled either way. */
 #ifndef PPU_H
 #define PPU_H
@@ -18,6 +18,9 @@ typedef struct Ppu {
     uint16_t hofs[4], vofs[4];  /* $210D-$2114, 10 bits */
     uint8_t ofslatch, hofslatch;
     uint16_t fixed;             /* $2132 fixed colour, BGR555 */
+    int16_t m7[6];              /* $211B-$2120: A B C D X Y */
+    int16_t m7hofs, m7vofs;     /* $210D/E as mode 7 sees them */
+    uint8_t m7latch;
     uint32_t pixels[256 * 224]; /* XRGB8888, line 1 of the frame is row 0 */
     uint8_t nodraw;             /* skip drawing lines (state is still kept) */
 } Ppu;

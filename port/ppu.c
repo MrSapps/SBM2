@@ -21,14 +21,20 @@ void ppu_write(Snes *s, uint8_t r, uint8_t v)
         }
         p->oamaddr = (p->oamaddr + 1) & 0x3FF;
         break;
+    case 0x1B: case 0x1C: case 0x1D: case 0x1E: case 0x1F: case 0x20:  /* M7A-D, M7X/Y */
+        p->m7[r - 0x1B] = (int16_t)(v << 8 | p->m7latch);
+        p->m7latch = v;
+        break;
     case 0x0D: case 0x0F: case 0x11: case 0x13: {  /* BGnHOFS */
         int n = (r - 0x0D) >> 1;
+        if (r == 0x0D) { p->m7hofs = (int16_t)(v << 8 | p->m7latch); p->m7latch = v; }
         p->hofs[n] = (v << 8 | (p->ofslatch & ~7) | (p->hofslatch & 7)) & 0x3FF;
         p->ofslatch = p->hofslatch = v;
         break;
     }
     case 0x0E: case 0x10: case 0x12: case 0x14: {  /* BGnVOFS */
         int n = (r - 0x0E) >> 1;
+        if (r == 0x0E) { p->m7vofs = (int16_t)(v << 8 | p->m7latch); p->m7latch = v; }
         p->vofs[n] = (v << 8 | p->ofslatch) & 0x3FF;
         p->ofslatch = v;
         break;
@@ -101,6 +107,33 @@ static void bg_line(Snes *s, Ppu *p, int n, int bpp, int palbase, int y, Line *o
         out->col[x] = c ? palbase + ((e >> 10) & 7) * (1 << bpp) + c : 0;
         out->pri[x] = (e >> 13) & 1;
         if (!c) out->col[x] = 0;
+    }
+}
+
+/* Mode 7: BG1 through the matrix (8bpp, 128x128 tiles of 8x8). */
+static int m7s13(int v) { return (int16_t)(v << 3) >> 3; }
+static int m7clip(int v) { return (v & 0x2000) ? (v | ~0x3FF) : (v & 0x3FF); }
+static void m7_line(Snes *s, Ppu *p, int y, Line *out)
+{
+    uint8_t sel = s->ppu[0x1A];
+    int a = p->m7[0], b = p->m7[1], c = p->m7[2], d = p->m7[3];
+    int cx = m7s13(p->m7[4]), cy = m7s13(p->m7[5]);
+    int hofs = m7s13(p->m7hofs), vofs = m7s13(p->m7vofs);
+    int sy = (sel & 2) ? 255 - y : y;
+    int h = m7clip(hofs - cx), v = m7clip(vofs - cy);
+    int x0 = ((a * h) & ~63) + ((b * sy) & ~63) + ((b * v) & ~63) + (cx << 8);
+    int y0 = ((c * h) & ~63) + ((d * sy) & ~63) + ((d * v) & ~63) + (cy << 8);
+    for (int x = 0; x < 256; x++) {
+        int sx = (sel & 1) ? 255 - x : x;
+        int X = (x0 + a * sx) >> 8, Y = (y0 + c * sx) >> 8, tile;
+        out->pri[x] = 0;
+        if ((X | Y) & ~0x3FF) {
+            if ((sel >> 6) == 2) { out->col[x] = 0; continue; }
+            if ((sel >> 6) == 3) tile = 0;
+            else tile = p->vram[((Y >> 3) & 127) * 128 + ((X >> 3) & 127)] & 0xFF;
+        } else
+            tile = p->vram[(Y >> 3) * 128 + (X >> 3)] & 0xFF;
+        out->col[x] = p->vram[tile * 64 + (Y & 7) * 8 + (X & 7)] >> 8;
     }
 }
 
@@ -177,6 +210,7 @@ static int win_logic(Snes *s, int layer)
 typedef struct { uint8_t layer, pri; } Slot;
 static const Slot order0[] = {{4, 3}, {0, 1}, {1, 1}, {4, 2}, {0, 0}, {1, 0}, {4, 1}, {2, 1}, {3, 1}, {4, 0}, {2, 0}, {3, 0}};
 static const Slot order1[] = {{4, 3}, {0, 1}, {1, 1}, {4, 2}, {0, 0}, {1, 0}, {4, 1}, {2, 1}, {4, 0}, {2, 0}};
+static const Slot order7[] = {{4, 3}, {4, 2}, {4, 1}, {0, 0}, {4, 0}};
 static const Slot order1h[] = {{2, 1}, {4, 3}, {0, 1}, {1, 1}, {4, 2}, {0, 0}, {1, 0}, {4, 1}, {4, 0}, {2, 0}};
 
 /* Front pixel of a screen: colour index, layer (5 = backdrop), OBJ maths flag. */
@@ -215,7 +249,10 @@ void ppu_line(Snes *s, int y)
     if (mode == 0) {
         for (int n = 0; n < 4; n++) if (used & (1 << n)) bg_line(s, p, n, 2, n * 32, y, &l[n]);
         ord = order0; nord = 12;
-    } else {  /* mode 1 (anything else is drawn as mode 1) */
+    } else if (mode == 7) {
+        if (used & 1) m7_line(s, p, y, &l[0]);
+        ord = order7; nord = 5;
+    } else {  /* mode 1 (2-6 are drawn as mode 1) */
         if (used & 1) bg_line(s, p, 0, 4, 0, y, &l[0]);
         if (used & 2) bg_line(s, p, 1, 4, 0, y, &l[1]);
         if (used & 4) bg_line(s, p, 2, 2, 0, y, &l[2]);

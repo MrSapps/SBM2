@@ -12,8 +12,8 @@ there to the moment under test, run-length encoded per logic frame:
     fail rollback         optional: regex that fails it at once
     seed 0                optional (SBM2_SEED)
     env SBM2_X=1          optional, repeatable
-    agent 1               optional: the C++ agent (build/port/agentrun,
-                          bot/agent.lua) instead of bot/bot.lua
+    agent 1               optional: the C++ agent (build/port/agentrun, its
+                          C driver) instead of bot/bot.lua
     pads                  then "<repeat> <word>,<word>..." lines: one logic
     120 0001,0000         frame each (the $0001 NMI marker and its pad reads,
     ...                   bot/inputlog.lua format), repeated <repeat> times
@@ -137,6 +137,8 @@ def make(a):
         # (no rewinds: a full run's rules; a scenario that rewinds also
         # replays a different game than the run it was cut from)
         f.write('env SBM2_NOREWIND=1\n')
+        # (the cut replays timed, as the run played: exact however long)
+        f.write('env SBM2_PREFIX_TIMED=1\n')
         f.write('pads\n' + '\n'.join(encode(rest[:cut])) + '\n')
     print(f'{out}: {a.frame} frames of pads, {os.path.getsize(out)} bytes')
 
@@ -162,8 +164,9 @@ def run_one(sc, verbose):
     env.setdefault('SBM2_AGCACHE', os.path.join(ROOT, 'build', 'agcache'))
     t0 = time.time()
     agent = sc.get('agent', '0') not in ('0', '')
-    subprocess.run([AGENTRUN if agent else BOTRUN, os.path.join(ROOT, 'baserom.sfc'),
-                    os.path.join(ROOT, 'bot', 'agent.lua' if agent else 'bot.lua')],
+    # (the agent: agentrun's own C driver, no script)
+    script = [] if agent else [os.path.join(ROOT, 'bot', 'bot.lua')]
+    subprocess.run([AGENTRUN if agent else BOTRUN, os.path.join(ROOT, 'baserom.sfc')] + script,
                    env=env, stdout=subprocess.DEVNULL, stderr=open(os.path.join(out, 'stderr.txt'), 'w'),
                    preexec_fn=cap_memory)
     dt = time.time() - t0

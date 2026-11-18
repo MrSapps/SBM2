@@ -203,7 +203,7 @@ static uint32_t rgb(uint16_t c, int bright)
 void ppu_line(Snes *s, int y)
 {
     Ppu *p = s->ppu_state;
-    if (!p || y < 1 || y > 224) return;
+    if (!p || p->nodraw || y < 1 || y > 224) return;
     uint32_t *row = &p->pixels[(y - 1) * 256];
     uint8_t ini = s->ppu[0x00];
     if (ini & 0x80) { memset(row, 0, 256 * 4); return; }

@@ -19,6 +19,7 @@
  * in it is from before the latch, and loading one resumes after endFrame.
  * Not emulated: screenshots (empty), lag frames. CDL marks executed code
  * bytes only (flag $01, plus Mesen's M/X width bits on the opcode). */
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -134,6 +135,13 @@ static int is_rom(uint32_t addr)
 
 static int vb_pending;
 static void vblank_run(void);
+static uint16_t *load_words(const char *path, uint32_t *n);
+#ifdef SBM2_AGENT
+/* agentrun without a script: the C driver (cd_*, below) plays the agent */
+static int cdrv;
+static void cd_frame(void);
+static void cd_exec(uint32_t pc);
+#endif
 static int step_hook(Snes *s)
 {
     if (vb_pending) {
@@ -142,6 +150,9 @@ static int step_hook(Snes *s)
         if (loaded_state || stopped >= 0) return 1;
     }
     uint32_t pc = (uint32_t)s->cpu.pb << 16 | s->cpu.pc;
+#ifdef SBM2_AGENT
+    if (cdrv) cd_exec(pc);
+#endif
     if (cdl_on && is_rom(pc)) {
         uint32_t o = rom_offset(pc);
         cdl[o] |= 0x01 | (s->cpu.p & 0x20 ? 0x20 : 0) | (s->cpu.p & 0x10 ? 0x10 : 0);
@@ -194,6 +205,9 @@ static void vblank_run(void)
     loaded_state = 0;
     for (int i = 0; i < nev[EV_END_FRAME]; i++) call_ref(ev_ref[EV_END_FRAME][i], 0, 0, 0);
     for (int i = 0; i < nev[EV_INPUT_POLLED]; i++) call_ref(ev_ref[EV_INPUT_POLLED][i], 0, 0, 0);
+#ifdef SBM2_AGENT
+    if (cdrv) cd_frame();
+#endif
     input[m.frame % INPUT_LEN] = live_pad;
     if (m.nmitimen & 0x01) m.joy[0] = live_pad;
 }
@@ -928,7 +942,7 @@ static int l_simulateMany(lua_State *Ls)
 }
 
 #ifdef SBM2_AGENT
-/* --- the C++ agent (planner/agent.hpp): emu.agent(frame) -> pad, log ---
+/* --- the C++ agent (planner/agent.hpp): agent_call(frame) -> pad, log ---
  * Its oracle: runs on copies of the live machine, as emu.simulateMany's
  * path entries (no cache: the agent plays back the pads each run pressed,
  * so it needs them all). */
@@ -1003,6 +1017,33 @@ static void ag_cache_put(uint64_t k, const AgSimRes *o, int nboss)
     else remove(t);
 }
 
+/* SBM2_OVERLAY=<file>: what the agent thinks, for build/port/play's
+ * overlays (-O): text lines keyed by the video frame (m.frame):
+ *   S <vf> <dead> <n> x y ... | k:pad ...
+ *                               an oracle run: P1's world x, y every 2nd
+ *                               frame (dead: frame offset, -1 lived, -2
+ *                               exit), then its pads run-length encoded
+ *   P <vf> <at> <n> x y ...     a new move: P1's planned path (every 2nd
+ *                               frame from <at>)
+ *   A <vf> x y                  a bomb press in that move, where
+ *   W <vf> <what>               the move's kind
+ *   L <vf> <text>               an agent log line */
+static FILE *ov_f;
+static int ov_open(void)
+{
+    static int init;
+    if (!init) {
+        init = 1;
+        const char *e = getenv("SBM2_OVERLAY");
+        if (e && *e) ov_f = fopen(e, "w");
+    }
+    return ov_f != NULL;
+}
+static void ov_trace(const int16_t *t, int from, int to)
+{
+    for (int f = from; f < to; f += 2) fprintf(ov_f, " %d %d", t[2 * f], t[2 * f + 1]);
+}
+
 static void ag_run(const AgSimReq *rq, AgSimRes *rs, int n);
 static void ag_sim(void *ctx, const AgSimReq *rq, AgSimRes *rs, int n)
 {
@@ -1027,6 +1068,23 @@ static void ag_sim(void *ctx, const AgSimReq *rq, AgSimRes *rs, int n)
         free(mq); free(ms); free(mi); free(keys);
     }
 done:
+    if (ov_open())
+        for (int i = 0; i < n; i++) {
+            int len = rs[i].dead >= 0 ? rs[i].dead + 1 : rq[i].frames;
+            if (len > rs[i].cap) len = rs[i].cap;
+            fprintf(ov_f, "S %u %d %d", m.frame, rs[i].dead, (len + 1) / 2);
+            ov_trace(rs[i].trace, 0, len);
+            /* its pads, run-length: " | count:pad ..." (play reruns it) */
+            int np = rq[i].frames + 3 < rs[i].cap ? rq[i].frames + 3 : rs[i].cap;
+            fputs(" |", ov_f);
+            for (int f = 0; f < np; ) {
+                int k = f;
+                while (k < np && rs[i].pads[k] == rs[i].pads[f]) k++;
+                fprintf(ov_f, " %d:%x", k - f, rs[i].pads[f]);
+                f = k;
+            }
+            fputc('\n', ov_f);
+        }
     ag_nsim += (unsigned long)n;
     ag_tsim += ag_now() - t0;
     if (getenv("SBM2_AGPROF")) {
@@ -1097,41 +1155,346 @@ static void ag_run(const AgSimReq *rq, AgSimRes *rs, int n)
     }
 }
 
-/* emu.agent(frame [, goal [, extra]]): the pad for this frame (set as the
- * live pad), and the agent's new log lines. extra: world-view lines the
- * script adds (boss lines from bot/boss.lua's exec hooks). */
-static int l_agent(lua_State *Ls)
+/* The agent's pad for this frame (set as the live pad); *text: its new log
+ * lines. Also the overlay file's lines (SBM2_OVERLAY). */
+static uint16_t agent_call(int fr, const char *goal, const char *extra, const char **text)
 {
-    int fr = (int)luaL_checkinteger(Ls, 1);
-    if (!agent) {
-        agent = sbm2_agent_new(luaL_optstring(Ls, 2, "exit"));
-        if (!agent) return luaL_error(Ls, "agent: bad goal");
-    }
+    if (!agent) agent = sbm2_agent_new(goal);
+    if (!agent) { *text = NULL; return 0; }
     double t0 = ag_now();
-    uint16_t p = sbm2_agent_frame(agent, m.wram, fr, luaL_optstring(Ls, 3, NULL), ag_sim, NULL);
+    uint16_t p = sbm2_agent_frame(agent, m.wram, fr, extra, ag_sim, NULL);
     ag_tagent += ag_now() - t0; ag_calls++;
     live_pad = p;
-    lua_pushinteger(Ls, p);
-    lua_pushstring(Ls, sbm2_agent_log(agent));
-    return 2;
+    const char *lg = sbm2_agent_log(agent);
+    *text = lg;
+    if (ov_open()) {
+        /* a new move: its path and bomb presses */
+        static uint64_t lastH;
+        const uint16_t *pp;
+        const int16_t *tt;
+        int at, pn = sbm2_agent_plan(agent, &pp, &tt, &at);
+        uint64_t h = 0xCBF29CE484222325ull ^ (uint64_t)pn;
+        for (int f = 0; f < 2 * pn; f++) h = (h ^ (uint16_t)tt[f]) * 0x100000001B3ull;
+        if (pn && at <= 1 && h != lastH) {
+            lastH = h;
+            static char lastWhat[64];
+            const char *w = sbm2_agent_what(agent);
+            if (strncmp(w, lastWhat, sizeof lastWhat - 1)) {
+                snprintf(lastWhat, sizeof lastWhat, "%s", w);
+                fprintf(ov_f, "W %u %s\n", m.frame, w);
+            }
+            fprintf(ov_f, "P %u %d %d", m.frame, at, (pn - at + 1) / 2);
+            ov_trace(tt, at, pn);
+            fputc('\n', ov_f);
+            for (int f = at; f < pn; f++)
+                if ((pp[f] & PAD_A) && (f == 0 || !(pp[f - 1] & PAD_A))) fprintf(ov_f, "A %u %d %d\n", m.frame, tt[2 * f], tt[2 * f + 1]);
+        }
+        for (const char *q = lg; *q; ) {
+            const char *e = strchr(q, '\n');
+            int len = e ? (int)(e - q) : (int)strlen(q);
+            if (len) fprintf(ov_f, "L %u %.*s\n", m.frame, len, q);
+            q += len + (e ? 1 : 0);
+        }
+    }
+    return p;
 }
-/* emu.captureWorld(frame): the C++ world view text of the live WRAM */
-static int l_captureWorld(lua_State *Ls)
+
+/* --- the C driver: agentrun without a script ---
+ * Plays the agent from SBM2_LOAD (+ SBM2_PREFIX):
+ * each frame the agent's pad, with world-view boss lines from exec hooks on
+ * the boss code (bot/boss.lua's rules: docs/enemies.md section 7), the log
+ * (STAGE / SEED / DEATH / END lines, scenario.py greps them) and the pad
+ * log (run.inputs: the start state's sidecar, the prefix, then every pad
+ * read and NMI, recorded by snes.c).
+ * Env: SBM2_OUT, SBM2_LOAD, SBM2_PREFIX, SBM2_FRAMES, SBM2_FRAME0,
+ * SBM2_STOPEARLY (stop at a death and at the next stage), SBM2_STOPAT
+ * (hex stage), SBM2_GOAL (default "powerups+exit"), SBM2_SEED,
+ * SBM2_AGVERBOSE. */
+static struct {
+    const char *out, *load, *goal;
+    int frames, frame0, stopearly, stopat, seed, verbose;
+    int frame, loaded, stage, deadAt, lockAt, deaths, holdUntil;
+    char *log; size_t loglen, logcap;
+    uint16_t *base; uint32_t nbase; int valid;   /* run.inputs before the recording */
+    double t0;
+} cd;
+
+/* boss objects the boss code ran on this frame (cur), last and the one before */
+enum { CD_OBJ = 64, CD_SENSE = 40 };
+typedef struct { int used; uint16_t base; int hasBox, box[4], hurt, ns; int16_t sense[CD_SENSE][2]; } CdObj;
+static CdObj cd_obj[3][CD_OBJ];
+static int cd_cur;
+static uint16_t cd_senseObj;
+static int cd_hasSense;
+
+static int cd_r16(uint32_t a) { return m.wram[a] | m.wram[a + 1] << 8; }
+static int cd_s16(int v) { return v >= 0x8000 ? v - 0x10000 : v; }
+static CdObj *cd_objFor(uint16_t x)
 {
-    lua_pushstring(Ls, sbm2_capture(m.wram, (int)luaL_optinteger(Ls, 1, 0)));
-    return 1;
+    CdObj *t = cd_obj[cd_cur];
+    for (int i = 0; i < CD_OBJ; i++) if (t[i].used && t[i].base == x) return &t[i];
+    for (int i = 0; i < CD_OBJ; i++) if (!t[i].used) { memset(&t[i], 0, sizeof t[i]); t[i].used = 1; t[i].base = x; return &t[i]; }
+    return NULL;
 }
-/* emu.agentStats(): calls, sims, sim frames, seconds in sims, seconds in the agent (sims included) */
-static int l_agentStats(lua_State *Ls)
+
+/* Exec hooks: BossContactP1 (CC:A538) with the box at [$6D]; the sense
+ * checks (BossFlameSense CC:A266, the 4-8 centre check CC:C4B9) note the
+ * object, then BossEatBomb (CC:A2C4) runs once per sense point. */
+static void cd_exec(uint32_t pc)
 {
-    lua_pushfstring(Ls, "calls %d sims %d hits %d simframes %d tsim %f tagent %f", (int)ag_calls, (int)ag_nsim, (int)ag_hits, (int)ag_simfr, ag_tsim, ag_tagent);
-    return 1;
+    if (pc == 0xCCA538) {
+        CdObj *o = cd_objFor(m.cpu.x);
+        if (!o) return;
+        uint32_t p = m.wram[0x6D] | m.wram[0x6E] << 8 | m.wram[0x6F] << 16;
+        for (int k = 0; k < 4; k++) {
+            /* (straight from ROM: a bus read would touch the machine, open bus) */
+            uint32_t a = p + 2 * (uint32_t)k;
+            int v = is_rom(a) ? m.rom[rom_offset(a)] | m.rom[rom_offset(a + 1)] << 8 : 0;
+            o->box[k] = cd_s16(v) - 0x1000;
+        }
+        o->hasBox = 1;
+    } else if (pc == 0xCCA266 || pc == 0xCCC4B9) {
+        cd_senseObj = m.cpu.x;
+        cd_hasSense = 1;
+    } else if (pc == 0xCCA2C4) {
+        uint16_t x = cd_senseObj;
+        if (!cd_hasSense || x < 0x1000 || x >= 0x1800) return;
+        CdObj *o = cd_objFor(x);
+        if (!o) return;
+        if (o->ns < CD_SENSE) {
+            o->sense[o->ns][0] = (int16_t)(cd_s16(cd_r16(0x4A)) - cd_s16(cd_r16(x + 0x11)));
+            o->sense[o->ns][1] = (int16_t)(cd_s16(cd_r16(0x4C)) - cd_s16(cd_r16(x + 0x14)));
+            o->ns++;
+        }
+        o->hurt = cd_r16(x + 0x26) != 0;
+    }
 }
-static int l_agentWorld(lua_State *Ls)
+
+static void cd_logf(const char *fmt, ...)
 {
-    lua_pushstring(Ls, agent ? sbm2_agent_world(agent) : "");
-    return 1;
+    char b[4096];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(b, sizeof b, fmt, ap);
+    va_end(ap);
+    if (n < 0) return;
+    if (n >= (int)sizeof b) n = sizeof b - 1;
+    if (cd.loglen + (size_t)n + 2 > cd.logcap) { cd.logcap = (cd.loglen + (size_t)n + 2) * 2; cd.log = realloc(cd.log, cd.logcap); }
+    memcpy(cd.log + cd.loglen, b, (size_t)n);
+    cd.loglen += (size_t)n;
+    cd.log[cd.loglen++] = '\n';
 }
+static void cd_write(const char *path, const void *d, size_t n)
+{
+    FILE *f = fopen(path, "wb");
+    if (f) { fwrite(d, 1, n, f); fclose(f); }
+}
+static void cd_flush(void)
+{
+    char p[1024];
+    snprintf(p, sizeof p, "%s/bot_%06d.log", cd.out, cd.frame0);
+    cd_write(p, cd.log, cd.loglen);
+}
+static void cd_finish(int code, const char *why)
+{
+    cd_logf("%6d END %02X %s deaths %d", cd.frame, m.wram[0x1A], why, cd.deaths);
+    cd_logf("%6d STATS wall %.2f calls %d sims %d hits %d simframes %d tsim %f tagent %f", cd.frame, ag_now() - cd.t0,
+            (int)ag_calls, (int)ag_nsim, (int)ag_hits, (int)ag_simfr, ag_tsim, ag_tagent);
+    cd_flush();
+    if (cd.valid) {
+        char p[1024];
+        snprintf(p, sizeof p, "%s/run.inputs", cd.out);
+        FILE *f = fopen(p, "wb");
+        if (f) {
+            fwrite(cd.base, 2, cd.nbase, f);
+            fwrite(m.pad_rec, 2, m.pad_rec_len, f);
+            fclose(f);
+        }
+    }
+    stopped = code;
+}
+
+/* SBM2_SEED=N (N > 0; scenario.py -s): idle 0..63 frames (picked from N
+ * and the stage) at each stage start before the agent plays. The game's
+ * RNG runs every frame, so enemies choose differently: other playthroughs
+ * of the same stages, to tell luck from skill. 0 = no wait. */
+static int cd_seedWait(int st)
+{
+    if (cd.seed <= 0) return 0;
+    uint32_t h = (uint32_t)((uint64_t)cd.seed * 2654435761u + (uint64_t)st * 40503u);
+    h = (uint32_t)((uint64_t)(h ^ (h >> 15)) * 2246822519u);
+    return (int)((h >> 13) % 64);
+}
+
+static int cd_cmpBase(const void *a, const void *b) { return (int)(*(const uint16_t *)a) - (int)(*(const uint16_t *)b); }
+
+/* The world-view boss lines (docs/worldview.md): objects seen last frame
+ * (1-8 and 3-8: the frame before too; some run their contact check every
+ * other frame), in the x-8 stages only. */
+static void cd_bossLines(char *out, size_t cap)
+{
+    out[0] = 0;
+    int stg = m.wram[0x1A];
+    if ((stg & 0x0F) != 7) return;
+    int last = (cd_cur + 2) % 3, prev = (cd_cur + 1) % 3;
+    uint16_t bases[2 * CD_OBJ];
+    const CdObj *of[2 * CD_OBJ];
+    int n = 0;
+    for (int pass = 0; pass < 2; pass++) {
+        int t = pass == 0 ? last : prev;
+        if (pass == 1 && stg != 0x17 && stg != 0x37) break;
+        for (int i = 0; i < CD_OBJ; i++) {
+            const CdObj *o = &cd_obj[t][i];
+            if (!o->used) continue;
+            int dup = 0;
+            for (int k = 0; k < n; k++) dup |= bases[k] == o->base;
+            if (dup) continue;
+            bases[n] = o->base; of[n++] = o;
+        }
+    }
+    /* by base (Lua's table order was a hash's) */
+    for (int i = 1; i < n; i++)
+        for (int k = i; k > 0 && cd_cmpBase(&bases[k - 1], &bases[k]) > 0; k--) {
+            uint16_t tb = bases[k]; bases[k] = bases[k - 1]; bases[k - 1] = tb;
+            const CdObj *to = of[k]; of[k] = of[k - 1]; of[k - 1] = to;
+        }
+    int ox = cd_s16(cd_r16(0x5F01)), oy = cd_s16(cd_r16(0x5EFB));
+    size_t len = 0;
+    for (int i = 0; i < n; i++) {
+        const CdObj *o = of[i];
+        int b = o->base;
+        int x = cd_s16(cd_r16((uint32_t)b + 0x11)), y = cd_s16(cd_r16((uint32_t)b + 0x14));
+        if (!(x < 0x100)) x -= 0x100;
+        int state = cd_r16((uint32_t)b) | m.wram[b + 2] << 16;
+        len += (size_t)snprintf(out + len, cap - len, "%sboss base=%04X state=%06X x=%d y=%d hp=%d hurt=%d", i ? "\n" : "", b, state,
+                                x + ox, y + oy, cd_r16((uint32_t)b + 0x20), o->hurt);
+        if (o->hasBox && len < cap)
+            len += (size_t)snprintf(out + len, cap - len, " box=%d,%d,%d,%d", o->box[0], o->box[1], o->box[2], o->box[3]);
+        for (int k = 0; k < o->ns && len < cap; k++)
+            len += (size_t)snprintf(out + len, cap - len, "%s%d,%d", k ? ";" : " sense=", o->sense[k][0], o->sense[k][1]);
+        if (len >= cap) { out[cap - 1] = 0; return; }
+    }
+}
+
+static void cd_frame(void)
+{
+    if (!cd.loaded) {
+        /* the start: the run's pad log is the state's sidecar, the prefix, then the recording */
+        cd.loaded = 1;
+        cd.valid = 1;
+        cd.nbase = 0;
+        if (cd.load) {
+            char side[1024];
+            snprintf(side, sizeof side, "%.*s.inputs", (int)strlen(cd.load) - 4, cd.load);
+            cd.base = load_words(side, &cd.nbase);
+            if (!cd.base) cd.valid = 0;
+        }
+        const char *prefix = getenv("SBM2_PREFIX");
+        uint32_t pn = 0;
+        uint16_t *pre = prefix && *prefix ? load_words(prefix, &pn) : NULL;
+        if (pre && pn) {
+            cd.base = realloc(cd.base, (size_t)(cd.nbase + pn) * 2);
+            memcpy(cd.base + cd.nbase, pre, (size_t)pn * 2);
+            cd.nbase += pn;
+        }
+        free(pre);
+        /* the recording starts with this frame's NMI, taken just before
+         * (snes_step takes it before the hook runs us) */
+        if (m.pad_rec_len && (m.pad_rec[m.pad_rec_len - 1] & 0xF)) {
+            m.pad_rec[0] = m.pad_rec[m.pad_rec_len - 1];
+            m.pad_rec_len = 1;
+        } else
+            m.pad_rec_len = 0;
+        return;
+    }
+    int st = m.wram[0x1A];
+    int inStage = (cd_r16(0x8000) & 0xF000) == 0x9000 && m.wram[0xBC] != 0;
+    if (inStage && st != cd.stage) {
+        if (st == cd.stopat || (cd.stage >= 0 && cd.stopearly && cd.stopat < 0)) {
+            cd_logf("%6d STAGE %02X", cd.frame, st);
+            cd_finish(0, "next stage");
+            return;
+        }
+        cd.stage = st;
+        cd_logf("%6d STAGE %02X hearts %02X", cd.frame, st, m.wram[0x80EF]);
+        int w = cd_seedWait(st);
+        if (w > 0) { cd.holdUntil = cd.frame + w; cd_logf("%6d SEED %d wait %d", cd.frame, cd.seed, w); }
+    }
+    /* A death: P1 locked as C0:A675 leaves it ($52 & $F809 == $0801), not on
+     * the exit nor a spring pad, and still locked 90 frames on (the
+     * oracle's rule, sim_run). */
+    int lock = cd_r16(0x8052);
+    int px = (cd_r16(0x8010) + cd_r16(0x5F01)) & 0xFFFF, py = (cd_r16(0x8018) + cd_r16(0x5EFB)) & 0xFFFF;
+    int pc = px / 16, pr = py / 16;
+    int onPad = pc < 32 && pr < 32 && m.wram[0x1C000 + pr * 0x80 + pc * 2] == 0x4C;
+    if ((lock & 0xF809) == 0x0801 && cd_r16(0x80A8) != cd_r16(0x5D72) && !onPad) { if (cd.lockAt < 0) cd.lockAt = cd.frame; }
+    else cd.lockAt = -1;
+    if (cd.lockAt >= 0 && cd.frame - cd.lockAt >= 90) {
+        if (cd.deadAt < 0) {
+            cd.deadAt = cd.frame;
+            cd.deaths++;
+            cd_logf("%6d DEATH at px(%d,%d) (locked since %d)", cd.frame, cd_r16(0x8010), cd_r16(0x8018), cd.lockAt);
+            char p[1024];
+            snprintf(p, sizeof p, "%s/wv_death_%06d.txt", cd.out, cd.frame);
+            const char *wv = agent ? sbm2_agent_world(agent) : "";
+            cd_write(p, wv, strlen(wv));
+            if (cd.stopearly) { cd_finish(1, "death"); return; }
+        }
+    } else
+        cd.deadAt = -1;
+    /* the boss objects: this frame's list becomes the last */
+    cd_cur = (cd_cur + 1) % 3;
+    memset(cd_obj[cd_cur], 0, sizeof cd_obj[cd_cur]);
+    if (cd.frame < cd.holdUntil) {
+        live_pad = 0;
+        if (++cd.frame >= cd.frames) cd_finish(0, "budget");
+        return;
+    }
+    static char bl[16384];
+    cd_bossLines(bl, sizeof bl);
+    const char *text;
+    agent_call(cd.frame, cd.goal, bl, &text);
+    if (!text) { cd_logf("%6d agent error: bad goal", cd.frame); cd_finish(4, "error"); return; }
+    if (*text) {
+        for (const char *q = text; *q; ) {
+            const char *e = strchr(q, '\n');
+            int len = e ? (int)(e - q) : (int)strlen(q);
+            if (len) cd_logf("%.*s", len, q);
+            q += len + (e ? 1 : 0);
+        }
+        if (cd.verbose) {
+            char p[1024];
+            snprintf(p, sizeof p, "%s/wv_%06d.txt", cd.out, cd.frame);
+            const char *wv = sbm2_agent_world(agent);
+            cd_write(p, wv, strlen(wv));
+        }
+    }
+    if (cd.frame % 600 == 0) cd_flush();
+    if (++cd.frame >= cd.frames) cd_finish(0, "budget");
+}
+
+static void cd_init(void)
+{
+    const char *e;
+    cdrv = 1;
+    cd.out = (e = getenv("SBM2_OUT")) ? e : "build/agent";
+    cd.frames = (e = getenv("SBM2_FRAMES")) ? atoi(e) : 3600;
+    cd.frame0 = (e = getenv("SBM2_FRAME0")) ? atoi(e) : 0;
+    cd.load = (e = getenv("SBM2_LOAD")) && *e ? e : NULL;
+    cd.goal = (e = getenv("SBM2_GOAL")) ? e : "powerups+exit";
+    cd.stopearly = (e = getenv("SBM2_STOPEARLY")) && !strcmp(e, "1");
+    cd.verbose = (e = getenv("SBM2_AGVERBOSE")) && *e && strcmp(e, "0");
+    cd.stopat = (e = getenv("SBM2_STOPAT")) && *e ? (int)strtol(e, NULL, 16) : -1;
+    cd.seed = (e = getenv("SBM2_SEED")) ? atoi(e) : 0;
+    cd.frame = cd.frame0;
+    cd.loaded = cd.load == NULL;
+    cd.stage = cd.deadAt = cd.lockAt = -1;
+    cd.t0 = ag_now();
+    m.pad_rec_len = 0;
+    m.pad_record = 1;
+    if (cd.loaded) cd.valid = 1;
+}
+
 #endif
 
 static int l_padBits(lua_State *Ls)
@@ -1252,9 +1615,6 @@ static void open_emu(void)
         {"loadSavestate", l_loadSavestate}, {"stop", l_stop}, {"takeScreenshot", l_takeScreenshot},
         {"simulate", l_simulate}, {"simulateMany", l_simulateMany}, {"simStats", l_simStats}, {"now", l_now}, {"simHearts", l_simHearts}, {"padBits", l_padBits},
         {"getCdlData", l_getCdlData}, {"getCdlString", l_getCdlString}, {"log", l_log},
-#ifdef SBM2_AGENT
-        {"agent", l_agent}, {"agentWorld", l_agentWorld}, {"agentStats", l_agentStats}, {"captureWorld", l_captureWorld},
-#endif
         {NULL, NULL}};
     luaL_newlib(L, fns);
     static const char *const mt[] = {"snesMemory", "snesWorkRam", "snesPrgRom"};
@@ -1325,6 +1685,75 @@ static int replay_words(uint16_t *log, uint32_t n, const char *what)
     return 0;
 }
 
+/* SBM2_WRAMAT=<frame>:<file>: write WRAM to file at that video frame's
+ * first wait loop (the game idle, waiting for the NMI): the same point in
+ * any run of the same machine, to check a replay or a scenario's prefix
+ * against the run it came from. */
+static void wram_at(void)
+{
+    static long at = -2;
+    static const char *path;
+    if (at == -2) {
+        const char *e = getenv("SBM2_WRAMAT");
+        at = -1;
+        if (e && *e && strchr(e, ':')) { at = atol(e); path = strchr(e, ':') + 1; }
+    }
+    if (at < 0 || m.frame != (uint32_t)at) return;
+    uint32_t pc = (uint32_t)m.cpu.pb << 16 | m.cpu.pc;
+    if (!m.wait_at[pc & 0xFFFF] || snes_wait_point(&m, pc) != WAIT_CMP) return;
+    FILE *f = fopen(path, "wb");
+    if (f) { fwrite(m.wram, 1, 0x20000, f); fclose(f); }
+    at = -1;
+}
+
+/* Replays a pad log recorded in timed mode (a cut of a botrun/agentrun
+ * run.inputs) in timed mode, from the current state, as SBM2_REPLAY does:
+ * each pad read takes the next value, the NMI markers are counted, not
+ * placed. It stops at the first vblank after the last read, where the
+ * recorded run's vblank callbacks chose the next pad: the bot takes over
+ * there. (In
+ * frame-step the markers had to be placed, which over a long cut went
+ * wrong: "pad-log entries out of place", a different game from there.) */
+static int replay_timed_vb;
+static void replay_timed_mark(Snes *s) { (void)s; replay_timed_vb = 1; }
+static int replay_timed(uint16_t *log, uint32_t n, const char *what)
+{
+    uint32_t marks = 0, taken = 0, reads = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        if (!(log[i] & 0xF)) reads++;
+        else if ((log[i] & 0xF) == PADLOG_POKE) { fprintf(stderr, "botrun: %s has pokes: not a timed log\n", what); return -1; }
+        else marks++;
+    }
+    void (*keep)(Snes *) = m.on_vblank;
+    int keepfs = m.framestep;
+    m.framestep = 0;
+    m.on_vblank = replay_timed_mark;
+    m.pads = log;
+    m.npads = n;
+    m.pad_pos = 0;
+    m.pad_desync = 0;
+    m.pad_markers = 0;
+    for (long steps = 0;; steps++) {
+        int pend = m.nmi_pending;
+        replay_timed_vb = 0;
+        snes_step(&m);
+        wram_at();
+        if (pend && !m.nmi_pending) taken++;
+        if (replay_timed_vb && m.pad_pos - m.pad_desync >= reads && (m.nmitimen & 0x80)) break;
+        if (steps > 4000000000L) { fprintf(stderr, "botrun: replay of %s did not end\n", what); return -1; }
+    }
+    /* every read used, and every NMI where the log has one */
+    if (m.pad_pos - m.pad_desync != reads || taken != marks)
+        fprintf(stderr, "botrun: %s: %u of %u pad reads used, %u NMIs for %u markers\n", what,
+                m.pad_pos - m.pad_desync, reads, taken, marks);
+    m.pads = NULL;
+    m.npads = m.pad_pos = 0;
+    m.on_vblank = keep;
+    m.framestep = keepfs;
+    vb_pending = 1;   /* that vblank's callbacks: the bot's first frame */
+    return 0;
+}
+
 /* The pad log of a Mesen state, from power-on. */
 static int replay_to(const char *state)
 {
@@ -1379,7 +1808,13 @@ static void save_cached(const char *state)
 
 int main(int argc, char **argv)
 {
-    if (argc < 3) { fprintf(stderr, "usage: %s <rom> <script.lua>\n", argv[0]); return 2; }
+#ifdef SBM2_AGENT
+    /* agentrun <rom>: the C driver plays the agent (no script) */
+    int noscript = argc == 2;
+#else
+    int noscript = 0;
+#endif
+    if (argc < 3 && !noscript) { fprintf(stderr, "usage: %s <rom> <script.lua>\n", argv[0]); return 2; }
     if (snes_load(&m, argv[1])) { fprintf(stderr, "can't load %s\n", argv[1]); return 2; }
     snes_power(&m);
     m.framestep = 1;
@@ -1428,6 +1863,7 @@ int main(int argc, char **argv)
         uint8_t last = 0xFF;
         while (m.pad_pos < m.npads) {
             snes_step(&m);
+            wram_at();
             if (m.wram[0x1A] != last && m.wram[0xBC]) {
                 last = m.wram[0x1A];
                 printf("frame %u stage %02X (pad log %u/%u)\n", m.frame, last, m.pad_pos, m.npads);
@@ -1474,7 +1910,16 @@ int main(int argc, char **argv)
     if (prefix && *prefix) {
         uint32_t n;
         uint16_t *log = load_words(prefix, &n);
-        if (!log || replay_words(log, n, prefix)) { fprintf(stderr, "botrun: bad prefix %s\n", prefix); return 2; }
+        /* SBM2_PREFIX_TIMED=1 (scenario.py make writes it): the prefix is a
+         * cut of a timed run on this machine (agentrun/botrun run.inputs):
+         * replay it timed, exactly. Older scenarios' prefixes (Mesen, older
+         * builds) replay in frame-step as they always have. */
+        const char *tm0 = getenv("SBM2_TIMED"), *pt = getenv("SBM2_PREFIX_TIMED");
+        int fs = (tm0 && !strcmp(tm0, "0")) || !(pt && *pt == '1');
+        if (!log || (fs ? replay_words(log, n, prefix) : replay_timed(log, n, prefix))) {
+            fprintf(stderr, "botrun: bad prefix %s\n", prefix);
+            return 2;
+        }
         free(log);
     }
     /* Frame-step frames index input[] by m.frame; keep it within the buffer. */
@@ -1496,6 +1941,17 @@ int main(int argc, char **argv)
         m.on_vblank = vblank_cb;
     }
 
+#ifdef SBM2_AGENT
+    if (noscript) {
+        cd_init();
+        while (stopped < 0) {
+            snes_step(&m);
+            wram_at();
+            if (m.cpu.stp) { fprintf(stderr, "agentrun: CPU stopped\n"); return 3; }
+        }
+        return stopped;
+    }
+#endif
     SANDBOX_ALLOW_LOADFILE = 1;
     L = luaL_newstate();
     luaL_openlibs(L);
@@ -1510,6 +1966,7 @@ int main(int argc, char **argv)
     }
     while (stopped < 0) {
         snes_step(&m);
+        wram_at();
         if (m.cpu.stp) { fprintf(stderr, "botrun: CPU stopped\n"); return 3; }
     }
     lua_close(L);

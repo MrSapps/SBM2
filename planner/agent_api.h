@@ -53,6 +53,14 @@ const char *sbm2_agent_log(void *agent);
 /* The world view of the last decision (docs/worldview.md), for repros. */
 const char *sbm2_agent_world(void *agent);
 
+/* The move being played (for overlays): its pads and P1's world x, y at the
+ * start of each of its frames (2 per frame); *at = the frame playing now.
+ * Returns the move's length in frames (0: none). Valid until the next
+ * sbm2_agent_frame. */
+int sbm2_agent_plan(void *agent, const uint16_t **pads, const int16_t **trace, int *at);
+/* What the move is for ("survive", "do", ...), the last decision's kind. */
+const char *sbm2_agent_what(void *agent);
+
 /* The world view of this WRAM as snapshot text (planner/capture.hpp);
  * valid until the next call. */
 const char *sbm2_capture(const uint8_t *wram, int frame);

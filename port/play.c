@@ -19,7 +19,17 @@
  *   -n N        stop after N video frames
  *   -s LIST     headless: write frames LIST (comma-separated) as PPM files
  *   -o DIR      where -s writes (default .)
- *   -N          no hooks (pure interpreter)
+ *   -O FILE     overlays (port/overlay.c) from an agent run's overlay file
+ *               (agentrun with SBM2_OVERLAY=FILE): the window shows them
+ *   -V OUT.mp4   with -O: write the overlaid frames to a video (ffmpeg),
+ *               headless
+ *   -F N / -T N  with -V: video frames N.. / ..N only (the replay still runs
+ *               from the start)
+ *   -k K        with -V: keep every Kth frame (K x speed)
+ *   -N          no hooks (pure interpreter; the default with -r: the
+ *               hooks are not cycle-exact, so a replay with them drifts off
+ *               the recorded run, e.g. a death in 1-3)
+ *   -H          hooks on even with -r
  *   -x NAME     disable this hook (repeatable)
  *
  * Keys: arrows, Z = B, X = A, A = Y, S = X, Q = L, W = R, Enter = Start,
@@ -29,12 +39,105 @@
 #include <string.h>
 #include "hook.h"
 #include "ppu.h"
+#include "overlay.h"
 #ifdef HAVE_SDL
 #include <SDL2/SDL.h>
 #endif
 
 static Snes m;
 static Ppu ppu;
+
+/* --- futures windows (-O): oracle runs replayed on copies of the machine --- */
+typedef struct {
+    Snes s;
+    Ppu p;
+    uint16_t *buf;
+    int n, age, ended, ev;
+    uint32_t f0;
+} Future;
+static Future fut[OV_MAXWIN];
+static int nfut;
+
+/* The point a decision's runs start from: agentrun's frame callback runs at
+ * the first instruction boundary after the frame start with no NMI being
+ * taken (botrun.c step_hook); the oracle copies the machine there. */
+static void to_callback_point(Snes *s)
+{
+    for (long g = 0; g < 100000; g++) {
+        if (!(s->nmi_pending && s->nmi_at <= s->cycle_start) && !s->cpu.nmi && !s->cpu.wai && !s->cpu.stp) return;
+        snes_step(s);
+    }
+}
+
+static void future_start(Future *f, int ev)
+{
+    int n;
+    const uint16_t *pads = ov_pads(ev, &n);
+    f->s = m;
+    f->p = ppu;
+    f->s.cpu.ctx = &f->s;
+    f->s.ppu_state = &f->p;
+    f->s.hook = NULL;
+    f->s.on_vblank = NULL;
+    f->s.on_frame = NULL;
+    f->s.pads = NULL;
+    f->s.npads = f->s.pad_pos = 0;
+    f->s.pad_markers = 0;
+    f->s.pad_record = 0;
+    f->s.prof = NULL;
+    f->buf = realloc(f->buf, (size_t)(n + 3) * 2);
+    memcpy(f->buf, pads, (size_t)n * 2);
+    f->buf[n] = f->buf[n + 1] = f->buf[n + 2] = 0;
+    /* as the oracle: buf[i] is the pad of frame f0 + i, this frame's latched now */
+    f->f0 = m.frame;
+    f->s.input = f->buf - f->f0;
+    f->s.input_len = f->f0 + (uint32_t)n;
+    if (f->s.nmitimen & 0x01) f->s.joy[0] = f->buf[0];
+    f->n = n;
+    f->age = 0;
+    f->ended = 0;
+    f->ev = ev;
+}
+
+static void future_step(Future *f)
+{
+    if (f->ended) return;
+    uint32_t fr = f->s.frame;
+    for (long g = 0; f->s.frame == fr && g < 5000000; g++) snes_step(&f->s);
+    f->age++;
+    /* (a death: hold its frame once it has played, before the restart) */
+    int dead = ov_dead(f->ev);
+    if (f->age + 1 >= f->n || (dead >= 0 && f->age >= dead + 40)) f->ended = 1;
+}
+
+/* After a frame of the replay: the overlay's events for it, new futures
+ * if a decision's runs should show, each future a frame on, then draw. */
+static void overlay_frame(uint32_t *canvas)
+{
+    if (!canvas) {   /* before the part shown: the events only */
+        ov_frame(m.wram, m.frame, ppu.pixels, 0, NULL, 0, NULL);
+        nfut = 0;
+        return;
+    }
+    static OvWin win[OV_MAXWIN];
+    int ended = 1;
+    for (int i = 0; i < nfut; i++) ended &= fut[i].ended;
+    /* the events up to this frame first (ov_pick needs the batch) */
+    ov_frame(m.wram, m.frame, ppu.pixels, 0, win, 0, NULL);
+    int evs[OV_MAXWIN], k = ov_pick(m.frame, ended, evs);
+    if (k) {
+        to_callback_point(&m);
+        for (int i = 0; i < k; i++) future_start(&fut[i], evs[i]);
+        nfut = k;
+    } else
+        for (int i = 0; i < nfut; i++) future_step(&fut[i]);
+    for (int i = 0; i < nfut; i++) {
+        const Future *f = &fut[i];
+        win[i] = (OvWin){f->p.pixels, f->ev, f->age, f->ended, f->age < f->n ? f->buf[f->age] : 0};
+    }
+    /* P1's pad this frame: the one the game latched */
+    ov_frame(m.wram, m.frame, ppu.pixels, m.joy[0], win, nfut, canvas);
+}
 
 static void write_ppm(const char *dir, uint32_t frame)
 {
@@ -101,9 +204,11 @@ int main(int argc, char **argv)
 {
     if (argc < 2) { fprintf(stderr, "usage: play <rom> [-i input] [-n frames] [-s f1,f2 -o dir] [-N] [-x hook]\n"); return 2; }
     const char *input = NULL, *replay = NULL, *outdir = ".", *shots = NULL, *timed = NULL;
+    const char *ovfile = NULL, *video = NULL;
+    long vfrom = 0, vto = -1, vstep = 1;
     long frames = -1;
     double fps = 60;
-    int hooks = 1, uncapped = -1;
+    int hooks = -1, uncapped = -1;
     uint8_t *enable = NULL;
     if (snes_load(&m, argv[1])) { fprintf(stderr, "can't load %s\n", argv[1]); return 2; }
     for (int i = 2; i < argc; i++) {
@@ -112,7 +217,13 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-n") && i + 1 < argc) frames = atol(argv[++i]);
         else if (!strcmp(argv[i], "-s") && i + 1 < argc) shots = argv[++i];
         else if (!strcmp(argv[i], "-o") && i + 1 < argc) outdir = argv[++i];
+        else if (!strcmp(argv[i], "-O") && i + 1 < argc) ovfile = argv[++i];
+        else if (!strcmp(argv[i], "-V") && i + 1 < argc) video = argv[++i];
+        else if (!strcmp(argv[i], "-F") && i + 1 < argc) vfrom = atol(argv[++i]);
+        else if (!strcmp(argv[i], "-T") && i + 1 < argc) vto = atol(argv[++i]);
+        else if (!strcmp(argv[i], "-k") && i + 1 < argc) vstep = atol(argv[++i]);
         else if (!strcmp(argv[i], "-N")) hooks = 0;
+        else if (!strcmp(argv[i], "-H")) hooks = 1;
         else if (!strcmp(argv[i], "-t") && i + 1 < argc) timed = argv[++i];
         else if (!strcmp(argv[i], "-f") && i + 1 < argc) { fps = atof(argv[++i]); uncapped = 0; }
         else if (!strcmp(argv[i], "-p")) uncapped = 0;
@@ -148,6 +259,7 @@ int main(int argc, char **argv)
         input = replay;  /* the keyboard does not drive the pad */
     }
     if (uncapped < 0) uncapped = replay != NULL;
+    if (hooks < 0) hooks = replay == NULL;
     if (hooks) hook_install(&m, enable);
     if (replay && timed) {
         /* The start state's pad log in frame-step (botrun's replay_words),
@@ -177,6 +289,33 @@ int main(int argc, char **argv)
         free(sl);
     }
 
+    static uint32_t canvas[OV_W * OV_H];
+    if (ovfile) {
+        int n = ov_load(ovfile);
+        if (n < 0) { fprintf(stderr, "can't read %s\n", ovfile); return 2; }
+        fprintf(stderr, "overlay: %d events\n", n);
+    }
+    if (video) {
+        if (!ovfile) { fprintf(stderr, "-V needs -O\n"); return 2; }
+        char cmd[2048];
+        snprintf(cmd, sizeof cmd, "ffmpeg -loglevel error -y -f rawvideo -pix_fmt bgr0 -s %dx%d -r 60 -i - "
+                 "-c:v libx264 -preset faster -crf 18 -pix_fmt yuv420p '%s'", OV_W, OV_H, video);
+        FILE *ff = popen(cmd, "w");
+        if (!ff) { fprintf(stderr, "can't run ffmpeg\n"); return 2; }
+        long kept = 0;
+        for (long f = 1;; f++) {
+            int r = run_frame();
+            if (r) break;
+            ppu.nodraw = (long)m.frame + 2 < vfrom;
+            if ((long)m.frame < vfrom) { overlay_frame(NULL); continue; }
+            overlay_frame(canvas);
+            if (f % vstep) continue;
+            if (vto >= 0 && (long)m.frame > vto) break;
+            fwrite(canvas, 4, (size_t)OV_W * OV_H, ff);
+            if (++kept % 3600 == 0) fprintf(stderr, "video: frame %u, %ld kept\n", m.frame, kept);
+        }
+        return pclose(ff) ? 1 : 0;
+    }
     int headless = shots != NULL;
 #ifndef HAVE_SDL
     headless = 1;
@@ -200,13 +339,15 @@ int main(int argc, char **argv)
     }
 #ifdef HAVE_SDL
     if (SDL_Init(SDL_INIT_VIDEO)) { fprintf(stderr, "SDL: %s\n", SDL_GetError()); return 1; }
+    int cw = ovfile ? OV_W : 256, ch = ovfile ? OV_H : 224;
     SDL_Window *win = SDL_CreateWindow("SBM2 port", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                                       256 * 3, 224 * 3, SDL_WINDOW_RESIZABLE);
+                                       ovfile ? OV_W * 2 / 3 : 256 * 3, ovfile ? OV_H * 2 / 3 : 224 * 3, SDL_WINDOW_RESIZABLE);
     /* Paced by the clock below, not vsync (a vsync present can block forever
      * on some X setups). */
     SDL_Renderer *ren = SDL_CreateRenderer(win, -1, 0);
-    SDL_RenderSetLogicalSize(ren, 256, 224);
-    SDL_Texture *tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_XRGB8888, SDL_TEXTUREACCESS_STREAMING, 256, 224);
+    SDL_RenderSetLogicalSize(ren, cw, ch);
+    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "linear");
+    SDL_Texture *tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_XRGB8888, SDL_TEXTUREACCESS_STREAMING, cw, ch);
     static const struct { SDL_Scancode k; uint16_t b; } keys[] = {
         {SDL_SCANCODE_UP, PAD_UP}, {SDL_SCANCODE_DOWN, PAD_DOWN}, {SDL_SCANCODE_LEFT, PAD_LEFT},
         {SDL_SCANCODE_RIGHT, PAD_RIGHT}, {SDL_SCANCODE_Z, PAD_B}, {SDL_SCANCODE_X, PAD_A},
@@ -224,10 +365,13 @@ int main(int argc, char **argv)
          * one step: hold the pad for the next few. */
         if (!input) for (uint32_t k = 1; k <= 8 && m.frame + k < cap; k++) pads[m.frame + k] = pad;
         int fast = ks[SDL_SCANCODE_TAB] ? 8 : 1, r = 0;
-        for (int k = 0; k < fast && !r; k++) r = run_frame();
+        for (int k = 0; k < fast && !r; k++) {
+            r = run_frame();
+            if (!r && ovfile) overlay_frame(canvas);
+        }
         if (r > 0) { printf("replay finished at frame %ld\n", f); break; }
         if (r) { fprintf(stderr, "stuck at frame %ld\n", f); return 1; }
-        SDL_UpdateTexture(tex, NULL, ppu.pixels, 256 * 4);
+        SDL_UpdateTexture(tex, NULL, ovfile ? canvas : ppu.pixels, cw * 4);
         SDL_RenderClear(ren);
         SDL_RenderCopy(ren, tex, NULL, NULL);
         SDL_RenderPresent(ren);

@@ -52,12 +52,17 @@ build/port/hybrid: $(HYBRID_SRC) port/hook.h port/snes.h port/cpu.h port/ppu.h
 	$(CC) $(CFLAGS) -o $@ $(HYBRID_SRC)
 
 # Front-end: the hybrid with the PPU drawing (SDL2 window if available).
-PLAY_SRC := port/play.c port/ppu.c port/hook.c port/game.c port/snes.c port/cpu.c
+PLAY_SRC := port/play.c port/overlay.c port/ppu.c port/hook.c port/game.c port/snes.c port/cpu.c
 SDL_CFLAGS := $(shell pkg-config --cflags sdl2 2>/dev/null)
 SDL_LIBS := $(shell pkg-config --libs sdl2 2>/dev/null)
-build/port/play: $(PLAY_SRC) port/hook.h port/snes.h port/cpu.h port/ppu.h
+build/port/play: $(PLAY_SRC) port/hook.h port/snes.h port/cpu.h port/ppu.h port/overlay.h build/port/ovfont.h
 	@mkdir -p build/port
-	$(CC) $(CFLAGS) $(if $(SDL_LIBS),-DHAVE_SDL $(SDL_CFLAGS)) -o $@ $(PLAY_SRC) $(SDL_LIBS)
+	$(CC) $(CFLAGS) -D_DEFAULT_SOURCE -Ibuild/port $(if $(SDL_LIBS),-DHAVE_SDL $(SDL_CFLAGS)) -o $@ $(PLAY_SRC) $(SDL_LIBS) -lm
+
+# The overlays' font (DejaVu Sans Mono, rasterised; needs Pillow).
+build/port/ovfont.h: port/mkfont.py
+	@mkdir -p build/port
+	python3 port/mkfont.py $@
 
 # Same as port/input.txt but places bombs (A) in game, so blasts get exercised.
 HYBRID_INPUT ?= port/input_hybrid.txt
@@ -80,8 +85,8 @@ build/port/botrun: $(BOTRUN_SRC) port/snes.c port/cpu.c port/ppu.c port/snes.h p
 	@mkdir -p build/port
 	$(CC) -O2 -std=gnu99 -DLUA_USE_LINUX -I$(LUA_SRC) -Iport -o $@ $(BOTRUN_SRC) $(LUA_CORE:%=$(LUA_SRC)/%.c) -lm -ldl -lpthread
 
-# botrun with the C++ agent built in (emu.agent): bot/agent.lua drives the
-# game with planner/agent.cpp. C objects via $(CC), linked with $(CXX).
+# botrun with the C++ agent built in: run with no script, its C driver plays
+# the game with planner/agent.cpp (port/botrun.c cd_*). C objects via $(CC), linked with $(CXX).
 AGENT_CXX := $(filter-out planner/test/%,$(wildcard planner/*.cpp))
 AGENT_OBJ := build/port/agentobj
 # The oracle cache's key (SBM2_AGCACHE): whatever decides a run's outcome.

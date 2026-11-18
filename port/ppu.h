@@ -19,6 +19,7 @@ typedef struct Ppu {
     uint8_t ofslatch, hofslatch;
     uint16_t fixed;             /* $2132 fixed colour, BGR555 */
     uint32_t pixels[256 * 224]; /* XRGB8888, line 1 of the frame is row 0 */
+    uint8_t nodraw;             /* skip drawing lines (state is still kept) */
 } Ppu;
 
 struct Snes;

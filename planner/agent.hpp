@@ -131,6 +131,8 @@ class Agent {
   // if P1 lives, else false (the trap waits).
   bool trapMidMove(Oracle& o);
   const std::vector<uint16_t>& pads() const { return pads_; }
+  const std::vector<int16_t>& trace() const { return trace_; }
+  int at() const { return at_; }
 
  private:
   struct Cand {

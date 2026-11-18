@@ -1895,6 +1895,15 @@ const char* sbm2_agent_log(void* a) {
   c->log = c->agent.takeLog();
   return c->log.c_str();
 }
+int sbm2_agent_plan(void* a, const uint16_t** pads, const int16_t** trace, int* at) {
+  const sbm2::Agent& g = static_cast<CAgent*>(a)->agent;
+  int n = int(std::min(g.pads().size(), g.trace().size() / 2));
+  *pads = g.pads().data();
+  *trace = g.trace().data();
+  *at = g.at();
+  return n;
+}
+const char* sbm2_agent_what(void* a) { return static_cast<CAgent*>(a)->agent.what().c_str(); }
 const char* sbm2_capture(const uint8_t* wram, int frame) {
   static std::string text;
   text = sbm2::encodeWorld(sbm2::captureWorld(wram, frame));

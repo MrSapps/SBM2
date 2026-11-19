@@ -214,3 +214,33 @@ TEST("enemies: a $98 can't be hit once it vanishes") {
   w.enemies[0].bc = 0x1C0 - 100;  // (gone before it)
   CHECK(EnemyModel::killOdds(EnemyModel(w, 400).roll(&b, 4, 3, 64)) < 0.05);
 }
+
+// A $91 stops at hp $FF while P1 is within 4 cells in line, walls blocking
+// (docs/enemies.md, C1:BA6B). 5-3: P1 waited 2 cells below one for 9000
+// frames; it never moved and could not be hurt.
+TEST("enemies: what a $91 sees") {
+  World w = mkw({"#########",
+                 "#.......#",
+                 "#.#.#.#.#",
+                 "#.......#",
+                 "#.......#",
+                 "#.......#",
+                 "#########"},
+                "enemy slot=0 type=91 x=56 y=24 vx=0 vy=0 step=- target=3,1 wait=0 hp=255");
+  Enemy e = w.enemies[0];
+  CHECK(EnemyModel::x91Sees(w, e, 3, 3));    // 2 below, (3,2) open
+  CHECK(EnemyModel::x91Sees(w, e, 7, 1));    // 4 right
+  CHECK(!EnemyModel::x91Sees(w, e, 3, 6));   // 5 below: too far (and a wall)
+  CHECK(EnemyModel::x91Sees(w, e, 3, 5));    // 4 below, open: sees
+  CHECK(!EnemyModel::x91Sees(w, e, 4, 3));   // not in line
+  w.enemies[0].type = 0x83;
+  CHECK(!EnemyModel::x91Sees(w, w.enemies[0], 3, 3));  // only a $91
+  // a wall between: (2,1) open, the $91 at (1,3) looking up past (1,2)
+  World v = mkw({"#####",
+                 "#...#",
+                 "##..#",
+                 "#...#",
+                 "#####"},
+                "enemy slot=0 type=91 x=24 y=56 vx=0 vy=0 step=- target=1,3 wait=0 hp=255");
+  CHECK(!EnemyModel::x91Sees(v, v.enemies[0], 1, 1));
+}

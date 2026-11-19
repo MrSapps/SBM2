@@ -69,6 +69,12 @@ class EnemyModel {
   static double nearOdds(const std::vector<EnemyRun>& runs, int c, int r, int t0, int t1);
 
   static bool isChaser(const Enemy& e);
+  // A type that chases P1 now or may start to (on sight: +$D0 bit 7).
+  static bool mayChase(const Enemy& e);
+  // A $91 (x-ray chaser) at a centre with P1 within 4 cells in line (walls
+  // block) stops with hp $FF and attacks (docs/enemies.md, C1:BA6B): from
+  // (c,r) P1 keeps it stopped and unhurtable.
+  static bool x91Sees(const World& w, const Enemy& e, int c, int r);
   static bool modelled(const Enemy& e);
   // Frames a stopped enemy rests before it picks a new way (the generic
   // 32; $A5 turns at once).

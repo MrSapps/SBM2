@@ -121,6 +121,39 @@ static inline void agent_enemy_cells(const uint8_t *w, int16_t *out)
     }
 }
 
+/* P1's cell, packed as agent_enemy_cells packs an enemy's. */
+static inline int16_t agent_p1_cell(const uint8_t *w)
+{
+    int x = (int16_t)(w[0x8010] | w[0x8011] << 8) + (int16_t)(w[0x5F01] | w[0x5F02] << 8);
+    int y = (int16_t)(w[0x8018] | w[0x8019] << 8) + (int16_t)(w[0x5EFB] | w[0x5EFC] << 8);
+    return x >= 0 && y >= 0 && x < 16 * 64 && y < 16 * 64 ? (int16_t)((x >> 4) | (y >> 4) << 8) : -1;
+}
+
+/* The cells of the enemies that hurt on contact: agent_enemy_cells less the
+ * types C5:D850 lists as harmless ($16 $24-$28 $30 $31, type & $7F). */
+static inline void agent_contact_cells(const uint8_t *w, int16_t *out)
+{
+    agent_enemy_cells(w, out);
+    for (int i = 0; i < AG_ESLOTS; i++) {
+        int t = w[0x8400 + 0x100 * i + 0x7E] & 0x7F;
+        if (t == 0x16 || (t >= 0x24 && t <= 0x28) || t == 0x30 || t == 0x31) out[i] = -1;
+    }
+}
+
+/* A pass-through: from one frame to the next, P1 and a harmful enemy swap
+ * cells. The game only kills on the same cell (docs/enemies.md 3), and a
+ * cell flips half-way between centres, so two walking head-on can cross
+ * the line on the same frame and walk through each other (4-2, frame
+ * 119361: P1 down the dead end through a $93). The sims count it as a
+ * death: the agent must not walk through enemies. Returns the slot + 1. */
+static inline int agent_passed_through(int16_t p0, int16_t p1, const int16_t *e0, const int16_t *e1)
+{
+    if (p0 < 0 || p1 < 0 || p0 == p1) return 0;
+    for (int i = 0; i < AG_ESLOTS; i++)
+        if (e0[i] == p1 && e1[i] == p0) return i + 1;
+    return 0;
+}
+
 /* A boss object's world position (+$11/+$14 + origin; a blink's +$100 off). */
 static inline void agent_boss_xy(const uint8_t *w, int base, int16_t *x, int16_t *y)
 {

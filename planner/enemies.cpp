@@ -27,6 +27,22 @@ bool EnemyModel::isChaser(const Enemy& e) {
   }
 }
 
+bool EnemyModel::mayChase(const Enemy& e) {
+  switch (e.type) {
+    case 0x82: case 0x85: case 0x88: case 0x89: case 0x8A: case 0x8C: case 0x91: case 0x93: case 0x97: return true;
+    default: return false;
+  }
+}
+
+bool EnemyModel::x91Sees(const World& w, const Enemy& e, int c, int r) {
+  if ((e.type & 0x7F) != 0x11) return false;
+  int ec = e.col(), er = e.row();
+  if ((c != ec && r != er) || std::abs(c - ec) + std::abs(r - er) > 4) return false;
+  int dc = c > ec ? 1 : c < ec ? -1 : 0, dr = r > er ? 1 : r < er ? -1 : 0;
+  for (int x = ec + dc, y = er + dr; x != c || y != r; x += dc, y += dr)
+    if (!w.inside(x, y) || !walkableClass(w.at(x, y))) return false;
+  return true;
+}
 bool EnemyModel::modelled(const Enemy& e) {
   if (!e.type || (e.type & 0x40) || e.type >= 0xC0 || isThrower(e.type)) return false;
   // ($90/$98 walk as generic ones; +$BE bit 15: a mount, or hidden)

@@ -320,8 +320,15 @@ TEST("goap: a dormant block needs the button first") {
 // +$F3 is set, not or'ed: another bomb kind costs the remote.
 TEST("goap: items: the remote is wanted; with it, other bomb kinds are not") {
   Player p;
-  CHECK(wantedItem(kItemRemote) && wantedItem(kItemFullFire) && !wantedItem(kItemPierce));
-  CHECK(!unwantedItem(kItemPierce, p));
+  CHECK(wantedItem(kItemRemote, p) && wantedItem(kItemFullFire, p) && !wantedItem(kItemPierce, p));
+  // pierce is kept off whatever P1 holds (its blasts go on to the gate:
+  // 3-0, 4-3, 4-4 in the whole game), unless P1 has it already
+  CHECK(unwantedItem(kItemPierce, p) && !unwantedItem(kItemBomb9, p));
+  {
+    Player q;
+    q.pierce = true;
+    CHECK(!unwantedItem(kItemPierce, q));
+  }
   p.remote = true;
   CHECK(unwantedItem(kItemPierce, p) && unwantedItem(kItemBomb9, p) && unwantedItem(kItemBomb10, p));
   CHECK(!unwantedItem(kItemBomb, p) && !unwantedItem(kItemRemote, p));
@@ -896,4 +903,52 @@ TEST("goap: the light switch is flipped while it makes the $8A fast") {
   World none = w;
   none.enemies.clear();
   CHECK_EQ(switchFlip(none), -1);
+}
+
+// A power-up P1 is at the cap of does nothing (C0:98CF bombs stop at 9,
+// C0:992B fire at 10): not wanted. 4-2: back over the platform for a fire
+// up at fire 10.
+TEST("goap: items: a bomb up or fire up at its cap is not wanted") {
+  Player p;
+  p.fire = 9, p.maxbombs = 8;
+  CHECK(wantedItem(kItemFire, p) && wantedItem(kItemFullFire, p) && wantedItem(kItemBomb, p));
+  p.fire = 10, p.maxbombs = 9;
+  CHECK(!wantedItem(kItemFire, p) && !wantedItem(kItemFullFire, p) && !wantedItem(kItemBomb, p));
+  CHECK(wantedItem(kItemHeart, p) && wantedItem(kItemRemote, p));
+  // and the powerups goal is met with only those left
+  World w = mk({"#######",
+                "#.....#",
+                "#######"}, 1, 1, "item 5 1 item kind=2");
+  w.p.fire = 10;
+  CHECK(run(w, "powerups").ok);
+  CHECK(run(w, "powerups").steps.empty());
+}
+
+// A pierce blast goes on through soft blocks: a panel behind two of them is
+// lit from the cell past them (3-0 played on with pierce, fire 10: (15,10)
+// behind the softs (14,10), (13,10); the stand search stopped at (14,10):
+// no plan from the start, 16000 frames to the timer).
+TEST("goap: pierce: a panel behind soft blocks is lit from past them") {
+  World w;
+  std::string err;
+  CHECK(loadWorld(sbm2test::worldsDir + "/3-0_pierce_panels.txt", w, &err));
+  CHECK(w.p.pierce);
+  CHECK(run(w, "exit").ok);
+}
+
+// With pierce and fire 10 every blast that breaks the soft (11,4) under the
+// gate (11,3) goes on to the gate: nothing plans without gate hits, with
+// them (a high cost) it does (4-3 played on: no plan, the timer).
+TEST("goap: pierce: a plan with gate hits when none without") {
+  World w;
+  std::string err;
+  CHECK(loadWorld(sbm2test::worldsDir + "/4-3_pierce_gate.txt", w, &err));
+  Goal g;
+  CHECK(Goal::parse("exit", g, &err));
+  Plan p = plan(w, g);
+  CHECK(!p.ok && !p.gateHits);
+  PlanOptions og;
+  og.gateHits = true;
+  Plan q = plan(w, g, og);
+  CHECK(q.ok && q.gateHits);
 }

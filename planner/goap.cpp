@@ -357,7 +357,10 @@ class Search {
       if (isBombTask(t.kind)) {
         if (t.kind != TaskKind::KillEnemy && t.kind != TaskKind::HurtBoss && !hasCover(n, rt, c, r)) return;  // (enemies move: the agent picks those cells)
         Harm h = harm(n, c, r);
-        if (h.gate) return;
+        if (h.gate) {
+          if (!o_.gateHits) return;
+          x += kBurnCost;
+        }
         x += h.cost;
       }
       if (x < dist) { dist = x; bc = c; br = r; }
@@ -388,6 +391,11 @@ class Search {
         int c = t.c + dd[0] * k, r = t.r + dd[1] * k;
         if (w_.inside(c, r) && breakable(w_.at(c, r)) && !walkable(n, c, r)) {
           consider(c, r);  // the route bombs it first, then P1 stands there
+          // (a pierce blast goes on through soft blocks: cells past them are
+          // spots too. 3-0 with pierce: the panel (15,10) behind the softs
+          // (14,10), (13,10) was lit from (12,10), the search stopped at
+          // (14,10): no plan from the start, 16000 frames to the timer)
+          if (w_.p.pierce) continue;
           break;
         }
         if (!walkable(n, c, r)) break;
@@ -740,7 +748,12 @@ bool blocksExit(const Enemy& e) {
 // A bomb can't be placed on tiles with bit 6 set: panels, crystals, stairs,
 // switches, bombs (docs/mechanics.md, "button places nothing").
 bool breakable(char c) { return c == '%' || c == 'B'; }
-bool wantedItem(int kind) {
+bool wantedItem(int kind, const Player& p) {
+  // (a bomb up stops at +$E1 = 9, a fire up or full fire at +$E2 = 9, fire
+  // 10 here: C0:98CF, C0:992B. 4-2: back over the platform for a fire up
+  // at fire 10, a long trip that did nothing.)
+  if ((kind == kItemFire || kind == kItemFullFire) && p.fire >= 10) return false;
+  if (kind == kItemBomb && p.maxbombs >= 9) return false;
   return kind == kItemBomb || kind == kItemFire || kind == kItemFullFire || kind == kItemHeart || kind == kItemRemote;
 }
 // The glove, in 5-7 ($56) with none yet: 5-8's form 2 is hurt only by
@@ -749,7 +762,12 @@ bool wantedItem(int kind) {
 // only cost time (5-6's at (5,18): a stall, the timer ran out).
 bool gloveWanted(int kind, const World& w) { return kind == kItemGlove && w.stage == 0x56 && !w.p.glove; }
 bool unwantedItem(int kind, const Player& p) {
-  return p.remote && (kind == kItemPierce || kind == kItemBomb9 || kind == kItemBomb10);
+  // Pierce is kept off whatever P1 holds: its blasts go on through soft
+  // blocks and items to the gate (whole game with pierce, fire 10: 3-0 had
+  // no plan, 4-3 lit the gate under its soft and the timer ran out; 4-4
+  // the same). One in the only way is still bombed (agent.cpp).
+  if (kind == kItemPierce) return !p.pierce;
+  return p.remote && (kind == kItemBomb9 || kind == kItemBomb10);
 }
 bool springLanding(const World& w, int c, int r, int dc, int dr, int& lc, int& lr, bool hold) {
   for (int j = hold ? 4 : 3; j <= 9; j++) {
@@ -996,12 +1014,12 @@ std::vector<Task> worldTasks(const World& w) {
   for (size_t i = 0; i < w.items.size(); i++) {
     const Item& it = w.items[i];
     bool speed = it.kind == kItemSpeed && w.p.e0 <= 1 && std::abs(it.c - w.p.col()) + std::abs(it.r - w.p.row()) <= kSpeedNear;
-    out.push_back({TaskKind::PickItem, it.c, it.r, int(i), false, false, wantedItem(it.kind) || gloveWanted(it.kind, w) || speed, false});
+    out.push_back({TaskKind::PickItem, it.c, it.r, int(i), false, false, wantedItem(it.kind, w.p) || gloveWanted(it.kind, w) || speed, false});
   }
   // Wanted items still in their blocks: picked up where the block was (the
   // route bombs it first). Unwanted hidden ones are no task.
   for (const Item& it : w.hidden)
-    if (wantedItem(it.kind) || gloveWanted(it.kind, w)) out.push_back({TaskKind::PickItem, it.c, it.r, -1, false, false, true, true});
+    if (wantedItem(it.kind, w.p) || gloveWanted(it.kind, w)) out.push_back({TaskKind::PickItem, it.c, it.r, -1, false, false, true, true});
   // A boss part that senses flames: hurt it where its sense points are; one
   // hurt only by throws: where it is.
   for (size_t i = 0; i < w.bosses.size(); i++) {
@@ -1218,6 +1236,7 @@ std::vector<int> openWay(const World& w0, const std::vector<std::vector<int>>& g
 
 Plan plan(const World& w, const Goal& g, const PlanOptions& o) {
   Plan p = Search(w, g, o).run();
+  p.gateHits = o.gateHits;
   if (p.ok || !o.openWay || std::find(w.map.begin(), w.map.end(), 'X') == w.map.end()) return p;
   // Nothing plans and there are push blocks: open a way to the tasks P1
   // can't get near even with every soft block gone.

@@ -8,6 +8,7 @@
 #include "agent.hpp"
 #include "blast.hpp"
 #include "capture.hpp"
+#include "enemies.hpp"
 #include "agent_api.h"
 #include "test.hpp"
 
@@ -529,7 +530,13 @@ TEST("agent: holding the remote: walks around a pierce item") {
   o.answer = [](const SimReq&, SimOut& r) { r.dead = -2; };
   Agent a = agentFor("exit");
   a.decide(w, liveOf(w), o);
-  CHECK(a.committed() && through(o.seen.back()));  // no remote: straight on
+  CHECK(a.committed() && !through(o.seen.back()));  // no remote: still around (pierce is kept off)
+  w.p.pierce = true;
+  o.seen.clear();
+  Agent p = agentFor("exit");
+  p.decide(w, liveOf(w), o);
+  CHECK(p.committed() && through(o.seen.back()));  // holding pierce: straight on
+  w.p.pierce = false;
   w.p.remote = true;
   o.seen.clear();
   Agent b = agentFor("exit");
@@ -2025,4 +2032,262 @@ TEST("agent: way to a stand: the one bomb spot lights the gate: bomb anyway") {
   a.decide(w, liveOf(w), o);
   CHECK(a.committed());
   CHECK(a.what().find("clear the way to panel 15,8: bomb at (14,8)") != std::string::npos);
+}
+
+// A $93 and P1 walking head-on swap cells on one frame (4-2, frame 119361):
+// the game sees no shared cell and nobody dies. The sims must count it.
+static void putEnemy(std::vector<uint8_t>& w, int slot, int type, int x, int y) {
+  int b = 0x8400 + 0x100 * slot;
+  w[b + 1] = 0x90; w[b + 5] = 0; w[b + 0x7E] = uint8_t(type);
+  w[b + 0x10] = uint8_t(x); w[b + 0x11] = uint8_t(x >> 8);
+  w[b + 0x18] = uint8_t(y); w[b + 0x19] = uint8_t(y >> 8);
+}
+static void putP1(std::vector<uint8_t>& w, int x, int y) {
+  w[0x8010] = uint8_t(x); w[0x8011] = uint8_t(x >> 8);
+  w[0x8018] = uint8_t(y); w[0x8019] = uint8_t(y >> 8);
+}
+TEST("agent_api: P1 and an enemy swapping cells is a pass-through") {
+  std::vector<uint8_t> a(0x20000), b(0x20000);
+  int16_t pa, pb, ea[AG_ESLOTS], eb[AG_ESLOTS];
+  // P1 at (22,5) going down, the $93 in (22,6) going up; one frame on
+  // both are past the half-way line: P1 in (22,6), the $93 in (22,5)
+  putP1(a, 22 * 16 + 8, 5 * 16 + 15); putEnemy(a, 2, 0x93, 22 * 16 + 8, 6 * 16 + 1);
+  putP1(b, 22 * 16 + 8, 6 * 16 + 0);  putEnemy(b, 2, 0x93, 22 * 16 + 8, 5 * 16 + 15);
+  pa = agent_p1_cell(a.data()); pb = agent_p1_cell(b.data());
+  CHECK_EQ(pa, int16_t(22 | 5 << 8));
+  agent_contact_cells(a.data(), ea); agent_contact_cells(b.data(), eb);
+  CHECK_EQ(agent_passed_through(pa, pb, ea, eb), 3);
+  // a type that never hurts on contact ($24, C5:D850) may be walked through
+  putEnemy(a, 2, 0x24, 22 * 16 + 8, 6 * 16 + 1); putEnemy(b, 2, 0x24, 22 * 16 + 8, 5 * 16 + 15);
+  agent_contact_cells(a.data(), ea); agent_contact_cells(b.data(), eb);
+  CHECK_EQ(agent_passed_through(pa, pb, ea, eb), 0);
+  // following an enemy into the cell it leaves is no pass-through
+  putEnemy(a, 2, 0x93, 22 * 16 + 8, 6 * 16 + 15); putEnemy(b, 2, 0x93, 22 * 16 + 8, 7 * 16 + 0);
+  agent_contact_cells(a.data(), ea); agent_contact_cells(b.data(), eb);
+  CHECK_EQ(agent_passed_through(pa, pb, ea, eb), 0);
+  // standing still: nothing to swap
+  CHECK_EQ(agent_passed_through(pa, pa, ea, ea), 0);
+}
+
+// A chaser near P1: a move must live 180 frames past its end, not 60 (4-2,
+// seed 0: trap covers at dead ends lived 60 frames, then the $93 came up
+// the one way out; every move died). Same world, same move: a $93 (may
+// chase on sight) or a $83 (never chases), walled in at (9,3).
+static int firstFrames(int type) {
+  char e[200];
+  std::snprintf(e, sizeof e, "enemy slot=0 type=%02X x=152 y=56 vx=0 vy=0 step=- target=0,0 wait=0 hp=1 f4=0C00 "
+                "c0=0000 d0=0000 be=0000 bc=0000 ba=0000 off=0 spd=0.5", type);
+  World w = mk({"###########",
+                "#...%.....#",
+                "#.#.#.#.###",
+                "#########.#",
+                "###########"}, 1, 1, e);
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 1; };
+  Agent a = agentFor("blocks");
+  a.decide(w, liveOf(w), o);
+  o.seen.clear();
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 2; };
+  a.decide(w, liveOf(w), o);
+  return o.seen.empty() ? -1 : o.seen[0].frames;
+}
+TEST("agent: a chaser near: moves must live 180 frames past their end") {
+  int walker = firstFrames(0x83), chaser = firstFrames(0x93);
+  CHECK(walker > 0);
+  CHECK_EQ(chaser - walker, 120);
+}
+
+// A walk to an item ends once P1 is on it, not at the commit's budget, when
+// that would stand more than 120 frames (4-2: "item 10,5" over the platform
+// played 988 frames, P1 was on the item at 340 and stood there 650). Short
+// ones stay as they were.
+static int walkLeft(int itemC) {
+  World w = mk({"###############",
+                "#.............#",
+                "###############"}, 1, 1, "item " + std::to_string(itemC) + " 1 item kind=0");
+  FakeOracle o;
+  // (2 px a frame to the item, then stands)
+  o.answer = [itemC](const SimReq&, SimOut& r) {
+    r.dead = -1, r.mapSig = 2;
+    for (size_t f = 0; 2 * f + 1 < r.trace.size(); f++) {
+      int x = std::min(1 * 16 + 8 + 2 * int(f), itemC * 16 + 8);
+      r.trace[2 * f] = int16_t(x), r.trace[2 * f + 1] = 1 * 16 + 8;
+    }
+  };
+  Agent a = agentFor("items");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.committed());
+  CHECK(a.what().find("item " + std::to_string(itemC) + ",1") == 0);
+  return a.pending();
+}
+TEST("agent: a walk to an item ends when P1 is there") {
+  // 12 cells: budget 22 * 11 + 20 = 262, within 4 px of it at frame 86
+  CHECK_EQ(walkLeft(12), 86 + 20);
+  // 5 cells: budget 22 * 4 + 20 = 108, there at 30: 78 frames left, kept
+  CHECK_EQ(walkLeft(5), 108);
+}
+
+// A chaser near: a move that hits an enemy lives if its run lives kTail (60)
+// past its end, not the long tail (5-1, fire 1: in a pocket with a 2 HP
+// $8A, every attack's run died standing still in the 180-frame tail; P1
+// only dodged until it was cornered).
+TEST("agent: a chaser near: a hit needs only the short tail") {
+  World w = mk({"###########",
+                "#.........#",
+                "#.#.#.#.#.#",
+                "#.........#",
+                "###########"}, 1, 1,
+               "enemy slot=0 type=93 x=120 y=24 vx=0 vy=0 step=- target=0,0 wait=0 hp=2 f4=0C00 "
+               "c0=0000 d0=0000 be=0000 bc=0000 ba=0000 off=0 spd=0.5");
+  FakeOracle o;
+  // (every run: the enemy hit, P1 where the move ends, dead 100 frames
+  // after the move's end: inside the 180-frame tail, past the 60)
+  o.answer = [](const SimReq& q, SimOut& r) {
+    r.hp = 0, r.enemies = 1, r.mapSig = 1;
+    r.dead = std::max(1, q.frames - 180 + 100);
+    for (size_t f = 0; 2 * f + 1 < r.trace.size(); f++) r.trace[2 * f] = int16_t(r.px), r.trace[2 * f + 1] = int16_t(r.py);
+  };
+  Agent a = agentFor("enemies");
+  a.decide(w, liveOf(w), o);
+  CHECK(!o.seen.empty() && o.seen[0].frames > 180);
+  CHECK(a.committed());
+  CHECK(a.what().find("survive") == std::string::npos && a.what().find("kill") != std::string::npos);
+}
+
+// Cracked floor ('C') the way to the bomb crosses is a hole once P1 is off
+// it: no cover back over it (5-3: the way to (8,5) crossed (9,7), every
+// cover was back over it; each died by P1's own bomb, 7000 frames).
+static bool crosses(const std::vector<int16_t>& wp, int c, int r) {
+  for (size_t i = 2; i + 1 < wp.size(); i += 2) {
+    int x0 = (wp[i - 2] & ~kWpFlags) / 16, y0 = wp[i - 1] / 16, x1 = (wp[i] & ~kWpFlags) / 16, y1 = wp[i + 1] / 16;
+    if (std::min(x0, x1) <= c && c <= std::max(x0, x1) && std::min(y0, y1) <= r && r <= std::max(y0, y1)) return true;
+  }
+  return false;
+}
+TEST("agent: no cover back over cracked floor the way crossed") {
+  World w = mk({"#######",
+                "#..C..#",
+                "#%.####",
+                "#######"}, 5, 1);
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = 5; };  // (every option dies: all are tried)
+  Agent a = agentFor("blocks");
+  a.decide(w, liveOf(w), o);
+  int bombAt1 = 0, over = 0;
+  for (const SimReq& q : o.seen) {
+    if (q.post.empty() || q.path.size() < 2) continue;
+    if ((q.path[q.path.size() - 2] & ~kWpFlags) / 16 != 1 || q.path.back() / 16 != 1) continue;
+    bombAt1++;
+    over += crosses(q.path2, 3, 1);
+  }
+  CHECK(bombAt1 > 0);  // (the cover in (2,2) is still tried)
+  CHECK_EQ(over, 0);
+}
+
+// Closing in on a $91: not to a cell it sees (5-3: P1 two cells below one
+// for 9000 frames; it stood at hp $FF the whole time, then got P1).
+TEST("agent: closing in on a $91: out of its sight") {
+  World w = mk({"#########",
+                "#.......#",
+                "#.#####.#",
+                "#.......#",
+                "#########"}, 1, 1,
+               "enemy slot=0 type=91 x=120 y=24 vx=0 vy=0 step=- target=7,1 wait=0 hp=255 f4=0C00 "
+               "c0=0000 d0=0000 be=0000 bc=0000 ba=0000 off=0 spd=0.5");
+  FakeOracle o;
+  o.answer = [](const SimReq& q, SimOut& r) { r.dead = q.post.empty() ? -1 : 5; };  // (no bomb gets it)
+  Agent a = agentFor("enemies");
+  a.decide(w, liveOf(w), o);
+  std::string what = a.what();
+  size_t at = what.find("(closing in): walk to (");
+  CHECK(at != std::string::npos);
+  int c = -1, r = -1;
+  if (at != std::string::npos) std::sscanf(what.c_str() + at, "(closing in): walk to (%d,%d)", &c, &r);
+  CHECK(c >= 0 && !EnemyModel::x91Sees(w, w.enemies[0], c, r));
+}
+
+// Survive: among cells that live, last the ones a $91 sees (5-3: each
+// survive went back into its line; it stayed stopped at hp $FF).
+TEST("agent: survive: out of a $91's sight first") {
+  World w = mk({"#########",
+                "#.......#",
+                "#.#####.#",
+                "#.......#",
+                "#########"}, 4, 1,
+               "enemy slot=0 type=91 x=120 y=24 vx=0 vy=0 step=- target=7,1 wait=0 hp=255 f4=0C00 "
+               "c0=0000 d0=0000 be=0000 bc=0000 ba=0000 off=0 spd=0.5");
+  FakeOracle o;
+  // (only survive's runs live: 22 a cell + 140, + 120 with the long tail)
+  o.answer = [](const SimReq& q, SimOut& r) {
+    auto surv = [&](int x) { return x >= 0 && x % 22 == 0; };
+    r.dead = q.post.empty() && (surv(q.frames - 140) || surv(q.frames - 260)) ? -1 : 5;
+  };
+  Agent a = agentFor("enemies");
+  a.decide(w, liveOf(w), o);
+  std::string log = a.takeLog();
+  size_t at = log.find("): toward (");
+  CHECK(at != std::string::npos);
+  int c = -1, r = -1;
+  if (at != std::string::npos) std::sscanf(log.c_str() + at, "): toward (%d,%d)", &c, &r);
+  CHECK(c >= 0 && !EnemyModel::x91Sees(w, w.enemies[0], c, r));
+}
+
+// With softpass P1 walks through soft blocks (goap.cpp's walkable): the
+// agent's routes too (5-4: the way up column 28 was the soft (28,9); the
+// plan went through it, the agent's routes never did: 20000 frames closing
+// in, time up).
+TEST("agent: softpass: walks through a soft block to an item") {
+  World w = mk({"#######",
+                "#..%..#",
+                "#######"}, 1, 1, "item 5 1 item kind=0");
+  w.p.softpass = 1;
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 2; };
+  Agent a = agentFor("powerups");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.committed());
+  CHECK(a.what().find("item 5,1: walk to (5,1)") == 0);
+}
+
+// A hit that lives only the short tail is a last resort: an option that
+// lives the long tail goes first, even after it (whole game, 4-6: a trap
+// that hit one lived 90 past its end, then every way died: a heart).
+TEST("agent: a chaser near: a hit with the short tail only if nothing lives") {
+  World w = mk({"###########",
+                "#.........#",
+                "#.#.#.#.#.#",
+                "#.........#",
+                "###########"}, 1, 1,
+               "enemy slot=0 type=93 x=120 y=24 vx=0 vy=0 step=- target=0,0 wait=0 hp=2 f4=0C00 "
+               "c0=0000 d0=0000 be=0000 bc=0000 ba=0000 off=0 spd=0.5");
+  FakeOracle o;
+  // (the first bomb run: a hit, dead 100 past the end; the rest: a hit,
+  // lives)
+  int bombRuns = 0;
+  o.answer = [&bombRuns](const SimReq& q, SimOut& r) {
+    r.hp = 0, r.enemies = 1, r.mapSig = 1;
+    bool first = !q.post.empty() && bombRuns++ == 0;
+    r.dead = first ? std::max(1, q.frames - 180 + 100) : -1;
+    for (size_t f = 0; 2 * f + 1 < r.trace.size(); f++) r.trace[2 * f] = int16_t(r.px), r.trace[2 * f + 1] = int16_t(r.py);
+  };
+  Agent a = agentFor("enemies");
+  a.decide(w, liveOf(w), o);
+  std::string log = a.takeLog();
+  CHECK(a.committed());
+  CHECK(log.find("option 1,") == std::string::npos);
+  CHECK(log.find("taken") == std::string::npos);
+}
+
+// Nothing plans unless blasts may reach the gate: the agent plans with gate
+// hits and moves, not "no plan" (4-3 played on with pierce: 15000 frames of
+// survive, the timer).
+TEST("agent: no plan without gate hits: plans with them") {
+  World w;
+  std::string err;
+  CHECK(loadWorld(sbm2test::worldsDir + "/4-3_pierce_gate.txt", w, &err));
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 2; r.hp = 0; r.enemies = 0; };
+  Agent a = agentFor("powerups+exit");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.takeLog().find("no plan") == std::string::npos);
 }

@@ -35,7 +35,7 @@ struct Task {
   bool hidden = false;         // PickItem: still inside the soft block at (c,r)
 };
 // Items worth a detour: bomb up, fire up, full fire, heart, remote.
-bool wantedItem(int kind);
+bool wantedItem(int kind, const Player& p);  // (not one P1 is at the cap of)
 // The glove: in 5-7 with none yet (5-8's form 2 needs throws).
 bool gloveWanted(int kind, const World& w);
 // Items to keep off: another bomb kind would replace the remote (+$F3 is
@@ -79,6 +79,7 @@ struct Plan {
   std::string why;        // when !ok: what blocks the goal
   std::vector<Task> tasks;
   std::vector<Step> steps;
+  bool gateHits = false;  // made with PlanOptions::gateHits (the agent then lets its bombs reach the gate)
   std::vector<uint8_t> done;  // per task, after the last step
   int cost = 0;
   int expanded = 0;
@@ -88,6 +89,12 @@ struct Plan {
 struct PlanOptions {
   int maxNodes = 3000;  // then a greedy finish
   bool openWay = true;  // no plan: the first move of openWay() (below)
+  // Blasts that reach the gate (they bring enemies back) are allowed, at a
+  // high cost. The agent's last resort when nothing plans without (4-3 with
+  // pierce, fire 10: the soft (11,4) under the gate (11,3) breaks only from
+  // column 11, and every such blast goes on to the gate: no plan, the
+  // timer).
+  bool gateHits = false;
 };
 
 // Rules shared with the lower layers.

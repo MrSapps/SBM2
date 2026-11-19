@@ -418,7 +418,7 @@ typedef struct SimJob {
     /* the result cache (sim_cache_*): resume from a cached end state */
     int resume, done;
     uint32_t f0;
-    uint8_t h0;
+    uint8_t h0, st0;  /* hearts and stage ($1A) at the run's start */
     uint64_t hash[SIM_HASH_D + 1];   /* state hash at offsets 1..SIM_HASH_D (0: unknown) */
     int16_t *trace;   /* the agent's runs: P1 world x, y where the live
                        * frame callback would run, per frame offset */
@@ -427,6 +427,7 @@ typedef struct SimJob {
     int16_t *btrace;  /* 2 * nboss per frame offset: boss x, y (agent_boss_xy) */
     uint16_t bossBase[32];
     int nboss;
+    int16_t pcell, ecell[AG_ESLOTS];  /* last frame's cells (agent_passed_through) */
 } SimJob;
 
 /* The path controller: port/path_pad.h (unit tested from planner/test). */
@@ -535,6 +536,7 @@ static void *sim_run(void *arg)
     Snes *s = &j->s;
     uint32_t f0 = j->resume ? j->f0 : s->frame;
     uint8_t h0 = j->resume ? j->h0 : s->wram[0x80EF];
+    uint8_t st0 = j->resume ? j->st0 : s->wram[0x1A];
     j->dead = -1;
     long guard = 0;
     int at = 0;
@@ -555,6 +557,8 @@ static void *sim_run(void *arg)
      * past the horizon to tell. On the exit cell ($80A8 == $5D72) it is
      * the warp out: -2. */
     uint32_t lockAt = 0;
+    j->pcell = agent_p1_cell(s->wram);
+    agent_contact_cells(s->wram, j->ecell);
     int hpend = 0;   /* a frame offset whose hash is due (at the live callback's point) */
     int tpend = 0;   /* ... whose trace entry is due */
     if (j->trace && j->tcap > 0) {
@@ -593,6 +597,18 @@ static void *sim_run(void *arg)
             /* (world 2 soft blocks grow back within a run: a change seen on
              * the way counts, not just the end state) */
             if (!j->mapChanged && (i & 3) == 0 && agent_map_sig(s->wram) != j->map0) j->mapChanged = 1;
+            /* the next stage: left by the exit. Riding a mount the exit
+             * never locks P1 $0801 (PlayerOnExitTile C1:41A8 skips it with
+             * +$60 bit 15), and the next stage's intro then held $0801 90
+             * frames: a "death" (3-3: every walk to the open gate died so,
+             * 12000 frames of survive, the timer) */
+            if (s->wram[0x1A] != st0) { j->dead = -2; break; }
+            /* walking through an enemy is no way to survive */
+            int16_t pc = agent_p1_cell(s->wram), ec[AG_ESLOTS];
+            agent_contact_cells(s->wram, ec);
+            if (agent_passed_through(j->pcell, pc, j->ecell, ec)) { j->dead = (int)(s->frame - f0); break; }
+            j->pcell = pc;
+            memcpy(j->ecell, ec, sizeof ec);
             uint16_t lock = s->wram[0x8052] | s->wram[0x8053] << 8;
             if (sim_heart_death && s->wram[0x80EF] < h0) {
                 uint16_t at8 = s->wram[0x80A8] | s->wram[0x80A9] << 8;
@@ -611,6 +627,7 @@ static void *sim_run(void *arg)
         }
     }
     j->h0 = h0;
+    j->st0 = st0;
     return NULL;
 }
 
@@ -1451,6 +1468,31 @@ static void cd_frame(void)
         }
     } else
         cd.deadAt = -1;
+    /* Walking through an enemy (agent_passed_through) counts as a death:
+     * the game lets it go, the sims don't. */
+    {
+        static int16_t pcell = -1, ecell[AG_ESLOTS];
+        int16_t pc1 = agent_p1_cell(m.wram), ec[AG_ESLOTS];
+        agent_contact_cells(m.wram, ec);
+        int k = pcell >= 0 ? agent_passed_through(pcell, pc1, ecell, ec) : 0;
+        pcell = pc1;
+        memcpy(ecell, ec, sizeof ec);
+        if (k) {
+            cd.deaths++;
+            cd_logf("%6d DEATH walked through enemy $%04X (type %02X) at px(%d,%d)", cd.frame, 0x8400 + 0x100 * (k - 1),
+                    m.wram[0x8400 + 0x100 * (k - 1) + 0x7E], cd_r16(0x8010), cd_r16(0x8018));
+            if (cd.stopearly) { cd_finish(1, "death"); return; }
+        }
+    }
+    /* A hit a heart took: +$EF down by one and P1 flashing (+4 bit 5) on
+     * the same frame (+$EF also reads 0 for a moment at a stage start: 1 ->
+     * 0 there is none). No death, but the sims count it as one: logged. */
+    {
+        static int hearts = -1;
+        int h = m.wram[0x80EF];
+        if (hearts >= 0 && h == hearts - 1 && (m.wram[0x8004] & 0x20)) cd_logf("%6d HIT heart used (hearts %02X -> %02X)", cd.frame, hearts, h);
+        hearts = h;
+    }
     /* Any life lost is a death, whatever took it: the time up ($5C56 = 0 at
      * 0:00 restarts the stage) leaves P1 unlocked, so only the lives
      * count ($1C6C) shows it. (A death above lowers it later, after its
@@ -1713,22 +1755,34 @@ static int replay_words(uint16_t *log, uint32_t n, const char *what)
 /* SBM2_WRAMAT=<frame>:<file>: write WRAM to file at that video frame's
  * first wait loop (the game idle, waiting for the NMI): the same point in
  * any run of the same machine, to check a replay or a scenario's prefix
- * against the run it came from. */
+ * against the run it came from. <first>-<last>:<file> writes every frame
+ * of the range, to <file>.<frame>. */
 static void wram_at(void)
 {
-    static long at = -2;
+    static long at = -2, last, done = -1;
     static const char *path;
     if (at == -2) {
         const char *e = getenv("SBM2_WRAMAT");
         at = -1;
-        if (e && *e && strchr(e, ':')) { at = atol(e); path = strchr(e, ':') + 1; }
+        if (e && *e && strchr(e, ':')) {
+            char *end;
+            at = strtol(e, &end, 10);
+            last = *end == '-' ? strtol(end + 1, NULL, 10) : -1;
+            path = strchr(e, ':') + 1;
+        }
     }
-    if (at < 0 || m.frame != (uint32_t)at) return;
+    if (at < 0) return;
+    long f = (long)m.frame;
+    if (last < 0 ? f != at : f < at || f > last || f == done) return;
     uint32_t pc = (uint32_t)m.cpu.pb << 16 | m.cpu.pc;
     if (!m.wait_at[pc & 0xFFFF] || snes_wait_point(&m, pc) != WAIT_CMP) return;
-    FILE *f = fopen(path, "wb");
-    if (f) { fwrite(m.wram, 1, 0x20000, f); fclose(f); }
-    at = -1;
+    char name[1024];
+    if (last < 0) snprintf(name, sizeof name, "%s", path);
+    else snprintf(name, sizeof name, "%s.%ld", path, f);
+    FILE *fp = fopen(name, "wb");
+    if (fp) { fwrite(m.wram, 1, 0x20000, fp); fclose(fp); }
+    done = f;
+    if (last < 0 || f == last) at = -1;
 }
 
 /* Replays a pad log recorded in timed mode (a cut of a botrun/agentrun

@@ -334,6 +334,14 @@ TEST("goap: items: the remote is wanted; with it, other bomb kinds are not") {
   CHECK(!unwantedItem(kItemBomb, p) && !unwantedItem(kItemRemote, p));
 }
 
+// Soft pass (kind 12, +$FB) is wanted until held (3-6's was left lying).
+TEST("goap: items: kick and glove wanted until held; soft pass not fetched") {
+  Player p;
+  CHECK(!wantedItem(kItemSoftPass, p) && wantedItem(kItemKick, p) && wantedItem(kItemGlove, p));
+  p.softpass = 1, p.kick = 1, p.glove = 1;
+  CHECK(!wantedItem(kItemSoftPass, p) && !wantedItem(kItemKick, p) && !wantedItem(kItemGlove, p));
+}
+
 // A blast pushes the block its own way only: a block between two holes
 // fills one of them, so of the panels behind them one stays out of reach.
 TEST("goap: a block pushed one way can't fill the other hole") {
@@ -859,7 +867,9 @@ TEST("goap: parity spots light exactly the panels left") {
 
 // The glove is a power-up to fetch in 5-7 (5-8's form 2 is hurt only by
 // thrown bombs; 5-7 hides one at (13,10)), and only there.
-TEST("goap: a hidden glove is fetched before the exit in 5-7 only") {
+// (Since throwing: a glove is wanted on every stage. 5-6 once stalled on
+// a detour for one; a power-up that fails 3 times is now left, agent.cpp.)
+TEST("goap: a hidden glove is fetched before the exit, unless held") {
   World w = mk({"#######",
                 "#..%..#",
                 "#.#.#.#",
@@ -872,9 +882,9 @@ TEST("goap: a hidden glove is fetched before the exit in 5-7 only") {
   World h = w;  // (one held already)
   h.p.glove = 1;
   CHECK(tasksOf(run(h, "powerups+exit")).find("item 3,1") == std::string::npos);
-  World o = w;  // (another stage: 5-6 stalled on a detour for one)
+  World o = w;  // (another stage too: thrown bombs)
   o.stage = 0x55;
-  CHECK(tasksOf(run(o, "powerups+exit")).find("item 3,1") == std::string::npos);
+  CHECK(tasksOf(run(o, "powerups+exit")).find("item 3,1") != std::string::npos);
 }
 
 
@@ -952,3 +962,56 @@ TEST("goap: pierce: a plan with gate hits when none without") {
   Plan q = plan(w, g, og);
   CHECK(q.ok && q.gateHits);
 }
+
+// The glove: a soft block on an island past a hole is bombed by a throw
+// from 3 cells back (user: "throw bombs over holes to the 2nd island").
+// No glove: no way there.
+TEST("goap: throw: a block on an island, thrown to over the hole") {
+  World w = mk({"##########",
+                "#...OO.%.#",
+                "##########"}, 3, 1);
+  w.p.fire = 1;
+  CHECK(!run(w, "blocks").ok);
+  w.p.glove = 1;
+  Plan p = run(w, "blocks");
+  CHECK(p.ok);
+  CHECK(p.str().find("soft 7,1 from 3,1 thrown r to 6,1") != std::string::npos);
+  // From (1,1) a throw left wraps round to (8,1), the island's far side.
+  World v = w;
+  v.p.x = 1 * 16 + 8;
+  v.map[size_t(1 * v.cols + 3)] = '#';
+  Plan q = run(v, "blocks");
+  CHECK(q.str().find("soft 7,1 from 1,1 thrown l to 8,1") != std::string::npos);
+}
+
+// A throw off the map's edge comes back in on the far side.
+TEST("goap: throw landing wraps at the map's edges") {
+  int c, r;
+  throwLand(10, 6, 1, 2, 2, c, r);  // left 3 from column 1
+  CHECK(c == 8 && r == 2);
+  throwLand(10, 6, 4, 1, 0, c, r);  // up 5 from row 1: off the top, no wrap (5-4: planned up through the HUD)
+  CHECK(c == 4 && r == -4);
+  throwFrom(10, 6, 8, 2, 2, c, r);
+  CHECK(c == 1 && r == 2);
+}
+
+// A throw that comes down on a wall bounces on to the next free cell
+// (user: "empty, solid, empty ... the 2nd will bounce over it"): from
+// (1,1) right it lands on (4,1), a wall, and bounces to (5,1).
+TEST("goap: throw: bounces off a wall onto the cell past it") {
+  World w = mk({"#########",
+                "#.###.%##",
+                "#########"}, 1, 1);
+  w.p.fire = 1;
+  w.p.glove = 1;
+  Plan p = run(w, "blocks");
+  CHECK(p.ok);
+  CHECK(p.str().find("soft 6,1 from 1,1 thrown r to 5,1") != std::string::npos);
+  int n = 0;
+  throwSources(9, 3, 5, 1, 3, [&](int c, int r) { return w.at(c, r) == '.'; }, [&](int xc, int xr, int hops) {
+    if (hops == 1) CHECK(xc == 1 && xr == 1);
+    n++;
+  });
+  CHECK(n >= 2);
+}
+

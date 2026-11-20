@@ -13,7 +13,7 @@ struct Player {
   char dir = '-';    // u d l r -
   int hearts = 0, flash = 0, bombs = 0, maxbombs = 0, e0 = 0, fire = 1;  // bombs: left to place ($F1); maxbombs: $E1
   bool pierce = false, remote = false, ride = false;
-  int glove = 0, softpass = 0;
+  int glove = 0, softpass = 0, kick = 0;  // (kick: +$FA, walking into a bomb slides it)
   uint16_t lock = 0, f4 = 0, f60 = 0;
   int col() const { return x / 16; }
   int row() const { return y / 16; }
@@ -51,7 +51,8 @@ struct Item { int c = 0, r = 0; bool heart = false; int kind = -1; };
 // to 9, 4 +$E0 speed (cap 5), 1/5/9/10 set +$F3 = 4/1/2/8)
 enum : int {
   kItemBomb = 0, kItemPierce = 1, kItemFire = 2, kItemFullFire = 3, kItemSpeed = 4, kItemRemote = 5,
-  kItemGlove = 7, kItemBomb9 = 9, kItemBomb10 = 10, kItemHeart = 11
+  kItemGlove = 7, kItemBomb9 = 9, kItemBomb10 = 10, kItemHeart = 11,
+  kItemSoftPass = 12, kItemKick = 13  // (+$FB, +$FA: docs/mechanics.md, Items)
 };
 struct Magnet { int c = 0, r = 0; char dir = 'u'; };
 

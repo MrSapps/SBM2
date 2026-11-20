@@ -105,7 +105,7 @@ bool parseWorld(const std::string& text, World& w, std::string* err) {
       p.hearts = dec(f, "hearts"); p.flash = dec(f, "flash"); p.bombs = dec(f, "bombs"); p.maxbombs = dec(f, "maxbombs");
       p.e0 = dec(f, "e0"); p.fire = dec(f, "fire", 1);
       p.pierce = dec(f, "pierce"); p.remote = dec(f, "remote"); p.ride = dec(f, "ride");
-      p.glove = dec(f, "glove"); p.softpass = dec(f, "softpass");
+      p.glove = dec(f, "glove"); p.softpass = dec(f, "softpass"); p.kick = dec(f, "kick");
       p.lock = uint16_t(hex(f, "lock")); p.f4 = uint16_t(hex(f, "f4")); p.f60 = uint16_t(hex(f, "f60"));
     } else if (k == "bomb") {
       Bomb b;

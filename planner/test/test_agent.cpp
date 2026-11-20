@@ -73,6 +73,29 @@ void bombAndCover(const SimReq& r, int& bc, int& br, int& yc, int& yr) {
 
 }  // namespace
 
+// An idle mount on the only way to the gate: walking through boards it,
+// and its rider, woken, blocks the exit (3-1: the $98 on (14,4), 12000
+// frames by the open gate). Ride in and bomb P1 off it on the cell before
+// the gate, then step in.
+TEST("agent: an idle mount in the way to the gate: ride in, bomb off it, step in") {
+  World w = mk({"#######",
+                "#...#g#",
+                "#.....#",
+                "#######"}, 1, 2,
+               "gate 5 1 open\nenemy slot=8 type=98 x=" + std::to_string(4 * 16 + 8) + " y=" + std::to_string(2 * 16 + 8) + " be=8001 hp=1");
+  w.p.bombs = 1;
+  FakeOracle o;
+  // (only a move with a bomb leaves by the gate)
+  o.answer = [](const SimReq& q, SimOut& r) { r.dead = q.post.empty() ? -1 : -2; };
+  Agent a = agentFor("exit");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.committed());
+  CHECK(a.what().find("ride the mount in, bomb off it at (5,2)") != std::string::npos);
+  const SimReq& r = o.seen.back();
+  CHECK(!r.post.empty() && r.post[0] == kPadA);
+  CHECK_EQ(r.path2.size(), size_t(4));
+}
+
 TEST("agent: open gate: walk in, and only leaving by it counts") {
   World w = mk({"#######",
                 "#.....#",
@@ -478,6 +501,198 @@ TEST("agent: a bomb out, one to spare: the next block, played to cover only; non
   c.decide(w, liveOf(w), o);
   CHECK_EQ(c.what(), std::string("survive"));
   for (const SimReq& r : o.seen) CHECK(r.post.empty());
+}
+
+// The remote and a bomb to spare: a block move is played up to cover only
+// and leaves its bomb out (no B): the next decision lays the next one and
+// sets both off together (user: "place a bomb, hide and remote blow it,
+// when we could have planned bombs for all the other panels"). The run
+// itself still sets it off. No bomb to spare: B is played as before.
+TEST("agent: remote with a bomb to spare: played to cover, no B; one bomb: B played") {
+  World w = mk({"###########",
+                "#........%#",
+                "#.#.#.#.#.#",
+                "#...%.....#",
+                "###########"}, 1, 1);
+  w.p.remote = 1;
+  w.p.bombs = 2;
+  FakeOracle o;
+  o.answer = [](const SimReq& q, SimOut& r) {
+    r.dead = -1;
+    r.mapSig = 2;
+    if (q.detEnd) r.pads[size_t(q.frames - 60 - 30 - kFlameFrames)] |= kPadB;  // (the run's own B, after the walk)
+  };
+  auto hasB = [](const Agent& a) {
+    for (size_t f = 0; f < a.pads().size(); f++)
+      if ((a.pads()[f] & kPadB) && int(f) >= int(a.pads().size()) - a.pending()) return true;
+    return false;
+  };
+  Agent a = agentFor("blocks");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.committed());
+  CHECK(a.what().find("soft ") == 0);
+  CHECK(o.seen.back().detEnd == 1);  // (the run sets it off)
+  CHECK(!hasB(a));
+  w.p.bombs = 1;
+  Agent b = agentFor("blocks");
+  b.decide(w, liveOf(w), o);
+  CHECK(b.what().find("soft ") == 0);
+  CHECK(hasB(b));
+  // One left out already: this one sets both off (3-5: four laid in a row
+  // went off one by one as stale traps).
+  {
+    World v = w;
+    v.p.bombs = 2;
+    std::string err;
+    World x;
+    CHECK(parseWorld(encodeWorld(v) + "", x));
+    Bomb m;
+    m.c = 9, m.r = 1, m.range = 2, m.remote = true;
+    x.bombs.push_back(m);
+    x.p.bombs = 2;
+    Agent c = agentFor("blocks");
+    c.decide(x, liveOf(x), o);
+    CHECK(c.what().find("soft ") == 0);
+    CHECK(hasB(c));
+  }
+  // Nothing else to bomb now: no bomb left out to wait on (whole game:
+  // each hold was set off late as a stale trap).
+  {
+    World v = w;
+    v.map[size_t(1 * v.cols + 9)] = '.';
+    v.p.bombs = 2;
+    Agent e = agentFor("blocks");
+    e.decide(v, liveOf(v), o);
+    CHECK(e.what().find("soft ") == 0);
+    CHECK(hasB(e));
+  }
+  // Its blast reaches a mode 1 panel: no bomb left out over it.
+  {
+    World v = mk({"###########",
+                  "#.....P..%#",
+                  "#.#.#.#.#.#",
+                  "#...%.....#",
+                  "###########"}, 1, 1, "panel 6 1 todo mode=1");
+    v.p.remote = 1;
+    v.p.bombs = 2;
+    Agent d = agentFor("blocks");
+    d.decide(v, liveOf(v), o);
+    CHECK(d.what().find("soft ") == 0);
+    CHECK(hasB(d));
+  }
+}
+
+// Kick: a soft block at the far end of a corridor. The bomb is laid by P1
+// and kicked; it slides to (9,1), stopped by the block (user: "slide bombs
+// down any path"). Without the kick P1 walks there.
+TEST("agent: kick: lay the bomb near, kick it down the corridor to the block") {
+  World w = mk({"############",
+                "#.........%#",
+                "############"}, 1, 1);
+  w.p.fire = 1;
+  w.p.bombs = 2;  // (a bomb to spare: still played through the blast)
+  w.p.kick = 1;
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 2; r.blasts = {int16_t(9 | 1 << 8)}; };
+  Agent a = agentFor("blocks");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.committed());
+  CHECK(a.what().find("bomb at (2,1), kicked to (9,1)") != std::string::npos);
+  const SimReq& r = o.seen.back();
+  CHECK_EQ(r.path.size(), size_t(4));  // (P1's cell, then (2,1))
+  CHECK(r.path2.size() >= 6 && r.path2[2] == 1 * 16 + 8 && r.path2[4] == 2 * 16 + 8);  // (back to (1,1), into the bomb)
+  CHECK(a.pending() >= r.frames - 60 - 10);  // (the whole run bar its tail, not just to cover: mid-slide the bomb reads as still where it was laid)
+  w.p.kick = 0;
+  Agent b = agentFor("blocks");
+  b.decide(w, liveOf(w), o);
+  CHECK(b.what().find("kicked") == std::string::npos);
+  CHECK(b.what().find("bomb at (9,1)") != std::string::npos);
+}
+
+// Glove: the block is on an island past a hole; the plan throws to it
+// and the move is a lift and a throw from (3,1), landing on (6,1).
+TEST("agent: throw: a block on an island, thrown to") {
+  World w = mk({"##########",
+                "#...OO.%.#",
+                "##########"}, 3, 1);
+  w.p.fire = 1;
+  w.p.bombs = 1;
+  w.p.glove = 1;
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 2; r.blasts = {int16_t(6 | 1 << 8)}; };
+  Agent a = agentFor("blocks");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.committed());
+  CHECK(a.what().find("bomb at (3,1), thrown right to (6,1)") != std::string::npos);
+  const SimReq& r = o.seen.back();
+  CHECK(r.post.size() > 20 && r.post[0] == kPadA);
+  bool faced = false;  // (A held for the lift, then A + right to face the way: the release throws)
+  for (uint16_t q : r.post) faced |= (q & kPadA) && (q & kPadRight);
+  CHECK(faced);
+  // The run shows it went off a cell short, on (5,1) (the landing guess
+  // wrong): the map changed, but not as planned (a mode 1 panel toggled so
+  // stays undone): no move.
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 2; r.blasts = {int16_t(5 | 1 << 8)}; };
+  Agent b = agentFor("blocks");
+  b.decide(w, liveOf(w), o);
+  CHECK(b.what().find("thrown") == std::string::npos);
+}
+
+// The remote: a cover in a dead end behind the bomb's cell, in its blast,
+// seals P1 in (no way out but over the bomb, and B would hit it). 2-7,
+// whole game: "trap for kill 8,10: bomb at (10,4), cover (10,3)", then
+// 600000 frames of survive in (10,3). No move ends there over (10,4).
+TEST("agent: remote: no cover sealed in behind the bomb") {
+  World w;
+  std::string err;
+  CHECK(loadWorld(sbm2test::worldsDir + "/2-7_sealed_trap.txt", w, &err));
+  FakeOracle o;
+  // (only moves that lay the bomb on (10,4) live: as in the run, where the
+  // others were turned down first)
+  o.answer = [](const SimReq& q, SimOut& r) {
+    bool at104 = q.path.size() >= 2 && q.path[q.path.size() - 2] == 10 * 16 + 8 && q.path.back() == 4 * 16 + 8;
+    r.dead = at104 ? -1 : 3;
+    r.mapSig = 2;
+    r.enemies = 1;
+  };
+  Agent a = agentFor("exit");
+  a.decide(w, liveOf(w), o);
+  CHECK(!o.seen.empty());
+  for (const SimReq& q : o.seen) {
+    bool at104 = q.path.size() >= 2 && q.path[q.path.size() - 2] == 10 * 16 + 8 && q.path.back() == 4 * 16 + 8;
+    bool to103 = q.path2.size() >= 2 && q.path2[q.path2.size() - 2] == 10 * 16 + 8 && q.path2.back() == 3 * 16 + 8;
+    CHECK(!(at104 && to103));
+  }
+}
+
+// A planned throw whose moves all fail (the landing model is a guess: 5-4
+// planned one up through the HUD) is not planned again for a while.
+TEST("agent: throw: a planned throw that fails is left for a while") {
+  // (the plan: from (1,1) thrown left, round the edge to (13,1))
+  World w = mk({"################",
+                "#.............%#",
+                "################"}, 1, 1);
+  w.p.fire = 1;
+  w.p.bombs = 1;
+  w.p.glove = 1;
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = 5; };
+  auto throws = [&] {
+    int n = 0;
+    for (const SimReq& q : o.seen) n += q.post.size() > 20;
+    return n;
+  };
+  Agent a = agentFor("blocks");
+  a.decide(w, liveOf(w), o);
+  CHECK(throws() > 0);
+  a.verbose = true;
+  a.takeLog();
+  w.frame += 60;
+  a.decide(w, liveOf(w), o);
+  std::string lg = a.takeLog();
+  size_t pl = lg.find("plan: ");
+  CHECK(pl != std::string::npos);
+  CHECK(lg.find("thrown", pl) > lg.find('\n', pl));  // (the plan walks to (13,1) instead)
 }
 
 // A hidden bomb up: the agent bombs its block open (powerups goal).

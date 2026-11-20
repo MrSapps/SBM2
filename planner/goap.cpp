@@ -18,6 +18,7 @@ constexpr int kBombCost = 40;     // place a bomb and step out of its line
 constexpr int kEnemyCost = 120;   // line up on a moving enemy
 constexpr int kSoftCross = 190;   // bomb a soft block in the way: fuse 150 + flames
 constexpr int kMaxPushes = 6;      // a block pushed down a line of floor into a hole: at most
+constexpr int kThrowCost = 40;   // frames: the lift (~20) and the flight (~13) over a laid bomb
 constexpr int kBurnCost = 3000;   // a blast burns an item the goal wants: only if nothing else does
 const int kDirs[4][2] = {{0, -1}, {0, 1}, {-1, 0}, {1, 0}};
 
@@ -52,6 +53,7 @@ struct Node {
   std::vector<int16_t> blk = {};
   int pdc = 0, pdr = 0, pushes = 0;  // (a push step: Step::dc/dr/pushes)
   bool sinks = false;
+  int tdir = -1, lc = 0, lr = 0;  // (a throw step: Step::throwDir/landC/landR)
 };
 constexpr int16_t kSunk = 0x4000;
 
@@ -349,9 +351,33 @@ class Search {
 
   // Cheapest cell to do task t from: the cell itself for items and the gate,
   // else a cell in line within bomb range with nothing stopping the blast.
-  bool standCell(const Node& n, const Routes& rt, const Task& t, int& bc, int& br, int& dist, int pdc = 0, int pdr = 0) const {
+  bool standCell(const Node& n, const Routes& rt, const Task& t, int& bc, int& br, int& dist, int pdc = 0, int pdr = 0,
+                 int* tdir = nullptr, int* lc = nullptr, int* lr = nullptr) const {
     dist = INT_MAX;
+    if (tdir) *tdir = -1;
+    // With the glove a spot is also thrown to, from a cell P1 reaches 3 (5
+    // up) back from it: over walls, blocks, holes and water, so a spot on
+    // an island counts (user: "throw bombs over holes to the 2nd island").
+    const bool throws = tdir && w_.p.glove && t.kind != TaskKind::KillEnemy && t.kind != TaskKind::HurtBoss &&
+                        t.kind != TaskKind::PushBlock;
+    auto considerThrow = [&](int c, int r) {
+      if (!throws || itemAt_.count(cellIdx(c, r)) || !walkable(n, c, r) || !canPlaceOn(solidCls(n, c, r))) return;
+      Harm h = harm(n, c, r);
+      if (h.gate) return;
+      auto free = [&](int qc, int qr) {
+        return walkable(n, qc, qr) && canPlaceOn(solidCls(n, qc, qr)) && !w_.bombAt(qc, qr) && !itemAt_.count(cellIdx(qc, qr));
+      };
+      for (int di = 0; di < 4; di++)
+        throwSources(w_.cols, w_.rows, c, r, di, free, [&](int xc, int xr, int hops) {
+          if (!w_.inside(xc, xr)) return;
+          int x = rt.d[size_t(cellIdx(xc, xr))];
+          if (x == INT_MAX || !walkable(n, xc, xr) || !canPlaceOn(solidCls(n, xc, xr))) return;
+          x += kThrowCost + 8 * hops + h.cost;
+          if (x < dist) { dist = x; bc = xc; br = xr; *tdir = di; *lc = c; *lr = r; }
+        });
+    };
     auto consider = [&](int c, int r) {
+      considerThrow(c, r);
       int x = rt.d[size_t(cellIdx(c, r))];
       if (x == INT_MAX) return;
       if (isBombTask(t.kind)) {
@@ -363,7 +389,10 @@ class Search {
         }
         x += h.cost;
       }
-      if (x < dist) { dist = x; bc = c; br = r; }
+      if (x < dist) {
+        dist = x; bc = c; br = r;
+        if (tdir) *tdir = -1;
+      }
     };
     if (!isBombTask(t.kind)) {
       if (w_.inside(t.c, t.r)) consider(t.c, t.r);
@@ -529,9 +558,12 @@ class Search {
     bool open = gateOpen(n);
     // Task i done from (c,r); pushB >= 0: a push step, block pushB ends on
     // pushTo (its own blast's push: not again in blastMarks).
+    int tdir = -1, tlc = 0, tlr = 0;  // (set by standCell: the step is a throw landing on (tlc,tlr))
     auto make = [&](int i, int c, int r, int dist, int pushB = -1, int to = 0, int pdc = 0, int pdr = 0, int pushes = 0) {
       const Task& t = tasks_[size_t(i)];
       Node s{cellIdx(c, r), n.done, 0, 0, ni, i, c, r, 0, {}};
+      s.tdir = pushB < 0 ? tdir : -1, s.lc = tlc, s.lr = tlr;
+      const int bc = s.tdir >= 0 ? tlc : c, br = s.tdir >= 0 ? tlr : r;  // (where the bomb goes off)
       s.blk = n.blk;
       if (pushB < 0 || (to & kSunk)) s.done[size_t(i)] = 1;
       for (int j = cellIdx(c, r); j >= 0; j = rt.prev[size_t(j)])
@@ -544,8 +576,8 @@ class Search {
         }
       std::reverse(s.via.begin(), s.via.end());
       if (isBombTask(t.kind)) {
-        blastMarks(n, c, r, s, pushB);
-        for (int b : harm(n, c, r).burnt) s.done[size_t(b)] = 1;  // (gone: its cost is in dist)
+        blastMarks(n, bc, br, s, pushB);
+        for (int b : harm(n, bc, br).burnt) s.done[size_t(b)] = 1;  // (gone: its cost is in dist)
       }
       if (pushB >= 0) {
         s.blk[size_t(pushB)] = int16_t(to);
@@ -569,8 +601,9 @@ class Search {
           : t.kind != TaskKind::PressButton && t.kind != TaskKind::SpawnPlatform && !required(n, t))
         continue;
       int c, r, dist;
-      if (!standCell(n, rt, t, c, r, dist)) continue;
+      if (!standCell(n, rt, t, c, r, dist, 0, 0, &tdir, &tlc, &tlr)) continue;
       make(int(i), c, r, dist);
+      tdir = -1;
     }
     // Pushes (enablers: worth it when they open a way): down a line of
     // floor into an open hole, a push per cell (5-2: (20,8) goes down three
@@ -608,6 +641,7 @@ class Search {
       const Node& x = nodes_[size_t(i)];
       Step st{x.step, x.standC, x.standR, x.stepCost, {}};
       st.dc = x.pdc, st.dr = x.pdr, st.pushes = x.pushes, st.sinks = x.sinks;
+      st.throwDir = x.tdir, st.landC = x.lc, st.landR = x.lr;
       for (int v : x.via) st.via.push_back({v % w_.cols, v / w_.cols});
       out.steps.push_back(st);
     }
@@ -726,6 +760,7 @@ std::string Plan::str() const {
   for (const Step& st : steps) {
     const Task& t = tasks[size_t(st.task)];
     s << taskName(t.kind) << " " << t.c << "," << t.r << " from " << st.standC << "," << st.standR;
+    if (st.throwDir >= 0) s << " thrown " << "udlr"[st.throwDir] << " to " << st.landC << "," << st.landR;
     if (!st.via.empty()) {
       s << " via";
       for (auto& v : st.via) s << " " << v.first << "," << v.second;
@@ -754,6 +789,15 @@ bool wantedItem(int kind, const Player& p) {
   // at fire 10, a long trip that did nothing.)
   if ((kind == kItemFire || kind == kItemFullFire) && p.fire >= 10) return false;
   if (kind == kItemBomb && p.maxbombs >= 9) return false;
+  // Soft pass (+$FB, user: 3-6's was left lying) is not fetched for now:
+  // held, every whole-game run since met a new stall (4-1 enemies sealed
+  // in soft blocks, 5-4's switch, 3-5's panel (3,12): every move died on
+  // the way). The agent copes with it when picked up on the way.
+  if (kind == kItemSoftPass) return false;
+  // Kick (+$FA): bombs kicked to their spot from nearer (agent.cpp).
+  if (kind == kItemKick) return !p.kick;
+  // Glove (+$FE): bombs thrown over walls, holes and water (goap standCell).
+  if (kind == kItemGlove) return !p.glove;
   return kind == kItemBomb || kind == kItemFire || kind == kItemFullFire || kind == kItemHeart || kind == kItemRemote;
 }
 // The glove, in 5-7 ($56) with none yet: 5-8's form 2 is hurt only by

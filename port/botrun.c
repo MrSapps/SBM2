@@ -428,6 +428,9 @@ typedef struct SimJob {
     uint16_t bossBase[32];
     int nboss;
     int16_t pcell, ecell[AG_ESLOTS];  /* last frame's cells (agent_passed_through) */
+    uint64_t bseen;                    /* agent_p1_blasts: slots counted */
+    int16_t blasts[AG_BLASTS];
+    int nblast;
 } SimJob;
 
 /* The path controller: port/path_pad.h (unit tested from planner/test). */
@@ -545,6 +548,9 @@ static void *sim_run(void *arg)
     if (!j->resume) {
         j->map0 = agent_map_sig(s->wram);
         j->mapChanged = 0;
+        /* (bombs going off already: not this run's) */
+        j->bseen = 0, j->nblast = 0;
+        { int16_t tmp[AG_BLASTS]; int tn = 0; agent_p1_blasts(s->wram, &j->bseen, tmp, &tn); }
         memset(j->hash, 0, sizeof j->hash);
         if (j->nwp && j->npre == 0) j->buf[0] = sim_pad(j, s, 0, &at);
         /* this frame's pad: latched already (see vblank_cb) */
@@ -597,6 +603,7 @@ static void *sim_run(void *arg)
             /* (world 2 soft blocks grow back within a run: a change seen on
              * the way counts, not just the end state) */
             if (!j->mapChanged && (i & 3) == 0 && agent_map_sig(s->wram) != j->map0) j->mapChanged = 1;
+            agent_p1_blasts(s->wram, &j->bseen, j->blasts, &j->nblast);
             /* the next stage: left by the exit. Riding a mount the exit
              * never locks P1 $0801 (PlayerOnExitTile C1:41A8 skips it with
              * +$60 bit 15), and the next stage's intro then held $0801 90
@@ -979,7 +986,7 @@ static double ag_now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &
 #endif
 static const char *ag_cache;
 static unsigned long ag_hits;
-typedef struct { uint32_t magic; int32_t dead, en, hp, px, py, ph, cap; uint64_t mapSig; int32_t bossHp, nbt, mapChanged, emask; } AgCacheHdr;
+typedef struct { uint32_t magic; int32_t dead, en, hp, px, py, ph, cap; uint64_t mapSig; int32_t bossHp, nbt, mapChanged, emask, nblast; int16_t blasts[AG_BLASTS]; } AgCacheHdr;
 #define AG_MAGIC 0x41474334
 static uint64_t ag_key(uint64_t live, const AgSimReq *r, int cap)
 {
@@ -1012,6 +1019,8 @@ static int ag_cache_get(uint64_t k, AgSimRes *o)
     o->dead = h.dead; o->enemies = h.en; o->hp = h.hp; o->px = h.px; o->py = h.py; o->ph = h.ph; o->mapSig = h.mapSig; o->mapChanged = h.mapChanged;
     o->bossHp = h.bossHp;
     o->enemyMask = h.emask;
+    o->nblast = h.nblast;
+    memcpy(o->blasts, h.blasts, sizeof o->blasts);
     return 1;
 }
 static void ag_cache_put(uint64_t k, const AgSimRes *o, int nboss)
@@ -1025,7 +1034,8 @@ static void ag_cache_put(uint64_t k, const AgSimRes *o, int nboss)
     snprintf(t, sizeof t, "%s.%d.tmp", p, (int)getpid());
     FILE *f = fopen(t, "wb");
     if (!f) return;
-    AgCacheHdr h = {AG_MAGIC, o->dead, o->enemies, o->hp, o->px, o->py, o->ph, o->cap, o->mapSig, o->bossHp, nbt, o->mapChanged, o->enemyMask};
+    AgCacheHdr h = {AG_MAGIC, o->dead, o->enemies, o->hp, o->px, o->py, o->ph, o->cap, o->mapSig, o->bossHp, nbt, o->mapChanged, o->enemyMask, o->nblast, {0}};
+    memcpy(h.blasts, o->blasts, sizeof h.blasts);
     int ok = fwrite(&h, sizeof h, 1, f) == 1 && fwrite(o->pads, 2, (size_t)o->cap, f) == (size_t)o->cap &&
              fwrite(o->trace, 2, (size_t)o->cap * 2, f) == (size_t)o->cap * 2 &&
              (!o->etrace || fwrite(o->etrace, 2, (size_t)o->cap * AG_ESLOTS, f) == (size_t)o->cap * AG_ESLOTS) &&
@@ -1166,6 +1176,8 @@ static void ag_run(const AgSimReq *rq, AgSimRes *rs, int n)
             o->px = r.px; o->py = r.py; o->ph = r.ph;
             o->mapSig = agent_map_sig(j->s.wram);
             o->mapChanged = j->mapChanged || o->mapSig != j->map0;
+            o->nblast = j->nblast;
+            memcpy(o->blasts, j->blasts, sizeof o->blasts);
             for (int f = 0; f < o->cap && f <= j->frames + 2; f++) o->pads[f] = j->buf[f];
             ag_simfr += j->frames;
         }

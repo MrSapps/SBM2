@@ -71,7 +71,47 @@ struct Step {
   // how many cells, and whether it ends in a hole.
   int dc = 0, dr = 0, pushes = 0;
   bool sinks = false;
+  // A throw (glove): from (standC,standR) facing throwDir (0 up, 1 down,
+  // 2 left, 3 right) the bomb lands on (landC,landR); -1: laid where P1 stands.
+  int throwDir = -1, landC = 0, landR = 0;
 };
+
+// Where a throw from (c,r) facing di lands (docs/mechanics.md 10b, 5-8
+// probe: 3 cells down/left/right, 5 up from 16 px above P1). Off the map's
+// left or right edge it comes back in on the far side (user: "throwing
+// left out of the map will repeat it around to the right"); up and down it
+// does not (lr off the map: no landing; the HUD is above).
+inline void throwLand(int cols, int rows, int c, int r, int di, int& lc, int& lr, int sign = 1) {
+  static const int d[4][2] = {{0, -5}, {0, 3}, {-3, 0}, {3, 0}};
+  (void)rows;
+  lc = ((c + sign * d[di][0]) % cols + cols) % cols;
+  lr = r + sign * d[di][1];
+}
+// The cell a throw facing di must start from to land on (c,r).
+inline void throwFrom(int cols, int rows, int c, int r, int di, int& xc, int& xr) { throwLand(cols, rows, c, r, di, xc, xr, -1); }
+
+// A throw that comes down on a taken cell (a wall, a block, a bomb thrown
+// before) bounces on a cell at a time the way it flies until one is free
+// (user: "the 2nd will bounce over it like a solid block"). The cells a
+// throw facing di can start from to end on (c,r): from where it would land
+// on (c,r) itself, or on the one taken cell just before it (5-4: four
+// hops through walls, a block and the switch, planned, never worked).
+// f(xc, xr,
+// hops) for each; free(c, r): a bomb can come to rest there.
+template <class Free, class F>
+void throwSources(int cols, int rows, int c, int r, int di, Free free, F f, int maxHops = 1) {
+  static const int u[4][2] = {{0, -1}, {0, 1}, {-1, 0}, {1, 0}};
+  int nc = c, nr = r;
+  for (int k = 0; k <= maxHops; k++) {
+    if (k > 0) {
+      nc = ((nc - u[di][0]) % cols + cols) % cols, nr = nr - u[di][1];
+      if (nr < 0 || nr >= rows || free(nc, nr)) return;  // (it would stop there, short of (c,r))
+    }
+    int xc, xr;
+    throwFrom(cols, rows, nc, nr, di, xc, xr);
+    f(xc, xr, k);
+  }
+}
 
 struct Plan {
   bool ok = false;

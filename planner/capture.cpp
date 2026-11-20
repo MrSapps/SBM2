@@ -1,3 +1,4 @@
+#include <cstring>
 #include "capture.hpp"
 
 #include <algorithm>
@@ -140,6 +141,7 @@ World captureWorld(const uint8_t* wram, int frame) {
   p.remote = stats & 1;
   p.glove = rd.b(kP1 + 0xFE);
   p.softpass = rd.b(kP1 + 0xFB);
+  p.kick = rd.b(kP1 + 0xFA);
   p.lock = uint16_t(rd.h(kP1 + 0x52));
   p.ride = rd.h(kP1 + 2) & 0x8000;
   p.f4 = uint16_t(f4);
@@ -311,6 +313,7 @@ std::string encodeWorld(const World& w) {
                 "softpass=%d lock=%04X ride=%d f4=%04X f60=%04X",
                 p.x, p.y, p.dir, p.hearts, p.flash, p.bombs, p.maxbombs, p.e0, p.fire, int(p.pierce), int(p.remote), p.glove,
                 p.softpass, p.lock, int(p.ride), p.f4, p.f60);
+  if (p.kick) std::snprintf(b + std::strlen(b), sizeof b - std::strlen(b), " kick=%d", p.kick);  // (only when held: older snapshots have none)
   add(b);
   for (const Bomb& m : w.bombs) {
     std::snprintf(b, sizeof b, "bomb c=%d r=%d fuse=%d range=%d owner=%s remote=%d pierce=%d magnet=%d slot=%d flags=%02X", m.c,

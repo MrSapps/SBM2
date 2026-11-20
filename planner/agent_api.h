@@ -26,6 +26,7 @@ typedef struct {
     int wantBoss;                        /* fill AgSimRes.btrace */
 } AgSimReq;
 
+#define AG_BLASTS 8
 typedef struct {
     int dead;          /* frame offset of the death, -1 lived, -2 left by the exit */
     int enemies, hp;   /* live enemies (and their HP) at the end, as botrun counts them */
@@ -39,6 +40,8 @@ typedef struct {
     int enemyMask;     /* agent_enemy_mask at the end */
     int16_t *btrace;   /* 2 * nboss * cap (wantBoss, else NULL): each boss's world x, y per frame */
     int cap;
+    int16_t blasts[AG_BLASTS]; /* cells (c | r << 8) where P1's bombs went off in the run, in order (agent_p1_blasts) */
+    int nblast;
 } AgSimRes;
 
 typedef void (*AgSimFn)(void *ctx, const AgSimReq *reqs, AgSimRes *res, int n);
@@ -118,6 +121,25 @@ static inline void agent_enemy_cells(const uint8_t *w, int16_t *out)
             int x = (int16_t)(w[base + 0x10] | w[base + 0x11] << 8) + ox, y = (int16_t)(w[base + 0x18] | w[base + 0x19] << 8) + oy;
             if (x >= 0 && y >= 0 && x < 16 * 64 && y < 16 * 64) out[i] = (int16_t)((x >> 4) | (y >> 4) << 8);
         }
+    }
+}
+
+/* P1's bombs that start going off (bomb table $12000, 40 slots of $100:
+ * +1 bit 7 in use, bit 6 going off, bit 3 an enemy's; +2 the TileMap
+ * offset, as planner/capture.cpp reads them): each one's cell, once, into
+ * out (c | r << 8, up to AG_BLASTS). *seen: the slots already counted (a
+ * slot freed is cleared). Kicked and thrown bombs end up where they end up:
+ * this is where they went off. */
+static inline void agent_p1_blasts(const uint8_t *w, uint64_t *seen, int16_t *out, int *n)
+{
+    for (int i = 0; i < 40; i++) {
+        int base = 0x12000 + 0x100 * i, fl = w[base + 1];
+        uint64_t bit = (uint64_t)1 << i;
+        if (!(fl & 0x80)) { *seen &= ~bit; continue; }
+        if ((fl & 0x08) || !(fl & 0x40) || (*seen & bit)) continue;
+        *seen |= bit;
+        int cell = w[base + 2] | w[base + 3] << 8;
+        if (*n < AG_BLASTS) out[(*n)++] = (int16_t)(((cell & 0x3F) / 2) | (cell >> 6) << 8);
     }
 }
 

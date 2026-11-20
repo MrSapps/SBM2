@@ -52,6 +52,7 @@ struct SimOut {
   std::vector<int16_t> etrace;
   int bossHp = 0;
   std::vector<int16_t> btrace;  // wantBoss: per frame, per bossBase: world x, y
+  std::vector<int16_t> blasts;  // where P1's bombs went off in the run (c | r << 8), in order
 };
 constexpr int kEnemySlots = 12;  // $8400..$8F00 (agent_api.h AG_ESLOTS)
 
@@ -147,6 +148,8 @@ class Agent {
     // walk budget is pessimistic, and world 2's blocks grow back ~190 frames
     // after they break. 0: the whole commit.
     int afterA = 0, afterB = 0;
+    bool holdB = false;
+    int landC = -1, landR = -1;  // a kick or throw: the run must show a blast of P1's there (else it landed elsewhere)  // end before the run's first B (a remote bomb left out for the next move)
   };
   // waits: if every option died, try the best two again after 32/64/128
   // frames standing still.
@@ -168,6 +171,9 @@ class Agent {
   // out may pass: a blast, a bomb in the way, an enemy on it or nearby).
   int stage_ = -1;
   std::map<int, int> bombFails_, bombFailAt_;  // cell -> fails, frame of the last
+  std::map<int, int> throwBad_;
+  int trapFor_ = -1;                // the enemy slot the last trap was laid for
+  std::map<int, std::pair<int, int>> trapStale_;  // enemy slot -> (traps for it that went off stale, frame of the last)  // (thrower cell * 4 + way) -> frame its planned throw last had no move that worked
   bool bombDropped(int cell) const;  // 3 fails, the last within kBadSoftTTL * 2
   std::map<int, int> badSoft_;  // soft block -> frame marked
   int dismountAt_ = -100000;  // the last "get off the mount" try (frame)

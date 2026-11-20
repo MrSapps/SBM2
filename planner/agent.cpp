@@ -80,6 +80,11 @@ void throwOffset(int di, int j, int& dx, int& dy) {
 }  // survive on one cell this long: move off it
 constexpr int kSettle = 20;
 constexpr int kIdleTrim = 120;  // frames of standing at a walk's end worth cutting
+// Frames played on past a remote bomb's last B before the next decision:
+// the blast is out by then and the next move is planned (and run) with its
+// flames burning. Was 30 + kFlameFrames: P1 stood in cover 70 frames after
+// every remote bomb (user, whole game: "waits a long time when it arrives").
+constexpr int kAfterB = 6;
 constexpr int kRideProbe = 360;  // frames a ride may take (3-5's subs: ~170-250)
 const int kDirs[4][2] = {{0, -1}, {0, 1}, {-1, 0}, {1, 0}};
 
@@ -116,7 +121,7 @@ struct Grid {
     // (with softpass P1 walks through soft blocks, as goap.cpp's walkable:
     // 5-4, the way up column 28 was the soft (28,9); the plan went through
     // it, the agent's routes never did: 20000 frames closing in, time up)
-    if (breakable(t)) return w.p.softpass != 0;
+    if (breakable(t)) return w.p.softpass != 0 && !w.trapAt(c, r);
     return walkableClass(t);
   }
   // The cells a step from (c,r) reaches: its neighbours P1 can walk (or
@@ -291,7 +296,7 @@ void noteRemotes(const World& w, std::vector<int>& order) {
     if (std::find(order.begin(), order.end(), k) == order.end()) order.push_back(k);
 }
 
-bool remoteTrigger(const World& w, const std::vector<int>& order, std::vector<uint8_t>* blast, bool needEnemy) {
+bool remoteTrigger(const World& w, const std::vector<int>& order, std::vector<uint8_t>* blast, bool needEnemy, bool gateOk) {
   if (order.empty()) return false;
   std::vector<uint8_t> in(size_t(w.cols * w.rows), 0);
   // The oldest, and every bomb of P1's its blast reaches (they go too).
@@ -330,14 +335,21 @@ bool remoteTrigger(const World& w, const std::vector<int>& order, std::vector<ui
       int c = (w.p.x + dx) / 16, r = (w.p.y + dy) / 16;
       if (w.inside(c, r) && any[size_t(r * w.cols + c)]) return false;
     }
-  if (w.hasGate && hit(w.gateC, w.gateR)) return false;
+  // (gateOk: P1 stuck behind it, the gate's enemies are the lesser cost;
+  // 3-3, whole game: a trap at (5,7), the one way down, lit column 5 up to
+  // the gate (5,3); never set off, 14000 frames, a hit, then a death)
+  if (!gateOk && w.hasGate && hit(w.gateC, w.gateR)) return false;
   // (the glove too, where it is wanted: 5-7, seed 2, its block broke after
   // the bomb meant to break it was laid, and the trap set that bomb off on
   // an enemy over the bare glove; 5-8's form 2 is hurt only by throws)
   // (any of P1's remote bombs, as for P1 above: B may set off a newer one
   // than the oldest; 5-7, seed 2: a trap's B set off (6,4) over the glove)
+  // (stuck behind it, a power-up is let burn too, not 5-7's glove that 5-8
+  // needs: 2-5, the trap (10,7) over the item (10,9) it walled off; 22000
+  // frames waiting for a blast, the timer)
   for (const Item& it : w.items)
-    if ((wantedItem(it.kind, w.p) || gloveWanted(it.kind, w)) && w.inside(it.c, it.r) && any[size_t(it.r * w.cols + it.c)]) return false;
+    if (((wantedItem(it.kind, w.p) && !gateOk) || gloveWanted(it.kind, w)) && w.inside(it.c, it.r) && any[size_t(it.r * w.cols + it.c)])
+      return false;
   if (!needEnemy) return true;
   for (const Enemy& e : w.enemies) {
     if (!e.type || (e.type & 0x40) || isThrower(e.type) || e.type == 0x8F || e.dormant() || e.hidden() || e.flashing() || e.offscreen) continue;
@@ -380,7 +392,7 @@ int Agent::trapCheck(const World& tw) {
   if (tw.inside(tw.p.col(), tw.p.row()) && tw.at(tw.p.col(), tw.p.row()) == 'S') return 0;
   if (remoteTrigger(tw, remoteOrder_)) return 1;
   bool stale = tw.frame - trapSince_ > kTrapWait;
-  if ((stale || trapStuck_) && remoteTrigger(tw, remoteOrder_, nullptr, false)) return 2;
+  if ((stale || trapStuck_) && remoteTrigger(tw, remoteOrder_, nullptr, false, trapStuck_)) return 2;
   return 0;
 }
 
@@ -828,7 +840,7 @@ void Agent::survive(const World& w, const Live& live, Oracle& o, const char* why
   // of the oldest trap's, so frame() can set it off.
   DangerMap dm(w);
   std::vector<uint8_t> trap;
-  if (trapStuck_) remoteTrigger(w, remoteOrder_, &trap, false);
+  if (trapStuck_) remoteTrigger(w, remoteOrder_, &trap, false, true);
   // (a cell next to the blast: P1 a pixel off its centre is still in it,
   // to remoteTrigger's box)
   auto inTrap = [&](int c, int r) { return !trap.empty() && w.inside(c, r) && trap[size_t(r * w.cols + c)]; };
@@ -954,9 +966,16 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
   // none (PlayerOnTrap C1:40B9; free while P1 flashes): to P1 it is a soft
   // block, a blast clears it (docs/mechanics.md 3). (5-1: every move to
   // the panel at (4,11) walked over the $4B at (2,11) and died there.)
+  // With softpass a soft block is floor: a trap shown as one stays off the
+  // routes (5-6, whole game: P1 at (12,22) between the $63s (11,22) and
+  // (13,22); every move walked onto one and died, 21000 frames, the timer).
   if (w.p.flash == 0)
-    for (char& ch : w.map)
-      if (ch == 'T' || ch == 't') ch = '%';
+    for (size_t i = 0; i < w.map.size(); i++)
+      if (w.map[i] == 'T' || w.map[i] == 't') {
+        if (w.traps.empty()) w.traps.assign(w.map.size(), 0);
+        w.traps[i] = w.map[i] == 't' ? 1 : 2;  // (blastCells: a $63 lets the flame on)
+        w.map[i] = '%';
+      }
   decisions_++;
   frame_ = w.frame;
   tail_ = w.bosses.empty() ? kTail : kBossTail;
@@ -1017,6 +1036,38 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
   for (const Bomb& b : w.bombs)
     for (const Cell& x : blastCells(w, b.c, b.r, b.range, b.pierce))
       if (breakable(w.at(x.c, x.r))) pending.insert(g.idx(x.c, x.r));
+  // A remote bomb of P1's out by a wanted item P1 can reach: fetch the item
+  // first. Every B may set that bomb off, so moveBurns() stops each move
+  // that presses one (5-7, seed 2: the glove beside the (6,4) bomb; every
+  // other step pressed B and stopped, the bombs ran out, 140000 frames).
+  // Before the plan: a bomb that walls off the rest leaves no plan, only
+  // "waiting for a blast" that never comes (2-5, whole game: the glove at
+  // (4,7) by the (5,7) bomb for panel 5,5; 24000 frames, the timer).
+  {
+    std::vector<Cand> ic;
+    for (const Bomb& b : w.bombs) {
+      if (!b.remote || b.enemyOwned || !ic.empty()) continue;
+      for (const Cell& x : blastCells(w, b.c, b.r, b.range, b.pierce)) {
+        if (x.c == b.c && x.r == b.r) continue;
+        bool item = false;
+        for (const Item& it : w.items)
+          item |= it.c == x.c && it.r == x.r && (wantedItem(it.kind, w.p) || gloveWanted(it.kind, w));
+        if (item && dist[size_t(g.idx(x.c, x.r))] >= 0) {
+          Cand c;
+          c.req.path = g.waypoints(g.pathTo(prev, g.pc, g.pr, x.c, x.r));
+          c.commit = kWalkFPT * wpSteps(c.req.path) + kSettle;
+          c.req.frames = c.commit + tail_;
+          c.want = Cand::Change;
+          c.endC = x.c, c.endR = x.r;
+          c.what = "item " + std::to_string(x.c) + "," + std::to_string(x.r) + " (by a remote bomb): walk to (" +
+                   std::to_string(x.c) + "," + std::to_string(x.r) + ")";
+          ic.push_back(c);
+          break;
+        }
+      }
+    }
+    if (!ic.empty() && tryCands(ic, live, o, 1)) return;
+  }
   World pw = w;
   for (int k : pending) pw.map[size_t(k)] = '.';
   // Power-ups are optional: one that failed 3 times is left (P1 can't get
@@ -1071,6 +1122,14 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
       World nw = pw;
       nw.p.glove = 0;
       Plan q = plan(nw, goal_);
+      // (no plan without it: leave out the optional steps, e.g. a light
+      // switch only that throw reached; 5-5, whole game: every panel done,
+      // the gate open, 17000 frames of survive over the switch (4,11))
+      if ((!q.ok || q.steps.empty()) && goal_.powerups) {
+        Goal less = goal_;
+        less.powerups = false;
+        q = plan(nw, less);
+      }
       if (q.ok && !q.steps.empty()) gp = q;
     }
   }
@@ -1344,7 +1403,7 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
         c.commit = t1 + 2 + t2 + wait;
         c.req.frames = c.commit + tail_;
         // (play to the flames' end by the real press, not the walk budget)
-        if (w.p.remote) c.afterB = int((30 + kFlameFrames) * eScale_ + 0.5);
+        if (w.p.remote) c.afterB = kAfterB;
         else c.afterA = 2 + wait + 4;
         // A bomb to spare: once in cover P1 is free to plan the next (the run
         // still covers the whole blast). With the remote the bomb stays out
@@ -1422,7 +1481,7 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
         int wait = int((w.p.remote ? 30 + kFlameFrames : kNewFuse + kFlameFrames) * eScale_ + 0.5);
         c.commit = t1 + 2 + t2 + wait;
         c.req.frames = c.commit + tail_;
-        if (w.p.remote) c.afterB = int((30 + kFlameFrames) * eScale_ + 0.5);
+        if (w.p.remote) c.afterB = kAfterB;
         else c.afterA = 2 + wait + 4;
         // (played through its blast, a bomb to spare or not: mid-slide the
         // next decision sees it where it was laid and kicks another for the
@@ -1476,7 +1535,7 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
       int wait = int((w.p.remote ? 30 + kFlameFrames : kNewFuse + kFlameFrames) * eScale_ + 0.5);
       c.commit = t1 + int(c.req.post.size()) + t2 + wait;
       c.req.frames = c.commit + tail_;
-      if (w.p.remote) c.afterB = int((30 + kFlameFrames) * eScale_ + 0.5);
+      if (w.p.remote) c.afterB = kAfterB;
       c.endC = cov % w.cols;
       c.endR = cov / w.cols;
       c.want = want;
@@ -1566,40 +1625,25 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
     // (7,10) burnt the fire-up at (3,10), the plan had no step for it; 22000
     // frames in survive, the timer ran out. 5-6 played on: the way to the
     // push of (11,4) bombs (13,4) from (12,4), over the fire-up at (12,5)).
-    auto itemFirst = [&](int xc, int xr, std::vector<Cand>& cs) {
+    // With anyItem, any item there (the unwanted ones are soft blocks by
+    // now): a spot with no move at all may be a pocket whose one way out is
+    // over an item the blast burns (3-1, whole game: the panel (15,8) is
+    // bombed only from (14,8), out by the speed-up (14,7) alone; with it
+    // burnt the flame runs up column 14 to the gate. 1000 frames in survive
+    // until P1 wandered onto it).
+    auto itemFirst = [&](int xc, int xr, std::vector<Cand>& cs, bool anyItem = false) {
       if (dist[size_t(g.idx(xc, xr))] < 0 || !canPlaceOn(w.at(xc, xr)) || w.bombAt(xc, xr)) return;
       for (const Cell& x : blastCells(w, xc, xr, w.p.fire, w.p.pierce)) {
         if (x.c == xc && x.r == xr) continue;
         bool item = false;
         for (const Item& it : w.items)
-          item |= it.c == x.c && it.r == x.r && (wantedItem(it.kind, w.p) || gloveWanted(it.kind, w));
+          item |= it.c == x.c && it.r == x.r && (anyItem || wantedItem(it.kind, w.p) || gloveWanted(it.kind, w));
         if (item && dist[size_t(g.idx(x.c, x.r))] >= 0) {
           cs.push_back(walkCand(x.c, x.r, Cand::Change, tname + " (item in the blast)"));
           return;
         }
       }
     };
-    // A remote bomb of P1's out by a wanted item P1 can reach: fetch the item
-    // first. Every B may set that bomb off, so moveBurns() stops each move
-    // that presses one (5-7, seed 2: the glove beside the (6,4) bomb; every
-    // other step pressed B and stopped, the bombs ran out, 140000 frames).
-    {
-      std::vector<Cand> ic;
-      for (const Bomb& b : w.bombs) {
-        if (!b.remote || b.enemyOwned || !ic.empty()) continue;
-        for (const Cell& x : blastCells(w, b.c, b.r, b.range, b.pierce)) {
-          if (x.c == b.c && x.r == b.r) continue;
-          bool item = false;
-          for (const Item& it : w.items)
-            item |= it.c == x.c && it.r == x.r && (wantedItem(it.kind, w.p) || gloveWanted(it.kind, w));
-          if (item && dist[size_t(g.idx(x.c, x.r))] >= 0) {
-            ic.push_back(walkCand(x.c, x.r, Cand::Change, "item " + std::to_string(x.c) + "," + std::to_string(x.r) + " (by a remote bomb)"));
-            break;
-          }
-        }
-      }
-      if (!ic.empty() && tryCands(ic, live, o, 1)) return;
-    }
     std::vector<Cand> cs;
     // Where the task is done from; if a soft block is in the way, bomb the
     // first one on the route instead.
@@ -1727,6 +1771,26 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
       // column 29 also undoes (29,8) and (29,6). 15000 frames, the timer.)
       if (cs.empty() && task.kind == TaskKind::TogglePanel) parity(cs);
       if (cs.empty() && firstX >= 0) itemFirst(firstX % w.cols, firstX / w.cols, cs);
+      if (cs.empty() && firstX >= 0) itemFirst(firstX % w.cols, firstX / w.cols, cs, true);
+      // Still nothing: P1 is in a pocket whose way to the stand has no
+      // cover. Open it up: the nearest spots that break any soft block and
+      // have cover (3-1, whole game: P1 at (14,8), the stand (13,8) a soft
+      // block bombed only from (14,8), no cover; (14,9) breaks (14,7) and
+      // (14,10) with cover (15,8). 14000 frames in survive, the timer).
+      // Not with bombs or flames out: their blasts may open it (2-2's
+      // flame wait).
+      if (cs.empty() && w.bombs.empty() && std::find(w.map.begin(), w.map.end(), '*') == w.map.end()) {
+        std::vector<std::pair<int, int>> os;
+        for (int x = 0; x < w.cols * w.rows; x++) {
+          if (dist[size_t(x)] < 0 || bombDropped(x)) continue;
+          bool opens = false;
+          for (const Cell& y : blastCells(w, x % w.cols, x / w.cols, w.p.fire, w.p.pierce)) opens |= breakable(w.at(y.c, y.r));
+          if (opens) os.push_back({dist[size_t(x)], x});
+        }
+        std::sort(os.begin(), os.end());
+        for (size_t i = 0; i < os.size() && i < 6 && cs.empty(); i++)
+          bombCands(os[i].second % w.cols, os[i].second / w.cols, Cand::Change, "open the way to " + tname, 4, cs, ambient());
+      }
       if (!cs.empty() && tryCands(cs, live, o, 8)) return;
       for (int x : tried) {
         if (frame_ - bombFailAt_[x] >= 2 * kBadSoftTTL) bombFails_[x] = 0;  // (worn off: count afresh)
@@ -1792,6 +1856,12 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
           break;
         }
         bombCands(sc, sr, Cand::Change, tname, 6, cs, ambient());
+        // A push plays on to the flames' end: the block slides a while and a
+        // plan made mid-slide is wrong (5-5 with kAfterB: a push chain went
+        // to no plan, 19000 frames, the timer).
+        if (task.kind == TaskKind::PushBlock)
+          for (Cand& c : cs)
+            if (c.afterB) c.afterB = int((30 + kFlameFrames) * eScale_ + 0.5);
         if (!cs.empty()) {  // (a kick or throw first, to a spot a plain bomb also works from)
           std::vector<Cand> kc;
           kickCands(sc, sr, Cand::Change, tname, kc);
@@ -1799,6 +1869,7 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
           cs.insert(cs.begin(), kc.begin(), kc.end());
         }
         if (cs.empty()) itemFirst(sc, sr, cs);
+        if (cs.empty()) itemFirst(sc, sr, cs, true);
         if (cs.empty() && task.kind == TaskKind::TogglePanel) parity(cs);
         // Every spot for it undoes a done mode 1 panel: so be it, the plan
         // lights it again (5-5 played on with fire 6: the push of (4,4) into
@@ -2052,6 +2123,26 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
               bombCands(xs[i].second % w.cols, xs[i].second / w.cols, Cand::Change, "wake " + tname, 4, cs, ambient());
               got += cs.size() > n0;
             }
+            // No blast reaches its block: soft blocks round it stop every
+            // one. Break a neighbouring soft block first (4-1, whole game,
+            // softpass: the $93 in (10,8) behind (10,7) and (10,9); closing
+            // in on it looped 15000 frames, the timer).
+            if (cs.empty()) {
+              std::vector<std::pair<int, int>> ys;
+              for (auto& d : {std::pair<int, int>{0, -1}, {0, 1}, {-1, 0}, {1, 0}}) {
+                int nc = z.col() + d.first, nr = z.row() + d.second;
+                if (!w.inside(nc, nr) || !breakable(w.at(nc, nr))) continue;
+                for (int x = 0; x < w.cols * w.rows; x++)
+                  if (dist[size_t(x)] >= 0 && !bombDropped(x) && covers(w, x % w.cols, x / w.cols, nc, nr)) ys.push_back({dist[size_t(x)], x});
+              }
+              std::sort(ys.begin(), ys.end());
+              ys.erase(std::unique(ys.begin(), ys.end()), ys.end());
+              for (size_t i = 0, got2 = 0; i < ys.size() && got2 < 2; i++) {
+                size_t n0 = cs.size();
+                bombCands(ys[i].second % w.cols, ys[i].second / w.cols, Cand::Change, "clear the way to wake " + tname, 4, cs, ambient());
+                got2 += cs.size() > n0;
+              }
+            }
             if (!cs.empty() && tryCands(cs, live, o, 8)) return;
             cs.clear();
           }
@@ -2251,18 +2342,37 @@ void Agent::decide(const World& w0, const Live& live, Oracle& o) {
         // where a $91 sees P1 (5-3: P1 waited 2 cells below one for 9000
         // frames; it stood still at hp $FF the whole time, then got P1).
         cs.clear();
+        // With traps out, a cell clear of (and not next to) every one of
+        // their blasts first: the stale rule sets them off only with P1 out
+        // of them (3-7, world 3: three traps out, closing in swung between
+        // (3,6) and (4,8), each in one; 108000 frames, the timer).
+        std::vector<uint8_t> trapIn;
+        if (!remoteOrder_.empty()) remoteTrigger(w, remoteOrder_, &trapIn, false, true);
+        auto inTrapNear = [&](int c, int r) {
+          if (trapIn.empty()) return false;
+          for (auto& d : {std::pair<int, int>{0, 0}, {0, -1}, {0, 1}, {-1, 0}, {1, 0}})
+            if (w.inside(c + d.first, r + d.second) && trapIn[size_t((r + d.second) * w.cols + c + d.first)]) return true;
+          return false;
+        };
         int bestK = -1, bestD = INT_MAX;
-        for (int k = 0; k < w.cols * w.rows; k++) {
-          if (dist[size_t(k)] <= 0) continue;
-          int d = std::abs(k % w.cols - e.col()) + std::abs(k / w.cols - e.row());
-          if (d >= 2 && d < bestD && !EnemyModel::x91Sees(w, e, k % w.cols, k / w.cols)) bestD = d, bestK = k;
-        }
+        bool clearOfTraps = false;  // (then walked all the way, not cut)
+        for (int pass = 0; pass < 2 && bestK < 0; pass++)
+          for (int k = 0; k < w.cols * w.rows; k++) {
+            if (dist[size_t(k)] <= 0) continue;
+            if (pass == 0 && !trapIn.empty() && inTrapNear(k % w.cols, k / w.cols)) continue;
+            // (not into a soft block, with softpass: no bomb goes down there,
+            // the next move only steps out again; 4-2, whole game: 16000
+            // frames between (24,6) and (23,8), the timer)
+            if (breakable(w.at(k % w.cols, k / w.cols))) continue;
+            int d = std::abs(k % w.cols - e.col()) + std::abs(k / w.cols - e.row());
+            if (d >= 2 && d < bestD && !EnemyModel::x91Sees(w, e, k % w.cols, k / w.cols)) bestD = d, bestK = k, clearOfTraps = pass == 0 && !trapIn.empty();
+          }
         if (bestK >= 0) {
           auto p = g.pathTo(prev, g.pc, g.pr, bestK % w.cols, bestK / w.cols);
-          g.cut(p, 4);
+          if (!clearOfTraps) g.cut(p, 4);
           int k = p.back();
           Cand c = walkCand(k % w.cols, k / w.cols, Cand::Live, tname + " (closing in)");
-          if (!hasJump(c.req.path)) c.commit = std::min(c.commit, 40);  // (never end one in the air)
+          if (!hasJump(c.req.path) && !clearOfTraps) c.commit = std::min(c.commit, 40);  // (never end one in the air)
           cs.push_back(c);
         }
         if (!cs.empty() && tryCands(cs, live, o, 4)) return;

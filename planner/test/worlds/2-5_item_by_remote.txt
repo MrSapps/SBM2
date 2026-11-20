@@ -1,0 +1,86 @@
+worldview 1
+stage 24
+frame 0
+time 353
+origin 0 0
+size 31 14
+light none
+gate 12 4 closed
+player x=56 y=87 dir=- hearts=2 flash=0 bombs=8 maxbombs=9 e0=3 fire=10 pierce=0 remote=1 glove=0 softpass=0 lock=0000 ride=0 f4=0600 f60=0000 kick=1
+bomb c=5 r=7 fuse=144 range=10 owner=p1 remote=1 pierce=0 magnet=0 slot=1 flags=80
+enemy slot=4 type=C0 x=200 y=71 vx=0 vy=0 step=- target=0,0 wait=0 hp=0 f4=0C00 c0=0000 d0=0000 be=0000 bc=0000 ba=0000 off=0
+enemy slot=5 type=86 x=424 y=118 vx=0 vy=-2.5 step=u target=26,6 wait=1 hp=1 f4=0C00 c0=8000 d0=0000 be=0002 bc=0040 ba=0000 off=1 spd=2.5
+enemy slot=6 type=8D x=168 y=107 vx=0 vy=0.5 step=d target=10,7 wait=1 hp=1 f4=0C00 c0=8000 d0=0000 be=0000 bc=0000 ba=0000 off=0 spd=0.5
+enemy slot=7 type=DF x=200 y=168 vx=0 vy=0 step=- target=0,0 wait=0 hp=0 f4=0C00 c0=0000 d0=0000 be=0000 bc=0000 ba=0000 off=0 spd=0.5
+enemy slot=8 type=86 x=56 y=151 vx=0 vy=0 step=u target=3,9 wait=120 hp=1 f4=0C00 c0=0000 d0=0000 be=0001 bc=0040 ba=0000 off=0 spd=2.5
+enemy slot=9 type=8D x=344 y=99 vx=0 vy=0.5 step=d target=21,6 wait=1 hp=1 f4=0C00 c0=8000 d0=0000 be=0000 bc=0000 ba=0000 off=1 spd=0.5
+panel 5 5 todo mode=0
+panel 21 5 todo mode=0
+panel 28 5 todo mode=0
+panel 3 11 todo mode=0
+panel 10 11 todo mode=0
+panel 14 11 todo mode=0
+regrow in=250 cells=20,5;4,7;7,7;28,7;3,8;5,8;14,8;4,9;10,9;14,9;20,9;27,9;12,11
+item 4 7 item kind=7
+hidden 14 8 kind=0
+hidden 20 9 kind=2
+map
+###############################
+###############################
+###############################
+###############################
+############g##################
+###..P####..Ox.####.%P####v.P##
+###.#.####.#.#.####.#.####.#.##
+###.ib.%....ffffffff.ffffff.%##
+###%#%####.###%####f#f####f#f##
+###.%.####%###%####f%f####f%f##
+###.#.####.#F#.####f#f####f#f##
+###P..####P.%.P####fff####fff##
+###############################
+###############################
+under
+###############################
+###############################
+###############################
+###############################
+############g##################
+###..n####...x.####..n####n.n##
+###.#.####.#.#.####.#.####.#.##
+###.........ffffffff.ffffff..##
+###.#.####.###.####f#f####f#f##
+###...####.###.####f.f####f.f##
+###.#.####.#F#.####f#f####f#f##
+###n..####n...n####fff####fff##
+###############################
+###############################
+raw
+C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5
+C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6
+C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6
+C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6
+C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C9 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6
+C6 C6 C6 00 00 69 C6 C6 C6 C6 00 00 D3 F5 00 C6 C6 C6 C6 00 C2 69 C6 C6 C6 C6 6B 00 69 C6 C6
+C6 C6 C6 00 C5 00 C6 C6 C6 C6 00 C5 00 C5 00 C6 C6 C6 C6 00 C5 00 C6 C6 C6 C6 00 C5 00 C6 C6
+C6 C6 C6 00 44 43 00 C2 00 00 00 00 0E 0E 0E 0E 0E 0E 0E 0E 00 0E 0E 0E 0E 0E 0E 00 C2 C6 C6
+C6 C6 C6 C2 C5 C2 C6 C6 C6 C6 00 C6 C6 C6 C2 C6 C6 C6 C6 0E C5 0E C6 C6 C6 C6 0E C5 0E C6 C6
+C6 C6 C6 00 C2 00 C6 C6 C6 C6 C2 C6 C6 C6 C2 C6 C6 C6 C6 0E C2 0E C6 C6 C6 C6 0E C2 0E C6 C6
+C6 C6 C6 00 C5 00 C6 C6 C6 C6 00 C6 E7 C6 00 C6 C6 C6 C6 0E C5 0E C6 C6 C6 C6 0E C5 0E C6 C6
+C6 C6 C6 69 00 00 C6 C6 C6 C6 69 00 C2 00 69 C6 C6 C6 C6 0E 0E 0E C6 C6 C6 C6 0E 0E 0E C6 C6
+C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6
+C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6
+rawunder
+C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5
+C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6
+C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6
+C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6
+C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C9 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6
+C6 C6 C6 00 00 70 C6 C6 C6 C6 00 00 00 F5 00 C6 C6 C6 C6 00 00 70 C6 C6 C6 C6 72 00 70 C6 C6
+C6 C6 C6 00 C5 00 C6 C6 C6 C6 00 C5 00 C5 00 C6 C6 C6 C6 00 C5 00 C6 C6 C6 C6 00 C5 00 C6 C6
+C6 C6 C6 00 00 00 00 00 00 00 00 00 0E 0E 0E 0E 0E 0E 0E 0E 00 0E 0E 0E 0E 0E 0E 00 00 C6 C6
+C6 C6 C6 00 C5 00 C6 C6 C6 C6 00 C6 C6 C6 00 C6 C6 C6 C6 0E C5 0E C6 C6 C6 C6 0E C5 0E C6 C6
+C6 C6 C6 00 00 00 C6 C6 C6 C6 00 C6 C6 C6 00 C6 C6 C6 C6 0E 00 0E C6 C6 C6 C6 0E 00 0E C6 C6
+C6 C6 C6 00 C5 00 C6 C6 C6 C6 00 C6 E7 C6 00 C6 C6 C6 C6 0E C5 0E C6 C6 C6 C6 0E C5 0E C6 C6
+C6 C6 C6 70 00 00 C6 C6 C6 C6 70 00 00 00 70 C6 C6 C6 C6 0E 0E 0E C6 C6 C6 C6 0E 0E 0E C6 C6
+C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6
+C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6

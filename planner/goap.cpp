@@ -277,7 +277,7 @@ class Search {
     char t = w_.at(c, r);
     if (breakable(t)) {
       int s = softAt_[size_t(cellIdx(c, r))];
-      return w_.p.softpass || (s >= 0 && n.done[size_t(s)]);
+      return (w_.p.softpass && !w_.trapAt(c, r)) || (s >= 0 && n.done[size_t(s)]);
     }
     if (t == 'X' || t == 'x') return true;  // (moved off: blockOn above)
     if (t == 'O') return filled(n, c, r);

@@ -108,6 +108,12 @@ struct World {
   std::vector<char> map, under;  // cell classes, rows * cols
   std::vector<uint8_t> raw;      // tile codes (empty if the snapshot has none)
   std::vector<uint8_t> rawUnder; // CellItems codes (empty if none)
+  // Traps the agent shows as soft blocks (agent.cpp): a blast clears one,
+  // but P1 never walks one, softpass or not (empty: none marked). 1: a
+  // $63, the flame goes on past it; 2: a $4B, the flame stops there
+  // (docs/mechanics.md 3).
+  std::vector<uint8_t> traps;
+  bool trapAt(int c, int r) const { return !traps.empty() && inside(c, r) && traps[size_t(r * cols + c)]; }
 
   bool inside(int c, int r) const { return c >= 0 && r >= 0 && c < cols && r < rows; }
   // Outside the playfield is wall.

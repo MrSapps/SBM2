@@ -82,7 +82,8 @@ Live readLive(const uint8_t* wram);
 // wanted item (burnt). blast: those cells, if wanted.
 // needEnemy false: only P1, the gate and items out of it (a stale trap).
 bool remoteTrigger(const World& w, const std::vector<int>& order, std::vector<uint8_t>* blast = nullptr,
-                   bool needEnemy = true);
+                   bool needEnemy = true,
+                   bool gateOk = false);
 // Traps out and no enemy for this long (frames): they go off once P1 is clear.
 constexpr int kTrapWait = 600;
 // How long a soft block no bomb cell could reach stays routed around.

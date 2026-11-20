@@ -538,6 +538,12 @@ TEST("agent: remote with a bomb to spare: played to cover, no B; one bomb: B pla
   b.decide(w, liveOf(w), o);
   CHECK(b.what().find("soft ") == 0);
   CHECK(hasB(b));
+  {  // (and the move ends just after the blast, not 70 frames on in cover)
+    int lastB = -1;
+    for (size_t f = 0; f < b.pads().size(); f++)
+      if (b.pads()[f] & kPadB) lastB = int(f);
+    CHECK(lastB >= 0 && int(b.pads().size()) - 1 - lastB <= 8);
+  }
   // One left out already: this one sets both off (3-5: four laid in a row
   // went off one by one as stale traps).
   {
@@ -816,7 +822,8 @@ TEST("agent: a bomb move ends when its flames do, by the real press") {
   a.decide(w, liveOf(w), o);
   CHECK(a.committed());
   CHECK_EQ(a.pending(), 10 + 2 + 150 + kFlameFrames + 4);
-  // The remote: 30 frames past the set-off, then the flames.
+  // The remote: a few frames past the set-off (the blast is out; the next
+  // move is planned with its flames burning).
   w.p.remote = true;
   o.answer = [](const SimReq& q, SimOut& r) {
     r.dead = -1;
@@ -826,7 +833,16 @@ TEST("agent: a bomb move ends when its flames do, by the real press") {
   Agent b = agentFor("blocks");
   b.decide(w, liveOf(w), o);
   CHECK(b.committed());
-  CHECK_EQ(b.pending(), 41 + 30 + kFlameFrames);
+  CHECK_EQ(b.pending(), 41 + 6);
+  // A push: to the flames' end still (the block slides; 5-5).
+  World v = mk({"#######",
+                "#..XOP#",
+                "#g#####"}, 1, 1, "gate 1 2 closed\npanel 5 1 mode=0");
+  v.p.remote = true;
+  Agent c = agentFor("exit");
+  c.decide(v, liveOf(v), o);
+  CHECK(c.what().find("push 3,1") == 0);
+  CHECK_EQ(c.pending(), 41 + 30 + kFlameFrames);
 }
 
 // A flame on the gate brings enemies back; one on an item burns it. No
@@ -895,6 +911,18 @@ TEST("agent: remote trap: set off the oldest when an enemy is in its blast") {
   CHECK(remoteTrigger(e, order, nullptr, false));
   CHECK(!remoteTrigger(p, order, nullptr, false));
   CHECK(!remoteTrigger(gte, order, nullptr, false));
+  // P1 stuck behind it (gateOk): the gate in it is no bar (3-3, whole game:
+  // a trap in the one way down lit the gate; never set off, then a death).
+  World ge = e;
+  ge.hasGate = true, ge.gateC = 1, ge.gateR = 1;
+  CHECK(!remoteTrigger(ge, order, nullptr, false));
+  CHECK(remoteTrigger(ge, order, nullptr, false, true));
+  CHECK(!remoteTrigger(p, order, nullptr, false, true));  // (P1 still clear of it)
+  World gi = e;  // (a power-up in it: so be it, stuck)
+  gi.items.push_back({});
+  gi.items.back().c = 2, gi.items.back().r = 1, gi.items.back().kind = kItemFire;
+  CHECK(!remoteTrigger(gi, order, nullptr, false));
+  CHECK(remoteTrigger(gi, order, nullptr, false, true));
   // A bomb gone (set off) leaves the order; a new one goes last.
   World x = w;
   x.bombs.erase(x.bombs.begin());
@@ -999,6 +1027,13 @@ TEST("agent: remote: lay a trap for a kill; later moves press B past the traps")
   CHECK(st.takeLog().find("traps out") == std::string::npos);
   CHECK(st.trapStuck());
   CHECK(!a.trapStuck());
+  {  // (stuck, it goes even with the gate in its blast, once P1 is clear)
+    World sg = s2;
+    sg.hasGate = true, sg.gateC = 3, sg.gateR = 1;
+    sg.map[size_t(1 * sg.cols + 3)] = 'g';
+    sg.p.x = 7 * 16 + 8, sg.p.y = 3 * 16 + 8;
+    CHECK_EQ(st.trapCheck(sg), 2);
+  }
   // Two traps out (5-6, seed 1): the way out leaves both blasts, not just
   // the oldest's (in the newer one's, B is never pressed).
   World s3 = s2;
@@ -1862,6 +1897,199 @@ TEST("agent: final boss form 2: throw a bomb at it") {
   Agent n = agentFor("exit");
   n.decide(ng, l, o);
   CHECK(n.what().find("(throw") == std::string::npos);
+}
+
+// 3-1 in the whole game (d72e3f3, frame 409 of the cut): the panel (15,8)
+// is bombed only from (14,8), a pocket whose one way out is the speed-up
+// (14,7), not a wanted item. Its blast burns it, then runs up column 14 to
+// the gate: no move at all, 1000 frames in survive. Step onto the item.
+TEST("agent: a bomb spot's only way out is over an item: pick it up first") {
+  World w;
+  std::string err;
+  CHECK(loadWorld(sbm2test::worldsDir + "/3-1_speed_pocket.txt", w, &err));
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 2; };
+  Agent a = agentFor("powerups+exit");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.committed());
+  CHECK(a.what().find("walk to (14,7)") != std::string::npos);
+}
+
+// 3-7 in a world 3 run (frame 120 of the cut): three remote traps out, no
+// bomb kills the $A7 yet. Closing in swung between (3,6) and (4,8), each in
+// a trap's blast, so the stale rule never set one off: 108000 frames, the
+// timer. Close in to a cell clear of (and not next to) every trap blast.
+TEST("agent: closing in with traps out ends clear of their blasts") {
+  World w;
+  std::string err;
+  CHECK(loadWorld(sbm2test::worldsDir + "/3-7_traps_closing.txt", w, &err));
+  Live l = liveOf(w);
+  FakeOracle o;
+  o.answer = [&](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 2; r.enemies = l.enemies; r.hp = l.hp; };
+  Agent a = agentFor("powerups+exit");
+  a.decide(w, l, o);
+  CHECK(a.what().find("(closing in)") != std::string::npos);
+  CHECK(!o.seen.empty());
+  const SimReq& q = o.seen.back();
+  int ec = (q.path[q.path.size() - 2] & ~kWpFlags) / 16, er = q.path.back() / 16;
+  std::vector<int> order;
+  noteRemotes(w, order);
+  CHECK_EQ(order.size(), size_t(3));
+  std::vector<uint8_t> in;
+  remoteTrigger(w, order, &in, false, true);
+  for (auto& d : {std::pair<int, int>{0, 0}, {0, -1}, {0, 1}, {-1, 0}, {1, 0}})
+    CHECK(!in[size_t((er + d.second) * w.cols + ec + d.first)]);
+}
+
+// 2-5 in the whole game (frame 0 of the cut): the remote bomb at (5,7),
+// laid for panel 5,5, has the glove (4,7) in its blast and walls off the
+// rest: no plan, so "waiting for a blast" that B never brings (it would
+// burn the glove). 24000 frames, the timer. Fetch the glove first.
+TEST("agent: no plan with a remote bomb by a wanted item: fetch the item") {
+  World w;
+  std::string err;
+  CHECK(loadWorld(sbm2test::worldsDir + "/2-5_item_by_remote.txt", w, &err));
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 2; };
+  Agent a = agentFor("powerups+exit");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.committed());
+  CHECK(a.what().find("walk to (4,7)") != std::string::npos);
+}
+
+// 3-1 in the whole game (after the item-pocket fix, frame 0 of the cut):
+// P1 at (14,8) in a pocket of soft blocks; the stand (13,8) for the panel
+// (15,8) is a soft block bombed only from (14,8), which has no cover, and
+// a bomb can't go on the panel. Nothing else was tried: 14000 frames in
+// survive, the timer. Open the pocket: (14,9) breaks (14,7) and (14,10),
+// with cover at (15,8).
+TEST("agent: no way to the stand from a pocket: bomb the pocket open") {
+  World w;
+  std::string err;
+  CHECK(loadWorld(sbm2test::worldsDir + "/3-1_soft_pocket.txt", w, &err));
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 2; };
+  Agent a = agentFor("powerups+exit");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.committed());
+  CHECK(a.what().find("open the way to panel 15,8: bomb at (14,9), cover (15,8)") != std::string::npos);
+}
+
+// 4-2 in the whole game, with softpass: closing in ended in a soft block,
+// the next move stepped out of it, then closing in went back: 16000 frames,
+// the timer. Close in to open floor only.
+TEST("agent: with softpass, closing in never ends in a soft block") {
+  World w = mk({"#########",
+                "#.......#",
+                "#.#####.#",
+                "#.#%%%#.#",
+                "#.......#",
+                "#########"}, 1, 4,
+               "enemy slot=5 type=80 x=" + std::to_string(4 * 16 + 8) + " y=" + std::to_string(4 * 16 + 8) +
+                   " vx=0 vy=0 hp=1 spd=0.5");
+  w.p.softpass = 1;
+  w.p.fire = 1;
+  Live l = liveOf(w);
+  FakeOracle o;
+  o.answer = [&](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 2; r.enemies = l.enemies; r.hp = l.hp; };
+  Agent a = agentFor("enemies");
+  a.decide(w, l, o);
+
+  CHECK(a.what().find("(closing in)") != std::string::npos);
+  CHECK(!o.seen.empty());
+  const SimReq& q = o.seen.back();
+  int ec = (q.path[q.path.size() - 2] & ~kWpFlags) / 16, er = q.path.back() / 16;
+  CHECK(!breakable(w.at(ec, er)));
+}
+
+// 4-1 in the whole game (softpass; frame 0 of the cut): every enemy left
+// is dormant in a soft block, the $93 at (10,8) between the softs (10,7)
+// and (10,9), so no blast reaches its block and the wake step had no spot.
+// Closing in looped 15000 frames, the timer. Break a neighbour first.
+TEST("agent: a dormant enemy walled in by soft blocks: break one first") {
+  World w;
+  std::string err;
+  CHECK(loadWorld(sbm2test::worldsDir + "/4-1_wake_walled.txt", w, &err));
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 2; };
+  Agent a = agentFor("powerups+exit");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.committed());
+  CHECK(a.what().find("clear the way to wake kill 10,8") == 0);
+}
+
+// 5-5 in the whole game (frame 0 of the cut): every panel done, the gate
+// open; the plan's first step flips the light switch (optional) by a throw
+// from (4,6) to (4,10) that has no move. Without the glove there was no
+// plan, so the throw stayed: 17000 frames of survive. Leave the switch.
+TEST("agent: a failed throw with no plan without it: drop optional steps") {
+  World w;
+  std::string err;
+  CHECK(loadWorld(sbm2test::worldsDir + "/5-5_switch_throw.txt", w, &err));
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -2; };  // (only the exit "works")
+  Agent a = agentFor("powerups+exit");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.what().find("switch") == std::string::npos || !a.committed());
+  World w2 = w;
+  w2.frame += 60;
+  a.decide(w2, liveOf(w2), o);
+  CHECK(a.committed());
+  CHECK(a.what().find("gate 4,3") == 0);
+}
+
+// 5-6 in the whole game, softpass: traps ($63) are soft blocks to the
+// agent (bombed, not walked), and with softpass soft blocks are floor, so
+// every route walked onto a trap and died (21000 frames, the timer). The
+// way round, never over one.
+TEST("agent: softpass never routes over a trap") {
+  World w = mk({"#######",
+                "#.t..i#",
+                "#.###.#",
+                "#.....#",
+                "#######"}, 1, 1, "item 5 1 item kind=2");
+  w.p.softpass = 1;
+  FakeOracle o;
+  o.answer = [](const SimReq&, SimOut& r) { r.dead = -1; r.mapSig = 2; };
+  Agent a = agentFor("powerups+exit");
+  a.decide(w, liveOf(w), o);
+  CHECK(a.committed());
+  CHECK(!o.seen.empty());
+  auto crosses = [](const std::vector<int16_t>& p, int c, int r) {
+    for (size_t k = 0; k + 3 < p.size(); k += 2) {
+      int c0 = (p[k] & ~kWpFlags) / 16, r0 = p[k + 1] / 16, c1 = (p[k + 2] & ~kWpFlags) / 16, r1 = p[k + 3] / 16;
+      if (r0 == r1 && r0 == r && std::min(c0, c1) <= c && c <= std::max(c0, c1)) return true;
+      if (c0 == c1 && c0 == c && std::min(r0, r1) <= r && r <= std::max(r0, r1)) return true;
+    }
+    return false;
+  };
+  for (const SimReq& q : o.seen) CHECK(!crosses(q.path, 2, 1) && !crosses(q.path2, 2, 1));
+}
+
+// 5-6 in the whole game (softpass, frame 0 of the cut): two remote bombs
+// out, (2,27) and (3,24), wall off the way. A $63 trap is a soft block to
+// the agent, but a flame goes on past one (docs/mechanics.md 3): survive
+// kept P1 at (2,22), in the (2,27) blast through the trap at (2,25), so
+// B never went (23000 frames, the timer). The agent's blasts go past it.
+TEST("agent: a blast goes on past a $63 trap shown as a soft block") {
+  World w = mk({"#####",
+                "#...#",
+                "#.t.#",
+                "#...#",
+                "#####"}, 1, 1);
+  World c = w;
+  c.traps.assign(c.map.size(), 0);
+  c.traps[size_t(2 * c.cols + 2)] = 1;
+  c.map[size_t(2 * c.cols + 2)] = '%';
+  auto has = [](const std::vector<Cell>& v, int x, int y) {
+    for (const Cell& q : v)
+      if (q.c == x && q.r == y) return true;
+    return false;
+  };
+  CHECK(has(blastCells(c, 2, 3, 3, false), 2, 1));   // (up through the $63)
+  c.traps[size_t(2 * c.cols + 2)] = 2;                // (a $4B stops it)
+  CHECK(!has(blastCells(c, 2, 3, 3, false), 2, 1));
+  CHECK(has(blastCells(c, 2, 3, 3, false), 2, 2));
 }
 
 // 5-5 played on from 5-4 (frame 60 of the cut): the plan's one step is the

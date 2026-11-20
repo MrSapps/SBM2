@@ -13,6 +13,13 @@ void cellsInto(const World& w, int c, int r, int range, bool pierce, bool throug
       int cc = c + d[0] * k, rr = r + d[1] * k;
       if (!w.inside(cc, rr)) break;
       char t = w.at(cc, rr);
+      // (a $63 trap shown as a soft block: cleared, the flame goes on;
+      // 5-6, whole game: survive kept P1 in the blast of its own remote
+      // bomb through one, so B never went: 23000 frames, the timer)
+      if (t == '%' && w.trapAt(cc, rr) && w.traps[size_t(rr * w.cols + cc)] == 1) {
+        out.push_back({cc, rr});
+        continue;
+      }
       if (pierce && (t == '%' || t == 'i' || t == 'T')) {
         out.push_back({cc, rr});
         continue;

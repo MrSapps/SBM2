@@ -1,0 +1,75 @@
+worldview 1
+stage 36
+frame 120
+time 600
+origin 8 0
+size 17 14
+light none
+gate 8 3 closed
+player x=56 y=103 dir=- hearts=1 flash=0 bombs=2 maxbombs=5 e0=2 fire=7 pierce=0 remote=1 glove=1 softpass=0 lock=0000 ride=0 f4=0600 f60=0000
+bomb c=6 r=5 fuse=144 range=7 owner=p1 remote=1 pierce=0 magnet=0 slot=0 flags=80
+bomb c=2 r=6 fuse=144 range=7 owner=p1 remote=1 pierce=0 magnet=0 slot=1 flags=80
+bomb c=4 r=5 fuse=144 range=7 owner=p1 remote=1 pierce=0 magnet=0 slot=2 flags=80
+enemy slot=4 type=C0 x=136 y=55 vx=0 vy=0 step=- target=0,0 wait=0 hp=0 f4=0C00 c0=0000 d0=0000 be=0000 bc=0000 ba=0000 off=0
+enemy slot=5 type=A7 x=56 y=135 vx=0 vy=0 step=r target=3,8 wait=0 hp=1 f4=0C00 c0=8000 d0=0000 be=0000 bc=0000 ba=0000 off=0 spd=1
+hidden 11 8 kind=0
+map
+#################
+#################
+#################
+########g########
+##.............##
+##.#b#b#.#%#%#.##
+##b..........%.##
+##.#.#.#.#.#.#.##
+##...%.....%...##
+##.#.#.#.#.#.#.##
+##.............##
+##.#.#.#.#%#.#.##
+##.............##
+#################
+under
+#################
+#################
+#################
+########g########
+##.............##
+##.#.#.#.#.#.#.##
+##.............##
+##.#.#.#.#.#.#.##
+##.............##
+##.#.#.#.#.#.#.##
+##.............##
+##.#.#.#.#.#.#.##
+##.............##
+#################
+raw
+C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5
+C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6
+C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6
+C6 C6 C6 C6 C6 C6 C6 C6 C9 C6 C6 C6 C6 C6 C6 C6 C6
+C6 C6 00 00 00 00 00 00 00 00 00 00 00 00 00 C6 C6
+C6 C6 00 C5 43 C5 43 C5 00 C5 C2 C5 C2 C5 00 C6 C6
+C6 C6 43 00 00 00 00 00 00 00 00 00 00 C2 00 C6 C6
+C6 C6 00 C5 00 C5 00 C5 00 C5 00 C5 00 C5 00 C6 C6
+C6 C6 00 00 00 C2 00 00 00 00 00 C2 00 00 00 C6 C6
+C6 C6 00 C5 00 C5 00 C5 00 C5 00 C5 00 C5 00 C6 C6
+C6 C6 00 00 00 00 00 00 00 00 00 00 00 00 00 C6 C6
+C6 C6 00 C5 00 C5 00 C5 00 C5 C2 C5 00 C5 00 C6 C6
+C6 C6 00 00 00 00 00 00 00 00 00 00 00 00 00 C6 C6
+C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6
+rawunder
+C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5 C5
+C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6
+C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6
+C6 C6 C6 C6 C6 C6 C6 C6 C9 C6 C6 C6 C6 C6 C6 C6 C6
+C6 C6 00 00 00 00 00 00 00 00 00 00 00 00 00 C6 C6
+C6 C6 00 C5 00 C5 00 C5 00 C5 00 C5 00 C5 00 C6 C6
+C6 C6 00 00 00 00 00 00 00 00 00 00 00 00 00 C6 C6
+C6 C6 00 C5 00 C5 00 C5 00 C5 00 C5 00 C5 00 C6 C6
+C6 C6 00 00 00 00 00 00 00 00 00 00 00 00 00 C6 C6
+C6 C6 00 C5 00 C5 00 C5 00 C5 00 C5 00 C5 00 C6 C6
+C6 C6 00 00 00 00 00 00 00 00 00 00 00 00 00 C6 C6
+C6 C6 00 C5 00 C5 00 C5 00 C5 00 C5 00 C5 00 C6 C6
+C6 C6 00 00 00 00 00 00 00 00 00 00 00 00 00 C6 C6
+C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6 C6
